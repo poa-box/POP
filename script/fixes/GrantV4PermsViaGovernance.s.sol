@@ -294,7 +294,10 @@ abstract contract GrantBase is Script {
     /// Assumes v4 has already been broadcast (run UpgradeTaskManagerFolders
     /// Step1+Step2+Step3 first). Does NOT simulate voting; that's done by
     /// org members in the normal cadence after this proposal exists.
-    function _runBroadcast(string memory orgName, address tm, address hv, uint256 targetHat) internal {
+    /// @param durationMinutes Voting window in minutes. MIN=10, MAX=43200.
+    function _runBroadcast(string memory orgName, address tm, address hv, uint256 targetHat, uint32 durationMinutes)
+        internal
+    {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         address sender = vm.addr(key);
 
@@ -303,7 +306,7 @@ abstract contract GrantBase is Script {
         console.log("  TaskManager:   ", tm);
         console.log("  HybridVoting:  ", hv);
         console.log("  Target hat:    ", targetHat);
-        console.log("  Duration:      ", PROPOSAL_DURATION_MINUTES, "minutes");
+        console.log("  Duration:      ", durationMinutes, "minutes");
 
         // Sanity: sender must wear a creator hat or createProposal reverts NotCreator.
         IHatsMinimal hats = IHatsMinimal(abi.decode(TaskManager(tm).getLensData(3, ""), (address)));
@@ -329,7 +332,7 @@ abstract contract GrantBase is Script {
             .createProposal(
                 bytes(string.concat("Grant v4 perms - ", orgName)),
                 bytes32(0),
-                PROPOSAL_DURATION_MINUTES,
+                durationMinutes,
                 1, // single option
                 batches,
                 new uint256[](0) // unrestricted — anyone with class hats can vote
@@ -343,7 +346,12 @@ abstract contract GrantBase is Script {
     }
 }
 
-uint32 constant PROPOSAL_DURATION_MINUTES = 4320; // 3 days
+// Per-org durations. KUBI was broadcast at 4320 (3 days); kept at that value
+// for the source-history record. Test6 + Poa are short-lived test/governance
+// orgs so the proposals can run on a tighter cadence.
+uint32 constant KUBI_DURATION_MINUTES = 4320; // 3 days
+uint32 constant TEST6_DURATION_MINUTES = 30; // 30 minutes
+uint32 constant POA_DURATION_MINUTES = 30; // 30 minutes
 
 interface IHatsMinimal {
     function balanceOf(address user, uint256 hatId) external view returns (uint256);
@@ -359,7 +367,7 @@ contract SimGrantKubi is GrantBase {
 
 contract BroadcastGrantKubi is GrantBase {
     function run() public {
-        _runBroadcast("KUBI", KUBI_TM, KUBI_HV, KUBI_EXEC_HAT);
+        _runBroadcast("KUBI", KUBI_TM, KUBI_HV, KUBI_EXEC_HAT, KUBI_DURATION_MINUTES);
     }
 }
 
@@ -373,7 +381,7 @@ contract SimGrantTest6 is GrantBase {
 
 contract BroadcastGrantTest6 is GrantBase {
     function run() public {
-        _runBroadcast("Test6", TEST6_TM, TEST6_HV, TEST6_EXEC_HAT);
+        _runBroadcast("Test6", TEST6_TM, TEST6_HV, TEST6_EXEC_HAT, TEST6_DURATION_MINUTES);
     }
 }
 
@@ -387,6 +395,6 @@ contract SimGrantPoa is GrantBase {
 
 contract BroadcastGrantPoa is GrantBase {
     function run() public {
-        _runBroadcast("Poa", POA_TM, POA_HV, POA_CONTRIBUTOR_HAT);
+        _runBroadcast("Poa", POA_TM, POA_HV, POA_CONTRIBUTOR_HAT, POA_DURATION_MINUTES);
     }
 }
