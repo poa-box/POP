@@ -4583,21 +4583,22 @@ contract MockToken is Test, IERC20 {
             }
 
             function test_SetBountyCapPermissions() public {
-                // Only executor can set bounty caps
+                // Without the BUDGET perm, hats with other roles (creator, PM, member)
+                // cannot resize a bounty cap — they get Unauthorized.
                 vm.prank(creator1);
-                vm.expectRevert(TaskManager.NotExecutor.selector);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.setConfig(
                     TaskManager.ConfigKey.BOUNTY_CAP, abi.encode(BUDGET_PROJECT_ID, address(bountyToken1), 5 ether)
                 );
 
                 vm.prank(pm1);
-                vm.expectRevert(TaskManager.NotExecutor.selector);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.setConfig(
                     TaskManager.ConfigKey.BOUNTY_CAP, abi.encode(BUDGET_PROJECT_ID, address(bountyToken1), 5 ether)
                 );
 
                 vm.prank(member1);
-                vm.expectRevert(TaskManager.NotExecutor.selector);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.setConfig(
                     TaskManager.ConfigKey.BOUNTY_CAP, abi.encode(BUDGET_PROJECT_ID, address(bountyToken1), 5 ether)
                 );
@@ -4615,6 +4616,166 @@ contract MockToken is Test, IERC20 {
                 );
                 (uint256 cap, uint256 spent) = abi.decode(result, (uint256, uint256));
                 assertEq(cap, 5 ether, "Executor should be able to set bounty cap");
+            }
+
+            /*───────────────── EDITABLE BUDGETS (TaskPerm.BUDGET) ───────────────────*/
+
+            function test_BudgetEditByHatHolder_PT() public {
+                uint256 BUDGET_HAT = 50;
+                address budgetEditor = makeAddr("budgetEditor");
+                setHat(budgetEditor, BUDGET_HAT);
+
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+
+                vm.prank(budgetEditor);
+                vm.expectEmit(true, false, false, true);
+                emit TaskManager.ProjectCapUpdated(BUDGET_PROJECT_ID, 10 ether, 20 ether);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(BUDGET_PROJECT_ID, 20 ether));
+            }
+
+            function test_BudgetEditByHatHolder_Bounty() public {
+                uint256 BUDGET_HAT = 50;
+                address budgetEditor = makeAddr("budgetEditor");
+                setHat(budgetEditor, BUDGET_HAT);
+
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+
+                vm.prank(budgetEditor);
+                vm.expectEmit(true, true, false, true);
+                emit TaskManager.BountyCapSet(BUDGET_PROJECT_ID, address(bountyToken1), type(uint128).max, 7 ether);
+                tm.setConfig(
+                    TaskManager.ConfigKey.BOUNTY_CAP, abi.encode(BUDGET_PROJECT_ID, address(bountyToken1), 7 ether)
+                );
+            }
+
+            function test_BudgetEditByProjectScopedHat() public {
+                uint256 BUDGET_HAT = 50;
+                address budgetEditor = makeAddr("budgetEditor");
+                setHat(budgetEditor, BUDGET_HAT);
+
+                // Grant BUDGET only on BUDGET_PROJECT_ID (not on UNLIMITED_PROJECT_ID).
+                vm.prank(creator1);
+                tm.setProjectRolePerm(BUDGET_PROJECT_ID, BUDGET_HAT, TaskPerm.BUDGET);
+
+                vm.prank(budgetEditor);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(BUDGET_PROJECT_ID, 20 ether));
+
+                vm.prank(budgetEditor);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(UNLIMITED_PROJECT_ID, 20 ether));
+            }
+
+            function test_BudgetEditByProjectManager_RevertsWithoutHat() public {
+                // Make pm1 a project manager on BUDGET_PROJECT_ID (no BUDGET hat).
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(BUDGET_PROJECT_ID, pm1, true));
+
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(BUDGET_PROJECT_ID, 20 ether));
+
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.setConfig(
+                    TaskManager.ConfigKey.BOUNTY_CAP, abi.encode(BUDGET_PROJECT_ID, address(bountyToken1), 5 ether)
+                );
+            }
+
+            function test_BudgetEditWithoutPermReverts() public {
+                address nobody = makeAddr("nobody");
+
+                vm.prank(nobody);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(BUDGET_PROJECT_ID, 20 ether));
+
+                vm.prank(nobody);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.setConfig(
+                    TaskManager.ConfigKey.BOUNTY_CAP, abi.encode(BUDGET_PROJECT_ID, address(bountyToken1), 5 ether)
+                );
+            }
+
+            function test_BudgetEditByExecutor_StillWorks() public {
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(BUDGET_PROJECT_ID, 20 ether));
+
+                vm.prank(executor);
+                tm.setConfig(
+                    TaskManager.ConfigKey.BOUNTY_CAP, abi.encode(BUDGET_PROJECT_ID, address(bountyToken1), 6 ether)
+                );
+            }
+
+            function test_BudgetEditCannotLowerBelowSpent() public {
+                uint256 BUDGET_HAT = 50;
+                address budgetEditor = makeAddr("budgetEditor");
+                setHat(budgetEditor, BUDGET_HAT);
+
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+
+                // Consume 2 ether of PT on BUDGET_PROJECT_ID (cap = 10 ether).
+                vm.prank(creator1);
+                tm.createTask(2 ether, bytes("burn"), bytes32(0), BUDGET_PROJECT_ID, address(0), 0, false);
+
+                // Hat-holder cannot lower cap below committed spend.
+                vm.prank(budgetEditor);
+                vm.expectRevert(ValidationLib.CapBelowCommitted.selector);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(BUDGET_PROJECT_ID, 1 ether));
+            }
+
+            function test_SetConfigRolePerm_EmitsRolePermSet() public {
+                uint256 BUDGET_HAT = 50;
+
+                // Grant: executor sets BUDGET on hat -> event fires with mask=BUDGET.
+                vm.expectEmit(true, false, false, true, address(tm));
+                emit TaskManager.RolePermSet(BUDGET_HAT, TaskPerm.BUDGET);
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+
+                // Revoke: setting mask=0 fires the event with mask=0 so indexers see the clear.
+                vm.expectEmit(true, false, false, true, address(tm));
+                emit TaskManager.RolePermSet(BUDGET_HAT, 0);
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, uint8(0)));
+            }
+
+            function test_SetConfigOtherKeysStillExecutorOnly() public {
+                uint256 BUDGET_HAT = 50;
+                address budgetEditor = makeAddr("budgetEditor");
+                setHat(budgetEditor, BUDGET_HAT);
+
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+
+                // EXECUTOR key — still executor-only.
+                vm.prank(budgetEditor);
+                vm.expectRevert(TaskManager.NotExecutor.selector);
+                tm.setConfig(TaskManager.ConfigKey.EXECUTOR, abi.encode(makeAddr("newExec")));
+
+                // CREATOR_HAT_ALLOWED key — still executor-only.
+                vm.prank(budgetEditor);
+                vm.expectRevert(TaskManager.NotExecutor.selector);
+                tm.setConfig(TaskManager.ConfigKey.CREATOR_HAT_ALLOWED, abi.encode(uint256(123), true));
+
+                // ROLE_PERM key — still executor-only (callers must not be able to grant themselves perms).
+                vm.prank(budgetEditor);
+                vm.expectRevert(TaskManager.NotExecutor.selector);
+                tm.setConfig(
+                    TaskManager.ConfigKey.ROLE_PERM, abi.encode(uint256(99), TaskPerm.CREATE | TaskPerm.BUDGET)
+                );
+
+                // PROJECT_MANAGER key — still executor-only.
+                vm.prank(budgetEditor);
+                vm.expectRevert(TaskManager.NotExecutor.selector);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(BUDGET_PROJECT_ID, member1, true));
+
+                // ORGANIZER_HAT_ALLOWED key — still executor-only (auto-merge of folders + budgets PRs
+                // accidentally dropped this gate; this test locks it down).
+                vm.prank(budgetEditor);
+                vm.expectRevert(TaskManager.NotExecutor.selector);
+                tm.setConfig(TaskManager.ConfigKey.ORGANIZER_HAT_ALLOWED, abi.encode(uint256(789), true));
             }
 
             function test_SetBountyCapValidation() public {
@@ -7160,5 +7321,210 @@ contract MockToken is Test, IERC20 {
                 bytes memory result = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(0));
                 (,,, bytes32 projectId,) = abi.decode(result, (uint256, TaskManager.Status, address, bytes32, bool));
                 assertEq(projectId, PID, "id 0 must be the post-revert task: counter did not advance");
+            }
+        }
+
+        /*──────────────── Folders + Organizer Hat ────────────────*/
+        contract TaskManagerFoldersTest is TaskManagerTestBase {
+            uint256 constant ORGANIZER_HAT = 99;
+            address organizer = makeAddr("organizer");
+            address randomUser = makeAddr("randomUser");
+            bytes32 ROOT_A = keccak256("folders-root-a");
+            bytes32 ROOT_B = keccak256("folders-root-b");
+            bytes32 PID;
+
+            function setUp() public {
+                setUpBase();
+                setHat(organizer, ORGANIZER_HAT);
+                // Designate ORGANIZER_HAT as an authorized folders organizer.
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ORGANIZER_HAT_ALLOWED, abi.encode(ORGANIZER_HAT, true));
+                PID = _createDefaultProject("FOLDERS_PROJ", 0);
+            }
+
+            function _foldersRoot() internal view returns (bytes32 root) {
+                bytes memory data = tm.getLensData(10, "");
+                root = abi.decode(data, (bytes32));
+            }
+
+            function _organizerHats() internal view returns (uint256[] memory hats_) {
+                bytes memory data = tm.getLensData(11, "");
+                hats_ = abi.decode(data, (uint256[]));
+            }
+
+            /*───────── happy paths ─────────*/
+
+            function test_SetFolders_ByExecutor_Succeeds() public {
+                vm.prank(executor);
+                tm.setFolders(bytes32(0), ROOT_A);
+                assertEq(_foldersRoot(), ROOT_A, "root should be ROOT_A");
+            }
+
+            function test_SetFolders_ByOrganizerHat_Succeeds() public {
+                vm.prank(organizer);
+                tm.setFolders(bytes32(0), ROOT_A);
+                assertEq(_foldersRoot(), ROOT_A);
+
+                // organizer can also chain a follow-up update with the current root
+                vm.prank(organizer);
+                tm.setFolders(ROOT_A, ROOT_B);
+                assertEq(_foldersRoot(), ROOT_B);
+            }
+
+            function test_SetFolders_ZeroRootClear_Allowed() public {
+                vm.prank(organizer);
+                tm.setFolders(bytes32(0), ROOT_A);
+
+                vm.prank(organizer);
+                tm.setFolders(ROOT_A, bytes32(0));
+                assertEq(_foldersRoot(), bytes32(0), "root should clear to zero");
+            }
+
+            function test_SetFolders_EmitsFoldersUpdated_OldAndNewRoots() public {
+                vm.expectEmit(true, true, true, false, address(tm));
+                emit TaskManager.FoldersUpdated(ROOT_A, bytes32(0), organizer);
+                vm.prank(organizer);
+                tm.setFolders(bytes32(0), ROOT_A);
+
+                vm.expectEmit(true, true, true, false, address(tm));
+                emit TaskManager.FoldersUpdated(ROOT_B, ROOT_A, executor);
+                vm.prank(executor);
+                tm.setFolders(ROOT_A, ROOT_B);
+            }
+
+            /*───────── permission strictness ─────────*/
+
+            function test_RevertWhen_SetFolders_ByCreatorHat() public {
+                // creator1 wears CREATOR_HAT but not ORGANIZER_HAT — must revert.
+                vm.prank(creator1);
+                vm.expectRevert(TaskManager.NotOrganizer.selector);
+                tm.setFolders(bytes32(0), ROOT_A);
+            }
+
+            function test_RevertWhen_SetFolders_ByProjectManager() public {
+                // Make pm1 a project manager on PID and prove that still doesn't grant folder rights.
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(PID, pm1, true));
+
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.NotOrganizer.selector);
+                tm.setFolders(bytes32(0), ROOT_A);
+            }
+
+            function test_RevertWhen_SetFolders_ByRandom() public {
+                vm.prank(randomUser);
+                vm.expectRevert(TaskManager.NotOrganizer.selector);
+                tm.setFolders(bytes32(0), ROOT_A);
+            }
+
+            /*───────── CAS guard ─────────*/
+
+            function test_RevertWhen_SetFolders_StaleExpectedRoot() public {
+                vm.prank(organizer);
+                tm.setFolders(bytes32(0), ROOT_A);
+
+                // Caller still thinks current is bytes32(0) — must revert with FoldersRootStale.
+                vm.prank(organizer);
+                vm.expectRevert(abi.encodeWithSelector(TaskManager.FoldersRootStale.selector, bytes32(0), ROOT_A));
+                tm.setFolders(bytes32(0), ROOT_B);
+
+                // Storage unchanged.
+                assertEq(_foldersRoot(), ROOT_A, "state must be unchanged after stale revert");
+            }
+
+            /*───────── organizer hat config plumbing ─────────*/
+
+            function test_RevertWhen_SetConfig_OrganizerHatAllowed_NonExecutor() public {
+                vm.prank(organizer);
+                vm.expectRevert(TaskManager.NotExecutor.selector);
+                tm.setConfig(TaskManager.ConfigKey.ORGANIZER_HAT_ALLOWED, abi.encode(uint256(42), true));
+            }
+
+            function test_SetConfig_OrganizerHatAllowed_AddRemove_RoundTrip() public {
+                // Setup added ORGANIZER_HAT already. Add a second hat.
+                uint256 secondHat = 42;
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ORGANIZER_HAT_ALLOWED, abi.encode(secondHat, true));
+
+                uint256[] memory after_ = _organizerHats();
+                assertEq(after_.length, 2, "should have two organizer hats");
+
+                // Remove the original.
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ORGANIZER_HAT_ALLOWED, abi.encode(ORGANIZER_HAT, false));
+
+                uint256[] memory after2 = _organizerHats();
+                assertEq(after2.length, 1, "should have one organizer hat left");
+                assertEq(after2[0], secondHat, "remaining hat should be the second one");
+
+                // Original wearer can no longer reorganize.
+                vm.prank(organizer);
+                vm.expectRevert(TaskManager.NotOrganizer.selector);
+                tm.setFolders(bytes32(0), ROOT_A);
+            }
+
+            function test_SetConfig_OrganizerHatAllowed_EmitsEvent() public {
+                uint256 newHat = 77;
+                vm.expectEmit(true, false, false, true, address(tm));
+                emit TaskManager.OrganizerHatAllowed(newHat, true);
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ORGANIZER_HAT_ALLOWED, abi.encode(newHat, true));
+            }
+
+            /*───────── lens ─────────*/
+
+            function test_GetLensData_FoldersRoot_DefaultsToZero() public view {
+                assertEq(_foldersRoot(), bytes32(0), "fresh deploy should have zero root");
+            }
+
+            function test_GetLensData_OrganizerHats_ReturnsArray() public view {
+                uint256[] memory hats_ = _organizerHats();
+                assertEq(hats_.length, 1, "should have one organizer hat from setUp");
+                assertEq(hats_[0], ORGANIZER_HAT, "should be ORGANIZER_HAT");
+            }
+
+            /*───────── cross-feature integration ─────────*/
+
+            /// @dev Locks in that the two new features (editable budgets via TaskPerm.BUDGET
+            /// and folders via organizerHatIds) are independent: a BUDGET-hat wearer cannot
+            /// touch folders, and an organizer-hat wearer cannot touch budgets. They share
+            /// the same setConfig dispatcher and the same Layout struct, so this guards
+            /// against regressions where the per-branch refactor accidentally cross-wires
+            /// permission paths.
+            function test_BudgetAndFolders_HatsAreIndependent() public {
+                uint256 BUDGET_HAT = 100;
+                address budgetEditor = makeAddr("budgetEditor");
+                setHat(budgetEditor, BUDGET_HAT);
+
+                // Executor grants the BUDGET perm to its hat.
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+
+                // BUDGET-hat wearer CAN edit the project's PT cap.
+                vm.prank(budgetEditor);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(PID, uint256(50 ether)));
+
+                // BUDGET-hat wearer CANNOT publish folders (no organizer hat).
+                vm.prank(budgetEditor);
+                vm.expectRevert(TaskManager.NotOrganizer.selector);
+                tm.setFolders(bytes32(0), ROOT_A);
+
+                // Organizer-hat wearer CANNOT edit budget (no BUDGET hat).
+                vm.prank(organizer);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(PID, uint256(75 ether)));
+
+                // Organizer-hat wearer CAN publish folders.
+                vm.prank(organizer);
+                tm.setFolders(bytes32(0), ROOT_A);
+                assertEq(_foldersRoot(), ROOT_A, "organizer should be able to set folders");
+
+                // Both wearers can chain their respective updates in the same session.
+                vm.prank(organizer);
+                tm.setFolders(ROOT_A, ROOT_B);
+                assertEq(_foldersRoot(), ROOT_B);
+
+                vm.prank(budgetEditor);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(PID, uint256(100 ether)));
             }
         }

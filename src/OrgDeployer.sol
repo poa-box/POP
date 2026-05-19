@@ -867,8 +867,8 @@ contract OrgDeployer is Initializable {
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
     {
-        // Count: QuickJoin(6) + TaskManager(13) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4)
-        uint256 count = 40;
+        // Count: QuickJoin(6) + TaskManager(14) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4)
+        uint256 count = 41;
         if (educationEnabled) count += 4;
 
         targets = new address[](count);
@@ -984,6 +984,11 @@ contract OrgDeployer is Initializable {
         i++;
         targets[i] = tm;
         selectors[i] = bytes4(keccak256("deleteProject(bytes32)"));
+        i++;
+        // TaskManager v4: setFolders is gated on executor OR organizerHatIds wearer;
+        // whitelist for gasless 4337/passkey calls by organizer-hat holders.
+        targets[i] = tm;
+        selectors[i] = bytes4(keccak256("setFolders(bytes32,bytes32)"));
         i++;
         return i;
     }

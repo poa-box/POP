@@ -29,21 +29,42 @@ contract TaskManager is Initializable, ContextUpgradeable {
     using ValidationLib for bytes;
 
     /*──────── Errors ───────*/
+    /// @notice Project or task ID does not exist (or task id beyond `nextTaskId`).
     error NotFound();
+    /// @notice Task status forbids this transition (e.g. completing an unclaimed task).
     error BadStatus();
+    /// @notice Caller does not wear any creator hat and is not the executor.
     error NotCreator();
+    /// @notice Caller is not the task's current claimer.
     error NotClaimer();
+    /// @notice Caller is not the configured executor.
     error NotExecutor();
+    /// @notice Caller is not the bootstrap deployer (or bootstrap phase is over).
     error NotDeployer();
+    /// @notice Caller lacks the hat-derived permission and is not a project manager.
     error Unauthorized();
+    /// @notice Address has not applied to this task.
     error NotApplicant();
+    /// @notice Applicant has already submitted an application for this task.
     error AlreadyApplied();
+    /// @notice Task is application-only; caller used the direct-claim path.
     error RequiresApplication();
+    /// @notice Task does not accept applications; caller used the application path.
     error NoApplicationRequired();
+    /// @notice Bootstrap task referenced a project index outside the project array.
     error InvalidIndex();
+    /// @notice Claimer attempted to complete their own task without SELF_REVIEW permission.
     error SelfReviewNotAllowed();
+    /// @notice Parallel calldata arrays have mismatched lengths.
     error ArrayLengthMismatch();
+    /// @notice Batch input array is empty.
     error EmptyBatch();
+    /// @notice Caller is neither the executor nor a wearer of any organizer hat.
+    error NotOrganizer();
+    /// @notice CAS guard: caller-supplied current folders root does not match storage.
+    /// @param expected Root the caller believed was current.
+    /// @param actual   Root that is actually current on-chain.
+    error FoldersRootStale(bytes32 expected, bytes32 actual);
 
     /*──────── Constants ─────*/
     bytes4 public constant MODULE_ID = 0x54534b32; // "TSK2"
@@ -60,7 +81,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
         PROJECT_ROLE_PERM,
         BOUNTY_CAP,
         PROJECT_MANAGER,
-        PROJECT_CAP
+        PROJECT_CAP,
+        ORGANIZER_HAT_ALLOWED
     }
 
     /*──────── Data Types ────*/
@@ -141,6 +163,11 @@ contract TaskManager is Initializable, ContextUpgradeable {
         mapping(uint256 => mapping(address => bytes32)) taskApplications; // task ID => applicant => application hash
         address deployer; // OrgDeployer address for bootstrap operations
         mapping(uint256 => uint256) projectPermHatRefCount; // hat ID => number of projects with non-zero project mask
+        // ─── Folders (v3) ───
+        // Folder tree (names, parents, ordering, project assignments) lives off-chain in IPFS.
+        // Only the root hash is on-chain; reorganization = swap the hash via setFolders.
+        bytes32 foldersRoot;
+        uint256[] organizerHatIds; // hats authorized to reorganize the folder tree
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.taskmanager.storage");
@@ -153,14 +180,32 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Events ───────*/
+    /// @notice A role hat of `hatType` was added or removed from its enumeration array.
     event HatSet(HatType hatType, uint256 hat, bool allowed);
+    /// @notice A project was created. `metadataHash` is an IPFS CID — not stored on-chain.
     event ProjectCreated(bytes32 indexed id, bytes title, bytes32 metadataHash, uint256 cap);
+    /// @notice The participation-token cap on a project changed.
     event ProjectCapUpdated(bytes32 indexed id, uint256 oldCap, uint256 newCap);
+    /// @notice A project manager was added or removed.
     event ProjectManagerUpdated(bytes32 indexed id, address indexed manager, bool isManager);
+    /// @notice A project and all of its hat-permission overrides were deleted.
     event ProjectDeleted(bytes32 indexed id);
+    /// @notice A hat's project-specific permission mask was updated.
     event ProjectRolePermSet(bytes32 indexed id, uint256 indexed hatId, uint8 mask);
+    /// @notice A hat's GLOBAL permission mask changed via `setConfig(ROLE_PERM, ...)`.
+    /// @dev Mirrors `ProjectRolePermSet` minus the project id. Indexers track which
+    ///      hats have which `TaskPerm` bits at the org level; `setProjectRolePerm`
+    ///      handles the per-project override.
+    event RolePermSet(uint256 indexed hatId, uint8 mask);
+    /// @notice A per-project bounty-token cap changed.
     event BountyCapSet(bytes32 indexed projectId, address indexed token, uint256 oldCap, uint256 newCap);
+    /// @notice The IPFS root for this org's folder tree changed.
+    /// @dev Subgraph consumers resolve the JSON off-chain at `newRoot`. `oldRoot` lets indexers chain revisions.
+    event FoldersUpdated(bytes32 indexed newRoot, bytes32 indexed oldRoot, address indexed sender);
+    /// @notice A hat was added to or removed from the organizer-hat array.
+    event OrganizerHatAllowed(uint256 indexed hatId, bool allowed);
 
+    /// @notice A new task was created under `project`.
     event TaskCreated(
         uint256 indexed id,
         bytes32 indexed project,
@@ -171,17 +216,27 @@ contract TaskManager is Initializable, ContextUpgradeable {
         bytes title,
         bytes32 metadataHash
     );
+    /// @notice An unclaimed task's mutable fields were updated.
     event TaskUpdated(
         uint256 indexed id, uint256 payout, address bountyToken, uint256 bountyPayout, bytes title, bytes32 metadataHash
     );
+    /// @notice A claimer submitted work for review.
     event TaskSubmitted(uint256 indexed id, bytes32 submissionHash);
+    /// @notice A task was claimed by `claimer`.
     event TaskClaimed(uint256 indexed id, address indexed claimer);
+    /// @notice A task was assigned to `assignee` by `assigner` (bypasses claim flow).
     event TaskAssigned(uint256 indexed id, address indexed assignee, address indexed assigner);
+    /// @notice A task was marked completed and payouts/bounties were dispatched.
     event TaskCompleted(uint256 indexed id, address indexed completer);
+    /// @notice A task was cancelled and its budget reservations rolled back.
     event TaskCancelled(uint256 indexed id, address indexed canceller);
+    /// @notice A submitted task was rejected and reverted to CLAIMED for resubmission.
     event TaskRejected(uint256 indexed id, address indexed rejector, bytes32 rejectionHash);
+    /// @notice An applicant submitted an application for a task that requires one.
     event TaskApplicationSubmitted(uint256 indexed id, address indexed applicant, bytes32 applicationHash);
+    /// @notice An application was approved and the task moved to CLAIMED for `applicant`.
     event TaskApplicationApproved(uint256 indexed id, address indexed applicant, address indexed approver);
+    /// @notice The executor address was set or changed.
     event ExecutorUpdated(address newExecutor);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -190,6 +245,15 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Initialiser ───────*/
+    /**
+     * @notice One-time proxy initializer. Wires the org's PT, Hats, executor, and
+     *         (optional) bootstrap deployer; seeds the creator-hat array.
+     * @param tokenAddress    Participation token (must implement `mint`).
+     * @param hatsAddress     Hats Protocol contract.
+     * @param creatorHats     Initial hat IDs allowed to create projects.
+     * @param executorAddress Executor address (DAO execution layer).
+     * @param deployerAddress OrgDeployer address for `bootstrapProjectsAndTasks`; may be zero.
+     */
     function initialize(
         address tokenAddress,
         address hatsAddress,
@@ -222,28 +286,42 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Internal Check Functions ─────*/
+    /// @dev Caller must wear a creator hat or be the executor; reverts NotCreator otherwise.
     function _requireCreator() internal view {
         Layout storage l = _layout();
         address s = _msgSender();
         if (!_hasCreatorHat(s) && s != l.executor) revert NotCreator();
     }
 
+    /// @dev Reverts NotFound if the project does not exist.
     function _requireProjectExists(bytes32 pid) internal view {
         if (!_layout()._projects[pid].exists) revert NotFound();
     }
 
+    /// @dev Reverts NotExecutor if the caller is not the configured executor.
     function _requireExecutor() internal view {
         if (_msgSender() != _layout().executor) revert NotExecutor();
     }
 
+    /// @dev Caller must be the executor or wear any hat in `organizerHatIds`; reverts NotOrganizer otherwise.
+    function _requireOrganizer() internal view {
+        Layout storage l = _layout();
+        address s = _msgSender();
+        if (s == l.executor) return;
+        if (!HatManager.hasAnyHat(l.hats, l.organizerHatIds, s)) revert NotOrganizer();
+    }
+
+    /// @dev Caller must hold CREATE permission on `pid` (or be a project manager / executor).
     function _requireCanCreate(bytes32 pid) internal view {
         _checkPerm(pid, TaskPerm.CREATE);
     }
 
+    /// @dev Caller must hold CLAIM permission on the task's project.
     function _requireCanClaim(uint256 tid) internal view {
         _checkPerm(_layout()._tasks[tid].projectId, TaskPerm.CLAIM);
     }
 
+    /// @dev Caller must hold ASSIGN permission on `pid`.
     function _requireCanAssign(bytes32 pid) internal view {
         _checkPerm(pid, TaskPerm.ASSIGN);
     }
@@ -333,6 +411,12 @@ contract TaskManager is Initializable, ContextUpgradeable {
         }
     }
 
+    /**
+     * @notice Delete a project and clear every hat's project-specific permission entries.
+     * @dev Permission: creator hat or executor. Does not reclaim spent participation tokens
+     *      already minted by completed tasks; only erases project state and per-hat overrides.
+     * @param pid Project ID to delete.
+     */
     function deleteProject(bytes32 pid) external {
         _requireCreator();
         Layout storage l = _layout();
@@ -431,6 +515,17 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Task Logic ───────*/
+    /**
+     * @notice Create a task under `pid` with the given payout and optional bounty.
+     * @dev Permission: CREATE on `pid` (hat-derived) or project manager / executor.
+     * @param payout              Participation-token payout amount.
+     * @param title               Raw UTF-8 title (validated for length).
+     * @param metadataHash        IPFS CID; emitted in `TaskCreated`, not stored.
+     * @param pid                 Project ID this task belongs to.
+     * @param bountyToken         ERC-20 bounty token; `address(0)` for no bounty.
+     * @param bountyPayout        Bounty amount in `bountyToken` units.
+     * @param requiresApplication If true, claimants must submit an application first.
+     */
     function createTask(
         uint256 payout,
         bytes calldata title,
@@ -510,6 +605,17 @@ contract TaskManager is Initializable, ContextUpgradeable {
         emit TaskCreated(id, pid, payout, bountyToken, bountyPayout, requiresApplication, title, metadataHash);
     }
 
+    /**
+     * @notice Update an UNCLAIMED task's payout, title, metadata, and bounty fields.
+     * @dev Permission: CREATE on the task's project. Reverts BadStatus once the task is claimed.
+     *      Re-runs validation on the new values and adjusts both PT and bounty budgets.
+     * @param id               Task ID.
+     * @param newPayout        New participation-token payout.
+     * @param newTitle         New title.
+     * @param newMetadataHash  New IPFS CID (emitted; not stored).
+     * @param newBountyToken   New bounty token (or `address(0)` to clear).
+     * @param newBountyPayout  New bounty amount.
+     */
     function updateTask(
         uint256 id,
         uint256 newPayout,
@@ -554,6 +660,12 @@ contract TaskManager is Initializable, ContextUpgradeable {
         emit TaskUpdated(id, newPayout, newBountyToken, newBountyPayout, newTitle, newMetadataHash);
     }
 
+    /**
+     * @notice Claim an UNCLAIMED task that does not require an application.
+     * @dev Permission: CLAIM on the task's project. Reverts RequiresApplication for
+     *      application-only tasks (use `applyForTask`).
+     * @param id Task ID.
+     */
     function claimTask(uint256 id) external {
         _requireCanClaim(id);
         Layout storage l = _layout();
@@ -566,6 +678,12 @@ contract TaskManager is Initializable, ContextUpgradeable {
         emit TaskClaimed(id, _msgSender());
     }
 
+    /**
+     * @notice Force-assign an UNCLAIMED task to `assignee`, bypassing the claim flow.
+     * @dev Permission: ASSIGN on the task's project. Task must be UNCLAIMED.
+     * @param id       Task ID.
+     * @param assignee Address to record as the claimer.
+     */
     function assignTask(uint256 id, address assignee) external {
         _requireCanAssign(_layout()._tasks[id].projectId);
         assignee.requireNonZeroAddress();
@@ -579,6 +697,13 @@ contract TaskManager is Initializable, ContextUpgradeable {
         emit TaskAssigned(id, assignee, _msgSender());
     }
 
+    /**
+     * @notice Claimer submits their finished work for review.
+     * @dev Caller must be the task's current claimer; task must be CLAIMED.
+     *      `submissionHash` must be non-zero (typically an IPFS CID).
+     * @param id              Task ID.
+     * @param submissionHash  IPFS CID of the submission payload.
+     */
     function submitTask(uint256 id, bytes32 submissionHash) external {
         Layout storage l = _layout();
         Task storage t = _task(l, id);
@@ -590,6 +715,13 @@ contract TaskManager is Initializable, ContextUpgradeable {
         emit TaskSubmitted(id, submissionHash);
     }
 
+    /**
+     * @notice Approve a SUBMITTED task: mint participation tokens to the claimer and
+     *         transfer the bounty (if any).
+     * @dev Permission: REVIEW on the project. If the caller is the claimer themself,
+     *      they additionally need SELF_REVIEW unless they are a project manager / executor.
+     * @param id Task ID.
+     */
     function completeTask(uint256 id) external {
         Layout storage l = _layout();
         bytes32 pid = l._tasks[id].projectId;
@@ -616,6 +748,12 @@ contract TaskManager is Initializable, ContextUpgradeable {
         emit TaskCompleted(id, _msgSender());
     }
 
+    /**
+     * @notice Reject a SUBMITTED task. Task reverts to CLAIMED so the claimer can resubmit.
+     * @dev Permission: REVIEW on the project. `rejectionHash` must be non-zero (IPFS CID of feedback).
+     * @param id             Task ID.
+     * @param rejectionHash  IPFS CID of the rejection reasoning.
+     */
     function rejectTask(uint256 id, bytes32 rejectionHash) external {
         Layout storage l = _layout();
         _checkPerm(l._tasks[id].projectId, TaskPerm.REVIEW);
@@ -627,6 +765,11 @@ contract TaskManager is Initializable, ContextUpgradeable {
         emit TaskRejected(id, _msgSender(), rejectionHash);
     }
 
+    /**
+     * @notice Cancel an UNCLAIMED task and roll back its PT/bounty budget reservations.
+     * @dev Permission: CREATE on the task's project. Pending applications are cleared.
+     * @param id Task ID.
+     */
     function cancelTask(uint256 id) external {
         _requireCanCreate(_layout()._tasks[id].projectId);
         Layout storage l = _layout();
@@ -656,9 +799,11 @@ contract TaskManager is Initializable, ContextUpgradeable {
 
     /*──────── Application System ─────*/
     /**
-     * @dev Submit application for a task with IPFS hash containing submission
-     * @param id Task ID to apply for
-     * @param applicationHash IPFS hash of the application/submission
+     * @notice Apply to claim a task that requires applications.
+     * @dev Permission: CLAIM on the task's project. Reverts AlreadyApplied if the
+     *      caller already submitted an application for this task.
+     * @param id              Task ID to apply for.
+     * @param applicationHash IPFS CID of the application/submission payload.
      */
     function applyForTask(uint256 id, bytes32 applicationHash) external {
         _requireCanClaim(id);
@@ -681,9 +826,11 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /**
-     * @dev Approve an application, moving task to CLAIMED status
-     * @param id Task ID
-     * @param applicant Address of the applicant to approve
+     * @notice Approve a pending application: the task moves to CLAIMED for `applicant`
+     *         and the remaining applicants are dropped.
+     * @dev Permission: ASSIGN on the task's project.
+     * @param id        Task ID.
+     * @param applicant Address of the applicant to approve.
      */
     function approveApplication(uint256 id, address applicant) external {
         _requireCanAssign(_layout()._tasks[id].projectId);
@@ -699,13 +846,18 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /**
-     * @dev Creates a task and immediately assigns it to the specified assignee in a single transaction.
-     * @param payout The payout amount for the task
-     * @param title Task title (required, raw UTF-8)
-     * @param metadataHash IPFS CID sha256 digest (optional, bytes32(0) valid)
-     * @param pid Project ID
-     * @param assignee Address to assign the task to
-     * @return taskId The ID of the created task
+     * @notice Create a task and assign it to `assignee` in a single transaction.
+     * @dev Permission: caller must hold both CREATE and ASSIGN on `pid`, or be a project
+     *      manager / executor. The task is created in CLAIMED state with the assignee as claimer.
+     * @param payout              Participation-token payout.
+     * @param title               Raw UTF-8 task title.
+     * @param metadataHash        IPFS CID; emitted, not stored.
+     * @param pid                 Project ID.
+     * @param assignee            Address to assign the task to.
+     * @param bountyToken         ERC-20 bounty token (or `address(0)` for none).
+     * @param bountyPayout        Bounty amount in `bountyToken` units.
+     * @param requiresApplication Recorded on the task even though it's already claimed.
+     * @return taskId             ID of the created task.
      */
     function createAndAssignTask(
         uint256 payout,
@@ -774,11 +926,27 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Config Setter (Optimized) ─────── */
+    /**
+     * @notice Per-key setter for every mutable, non-project-creation parameter.
+     * @dev Single entry point with per-branch permission gating. The `key` selects
+     *      the operation and `value` is its ABI-encoded payload. Permission column
+     *      lists who may call each variant:
+     *      - `EXECUTOR` (executor): `abi.encode(address newExecutor)` — rotate the executor.
+     *      - `CREATOR_HAT_ALLOWED` (executor): `abi.encode(uint256 hatId, bool allowed)` — add/remove creator hat.
+     *      - `ROLE_PERM` (executor): `abi.encode(uint256 hatId, uint8 mask)` — set global permission mask.
+     *      - `ORGANIZER_HAT_ALLOWED` (executor): `abi.encode(uint256 hatId, bool allowed)` — add/remove folder organizer hat.
+     *      - `BOUNTY_CAP` (executor OR `TaskPerm.BUDGET` hat): `abi.encode(bytes32 pid, address token, uint256 newCap)` — set per-project bounty cap.
+     *      - `PROJECT_MANAGER` (executor): `abi.encode(bytes32 pid, address mgr, bool isManager)` — toggle PM.
+     *      - `PROJECT_CAP` (executor OR `TaskPerm.BUDGET` hat): `abi.encode(bytes32 pid, uint256 newCap)` — change PT cap.
+     *      `PROJECT_ROLE_PERM` is intentionally not handled here; use {setProjectRolePerm}.
+     * @param key   Which configuration field to mutate.
+     * @param value ABI-encoded payload matching the variant above.
+     */
     function setConfig(ConfigKey key, bytes calldata value) external {
-        _requireExecutor();
         Layout storage l = _layout();
 
         if (key == ConfigKey.EXECUTOR) {
+            _requireExecutor();
             address newExecutor = abi.decode(value, (address));
             newExecutor.requireNonZeroAddress();
             l.executor = newExecutor;
@@ -787,6 +955,7 @@ contract TaskManager is Initializable, ContextUpgradeable {
         }
 
         if (key == ConfigKey.CREATOR_HAT_ALLOWED) {
+            _requireExecutor();
             (uint256 hat, bool allowed) = abi.decode(value, (uint256, bool));
             HatManager.setHatInArray(l.creatorHatIds, hat, allowed);
             emit HatSet(HatType.CREATOR, hat, allowed);
@@ -794,20 +963,31 @@ contract TaskManager is Initializable, ContextUpgradeable {
         }
 
         if (key == ConfigKey.ROLE_PERM) {
+            _requireExecutor();
             (uint256 hatId, uint8 mask) = abi.decode(value, (uint256, uint8));
             l.rolePermGlobal[hatId] = mask;
             _syncPermissionHat(hatId);
+            emit RolePermSet(hatId, mask);
+            return;
+        }
+
+        if (key == ConfigKey.ORGANIZER_HAT_ALLOWED) {
+            _requireExecutor();
+            (uint256 hat, bool allowed) = abi.decode(value, (uint256, bool));
+            HatManager.setHatInArray(l.organizerHatIds, hat, allowed);
+            emit OrganizerHatAllowed(hat, allowed);
             return;
         }
 
         // Project-related configs - consolidate common logic
         bytes32 pid;
-        if (key >= ConfigKey.BOUNTY_CAP) {
+        if (key == ConfigKey.BOUNTY_CAP || key == ConfigKey.PROJECT_MANAGER || key == ConfigKey.PROJECT_CAP) {
             pid = abi.decode(value, (bytes32));
             Project storage p = l._projects[pid];
             if (!p.exists) revert NotFound();
 
             if (key == ConfigKey.BOUNTY_CAP) {
+                _requireBudgetEditor(pid);
                 (, address token, uint256 newCap) = abi.decode(value, (bytes32, address, uint256));
                 token.requireNonZeroAddress();
                 ValidationLib.requireValidCapAmount(newCap);
@@ -817,11 +997,13 @@ contract TaskManager is Initializable, ContextUpgradeable {
                 b.cap = uint128(newCap);
                 emit BountyCapSet(pid, token, oldCap, newCap);
             } else if (key == ConfigKey.PROJECT_MANAGER) {
+                _requireExecutor();
                 (, address mgr, bool isManager) = abi.decode(value, (bytes32, address, bool));
                 mgr.requireNonZeroAddress();
                 p.managers[mgr] = isManager;
                 emit ProjectManagerUpdated(pid, mgr, isManager);
             } else if (key == ConfigKey.PROJECT_CAP) {
+                _requireBudgetEditor(pid);
                 (, uint256 newCap) = abi.decode(value, (bytes32, uint256));
                 ValidationLib.requireValidCapAmount(newCap);
                 ValidationLib.requireValidCap(newCap, p.spent);
@@ -832,6 +1014,14 @@ contract TaskManager is Initializable, ContextUpgradeable {
         }
     }
 
+    /**
+     * @notice Replace a hat's permission mask on a specific project (overrides global).
+     * @dev Permission: creator hat or executor. Setting `mask` to zero removes the override
+     *      and falls back to the hat's global mask (if any).
+     * @param pid   Project ID.
+     * @param hatId Hat whose mask to set.
+     * @param mask  Bitwise OR of `TaskPerm.CREATE|CLAIM|REVIEW|ASSIGN|SELF_REVIEW`.
+     */
     function setProjectRolePerm(bytes32 pid, uint256 hatId, uint8 mask) external {
         _requireCreator();
         _requireProjectExists(pid);
@@ -843,6 +1033,33 @@ contract TaskManager is Initializable, ContextUpgradeable {
         _syncPermissionHat(hatId);
 
         emit ProjectRolePermSet(pid, hatId, mask);
+    }
+
+    /*──────── Folders ─────────*/
+    /**
+     * @notice Update the IPFS root pointing to this org's folder tree.
+     * @dev Folder structure (names, parents, ordering, project assignments) lives
+     *      off-chain in IPFS as JSON. Only the root hash is on-chain. Callers must
+     *      pass the current root they observed off-chain; if the on-chain root has
+     *      moved on (another organizer published first), the call reverts. The UI
+     *      should then re-pin and retry against the new root.
+     *
+     *      Permission: executor OR any wearer of an `organizerHatIds` hat.
+     *      Creator hats deliberately do NOT inherit this power — creators are
+     *      widely distributed and silent reparenting of the folder tree is a
+     *      footgun. To grant a creator reorganize rights, add the creator's hat
+     *      to `organizerHatIds` via `setConfig(ORGANIZER_HAT_ALLOWED, ...)`.
+     *
+     * @param expectedCurrentRoot The root the caller believes is current (CAS guard).
+     * @param newRoot             The new IPFS root hash to publish (bytes32(0) clears).
+     */
+    function setFolders(bytes32 expectedCurrentRoot, bytes32 newRoot) external {
+        _requireOrganizer();
+        Layout storage l = _layout();
+        bytes32 current = l.foldersRoot;
+        if (current != expectedCurrentRoot) revert FoldersRootStale(expectedCurrentRoot, current);
+        l.foldersRoot = newRoot;
+        emit FoldersUpdated(newRoot, current, _msgSender());
     }
     /*──────── Internal Perm helpers ─────*/
 
@@ -887,6 +1104,15 @@ contract TaskManager is Initializable, ContextUpgradeable {
     function _checkPerm(bytes32 pid, uint8 flag) internal view {
         address s = _msgSender();
         if (!TaskPerm.has(_permMask(s, pid), flag) && !_isPM(pid, s)) revert Unauthorized();
+    }
+
+    /// @dev Stricter than `_checkPerm`: no project-manager bypass. Only Executor
+    /// or a wearer of a hat granted `TaskPerm.BUDGET` (globally via `ROLE_PERM`
+    /// or per-project via `setProjectRolePerm`) may resize a project's caps.
+    function _requireBudgetEditor(bytes32 pid) internal view {
+        address s = _msgSender();
+        if (s == _layout().executor) return;
+        if (!TaskPerm.has(_permMask(s, pid), TaskPerm.BUDGET)) revert Unauthorized();
     }
 
     function _setBatchHatPerm(bytes32 pid, uint256[] calldata hatIds, uint8 flag) internal {
@@ -979,6 +1205,25 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Minimal External Getters for Lens ─────── */
+    /**
+     * @notice Read-only dispatcher used by `TaskManagerLens` to surface storage fields
+     *         without bloating the proxy ABI.
+     * @dev Variants:
+     *      - `1` → Task: `d = abi.encode(uint256 id)` → `(bytes32 projectId, uint96 payout, address claimer, uint96 bountyPayout, bool requiresApplication, Status status, address bountyToken)`.
+     *      - `2` → Project: `d = abi.encode(bytes32 pid)` → `(uint128 cap, uint128 spent, bool exists)`.
+     *      - `3` → Hats contract: `d = ""` → `(address hats)`.
+     *      - `4` → Executor: `d = ""` → `(address executor)`.
+     *      - `5` → Creator hats: `d = ""` → `(uint256[] hatIds)`.
+     *      - `6` → Permission hats enumeration: `d = ""` → `(uint256[] hatIds)`.
+     *      - `7` → Task applicants: `d = abi.encode(uint256 id)` → `(address[] applicants)`.
+     *      - `8` → One applicant's hash: `d = abi.encode(uint256 id, address applicant)` → `(bytes32 hash)`.
+     *      - `9` → Bounty budget: `d = abi.encode(bytes32 pid, address token)` → `(uint128 cap, uint128 spent)`.
+     *      - `10` → Folders root: `d = ""` → `(bytes32 foldersRoot)`.
+     *      - `11` → Organizer hats: `d = ""` → `(uint256[] hatIds)`.
+     * @param t Variant selector.
+     * @param d ABI-encoded variant payload (see above).
+     * @return ABI-encoded result whose shape depends on `t`.
+     */
     function getLensData(uint8 t, bytes calldata d) external view returns (bytes memory) {
         Layout storage l = _layout();
         if (t == 1) {
@@ -1028,6 +1273,12 @@ contract TaskManager is Initializable, ContextUpgradeable {
             if (!p.exists) revert NotFound();
             BudgetLib.Budget storage b = p.bountyBudgets[token];
             return abi.encode(b.cap, b.spent);
+        } else if (t == 10) {
+            // FoldersRoot
+            return abi.encode(l.foldersRoot);
+        } else if (t == 11) {
+            // OrganizerHats
+            return abi.encode(HatManager.getHatArray(l.organizerHatIds));
         }
         revert NotFound();
     }
