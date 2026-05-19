@@ -289,6 +289,64 @@ abstract contract GrantBase is Script {
 
         console.log("PASS:", orgName, "governance grant fully executed end-to-end.");
     }
+
+    /// @dev Real broadcast variant — creates the grant proposal on-chain.
+    /// Assumes v4 has already been broadcast (run UpgradeTaskManagerFolders
+    /// Step1+Step2+Step3 first). Does NOT simulate voting; that's done by
+    /// org members in the normal cadence after this proposal exists.
+    function _runBroadcast(string memory orgName, address tm, address hv, uint256 targetHat) internal {
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
+        address sender = vm.addr(key);
+
+        console.log("\n=== Broadcasting grant proposal:", orgName, "===");
+        console.log("  Sender:        ", sender);
+        console.log("  TaskManager:   ", tm);
+        console.log("  HybridVoting:  ", hv);
+        console.log("  Target hat:    ", targetHat);
+        console.log("  Duration:      ", PROPOSAL_DURATION_MINUTES, "minutes");
+
+        // Sanity: sender must wear a creator hat or createProposal reverts NotCreator.
+        IHatsMinimal hats = IHatsMinimal(abi.decode(TaskManager(tm).getLensData(3, ""), (address)));
+        uint256[] memory creatorHats = HybridVoting(hv).creatorHats();
+        bool isCreator = false;
+        for (uint256 i; i < creatorHats.length; ++i) {
+            if (hats.balanceOf(sender, creatorHats[i]) > 0) {
+                isCreator = true;
+                break;
+            }
+        }
+        require(isCreator, "Sender does not wear any creator hat on this voting contract");
+
+        // Build the same two-call batch the sim validated end-to-end.
+        IExecutor.Call[] memory batch = _buildGrantBatch(tm, targetHat);
+        IExecutor.Call[][] memory batches = new IExecutor.Call[][](1);
+        batches[0] = batch;
+
+        uint256 idBefore = HybridVoting(hv).proposalsCount();
+
+        vm.startBroadcast(key);
+        HybridVoting(hv)
+            .createProposal(
+                bytes(string.concat("Grant v4 perms - ", orgName)),
+                bytes32(0),
+                PROPOSAL_DURATION_MINUTES,
+                1, // single option
+                batches,
+                new uint256[](0) // unrestricted — anyone with class hats can vote
+            );
+        vm.stopBroadcast();
+
+        uint256 newId = HybridVoting(hv).proposalsCount() - 1;
+        require(newId == idBefore, "Proposal not created");
+        console.log("  Proposal ID:   ", newId);
+        console.log("  Next:          members vote; after expiry, anyone calls announceWinner(", newId, ")");
+    }
+}
+
+uint32 constant PROPOSAL_DURATION_MINUTES = 4320; // 3 days
+
+interface IHatsMinimal {
+    function balanceOf(address user, uint256 hatId) external view returns (uint256);
 }
 
 /* ───────────────────────── KUBI on Gnosis ───────────────────────── */
@@ -296,6 +354,12 @@ abstract contract GrantBase is Script {
 contract SimGrantKubi is GrantBase {
     function run() public {
         _runFullFlow("KUBI", PoaManager(GNOSIS_POA_MANAGER), KUBI_TM, KUBI_HV, KUBI_EXEC_HAT);
+    }
+}
+
+contract BroadcastGrantKubi is GrantBase {
+    function run() public {
+        _runBroadcast("KUBI", KUBI_TM, KUBI_HV, KUBI_EXEC_HAT);
     }
 }
 
@@ -307,10 +371,22 @@ contract SimGrantTest6 is GrantBase {
     }
 }
 
+contract BroadcastGrantTest6 is GrantBase {
+    function run() public {
+        _runBroadcast("Test6", TEST6_TM, TEST6_HV, TEST6_EXEC_HAT);
+    }
+}
+
 /* ───────────────────────── Poa on Arbitrum ──────────────────────── */
 
 contract SimGrantPoa is GrantBase {
     function run() public {
         _runFullFlow("Poa", PoaManager(ARB_POA_MANAGER), POA_TM, POA_HV, POA_CONTRIBUTOR_HAT);
+    }
+}
+
+contract BroadcastGrantPoa is GrantBase {
+    function run() public {
+        _runBroadcast("Poa", POA_TM, POA_HV, POA_CONTRIBUTOR_HAT);
     }
 }
