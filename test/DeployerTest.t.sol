@@ -5067,6 +5067,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("claimTask(uint256)")));
         assertTrue(rule.allowed, "TaskManager claimTask should be whitelisted");
 
+        // Check TaskManager setFolders is whitelisted (v4 bootstrap)
+        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)")));
+        assertTrue(rule.allowed, "TaskManager setFolders should be whitelisted (v4 bootstrap)");
+
         // Check HybridVoting vote is whitelisted
         bytes4 voteSel = bytes4(keccak256("vote(uint256,uint8[],uint8[])"));
         rule = paymasterHub.getRule(orgId, result.hybridVoting, voteSel);
