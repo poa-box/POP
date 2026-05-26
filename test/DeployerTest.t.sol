@@ -1268,8 +1268,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "voter1 wearing executive hat should be admin of default hat"
         );
 
-        // Now voter1 should be able to change eligibility for voter2's default role hat
-        vm.prank(voter1);
+        // Now the executor (super admin) can change eligibility for voter2's default role hat
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
         // Verify the eligibility was changed for voter2
@@ -1295,7 +1295,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         );
 
         // Change voter2 back to eligible
-        vm.prank(voter1);
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, true, true);
 
         // Verify the eligibility was changed back for voter2
@@ -1308,17 +1308,19 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "voter2's default role hat should have good standing"
         );
 
-        // Test that someone without the executive role hat cannot change eligibility
-        vm.prank(voter2);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotAuthorizedAdmin.selector));
+        // Test that someone other than the super admin cannot change eligibility
+        // (Even voter1 wearing the executive hat is no longer a hat-admin — only superAdmin can write.)
+        vm.prank(voter1);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
-        // In the new system, admin permissions are handled natively by the Hats tree structure
-        // The EligibilityAdminHat is admin of all role hats created under it
+        vm.prank(voter2);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
+        EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
-        // Test full flow: Executive makes someone eligible and they claim the hat
+        // Test full flow: Executor makes someone ineligible and verifies mint reverts
         // First, make voter2 ineligible for the default role hat
-        vm.prank(voter1);
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
         // Verify voter2 cannot mint the default role hat when ineligible
@@ -1326,8 +1328,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         vm.expectRevert();
         IHats(SEPOLIA_HATS).mintHat(defaultRoleHat, voter2);
 
-        // Executive (voter1) makes voter2 eligible for the default role hat
-        vm.prank(voter1);
+        // Executor makes voter2 eligible for the default role hat
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, true, true);
 
         // Now exec should be able to mint the default role hat for voter2
@@ -1347,7 +1349,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         assertTrue(standing2, "voter2 should have good standing for default role hat");
 
         // Test revoking eligibility while wearing the hat
-        vm.prank(voter1);
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
         // Verify voter2 is now ineligible (and thus no longer wearing the hat)
@@ -1376,10 +1378,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         _mintAdminHat(setup.exec, setup.eligibilityModule, setup.executiveRoleHat, voter1);
         _assertWearingHat(voter1, setup.executiveRoleHat, true, "voter1 executive hat");
 
-        // Executive (voter1) makes both people eligible for the DEFAULT role hat
-        vm.prank(voter1);
+        // Executor (super admin) makes both people eligible for the DEFAULT role hat
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person1, setup.defaultRoleHat, true, true);
-        vm.prank(voter1);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person2, setup.defaultRoleHat, true, true);
 
         // Verify both people are eligible for the DEFAULT role hat
@@ -1399,8 +1401,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         _assertWearingHat(person1, setup.defaultRoleHat, true, "person1 after minting");
         _assertWearingHat(person2, setup.defaultRoleHat, true, "person2 after minting");
 
-        // Executive (voter1) turns off person1's hat but leaves person2's hat on
-        vm.prank(voter1);
+        // Executor turns off person1's hat but leaves person2's hat on
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person1, setup.defaultRoleHat, false, false);
 
         // Verify person1 is no longer eligible and not wearing the hat
@@ -1415,16 +1417,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         );
         _assertWearingHat(person2, setup.defaultRoleHat, true, "person2 still wearing");
 
-        // Executive can turn person1's hat back on
-        vm.prank(voter1);
+        // Executor can turn person1's hat back on
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person1, setup.defaultRoleHat, true, true);
 
         // Verify person1 is eligible again
         _assertEligibilityStatus(setup.eligibilityModule, person1, setup.defaultRoleHat, true, true, "person1 restored");
         _assertWearingHat(person1, setup.defaultRoleHat, true, "person1 restored");
 
-        // Executive can also turn off person2's hat
-        vm.prank(voter1);
+        // Executor can also turn off person2's hat
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person2, setup.defaultRoleHat, false, false);
 
         // Verify person2 is no longer eligible and not wearing the hat
@@ -1433,9 +1435,13 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         );
         _assertWearingHat(person2, setup.defaultRoleHat, false, "person2 revoked");
 
-        // Test that only the executive can control these hats - person1 cannot control person2's hat
+        // Test that only the super admin can control these hats - even voter1 wearing the executive hat fails
+        vm.prank(voter1);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(person2, setup.defaultRoleHat, true, true);
+
         vm.prank(person1);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotAuthorizedAdmin.selector));
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person2, setup.defaultRoleHat, true, true);
 
         // Test that the super admin (executor) can still control all hats
@@ -1634,11 +1640,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         _mintHat(setup.exec, setup.memberRoleHat, voter2);
         _mintHat(setup.exec, setup.memberRoleHat, voucher2);
 
-        // Test 1: Admin can directly make someone eligible (hierarchy path)
-        vm.prank(voter1);
+        // Test 1: Super admin (executor) can directly make someone eligible
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(candidate1, setup.defaultRoleHat, true, true);
         _assertEligibilityStatus(
-            setup.eligibilityModule, candidate1, setup.defaultRoleHat, true, true, "Candidate1 via hierarchy"
+            setup.eligibilityModule, candidate1, setup.defaultRoleHat, true, true, "Candidate1 via super admin"
         );
 
         // Test 2: Someone else can become eligible via vouching path
@@ -1653,8 +1659,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             setup.eligibilityModule, candidate2, setup.defaultRoleHat, true, true, "Candidate2 via vouching"
         );
 
-        // Test 3: Admin can revoke hierarchy eligibility, but vouching still works
-        vm.prank(voter1);
+        // Test 3: Super admin attempts to revoke per-wearer eligibility, but vouching still keeps candidate eligible
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(candidate2, setup.defaultRoleHat, false, false);
         _assertEligibilityStatus(
             setup.eligibilityModule,
@@ -1662,10 +1668,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             setup.defaultRoleHat,
             true,
             true,
-            "Candidate2 after hierarchy revocation"
+            "Candidate2 after super-admin revocation"
         );
 
-        // Test 4: If vouching is revoked, hierarchy takes over
+        // Test 4: If vouching is revoked, the per-wearer setting takes over
         _revokeVouch(voter2, setup.eligibilityModule, candidate2, setup.defaultRoleHat);
         _assertEligibilityStatus(
             setup.eligibilityModule, candidate2, setup.defaultRoleHat, false, false, "Candidate2 after vouch revocation"
@@ -3124,7 +3130,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // Marketing executive creates a new marketing hat for their team
         // (Executive role wearers are admins of the default role, so they can create child hats under it)
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         uint256 marketingHatId = EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -3163,12 +3169,12 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         singleStanding[0] = true;
 
         // First set eligibility
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .batchSetWearerEligibility(marketingHatId, singleMember, singleEligible, singleStanding);
 
-        // Then mint the hat directly (marketing executive has admin rights)
-        vm.prank(marketingExecutive);
+        // Then mint the hat directly (executor mints since marketing executive no longer has admin rights)
+        vm.prank(setup.exec);
         bool success = IHats(SEPOLIA_HATS).mintHat(marketingHatId, marketingMember1);
         assertTrue(success, "Hat minting should succeed");
 
@@ -3192,17 +3198,17 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         multipleStanding[1] = false; // Member3 has poor standing
 
         // First set eligibility for multiple members
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .batchSetWearerEligibility(marketingHatId, multipleMembers, multipleEligible, multipleStanding);
 
         // Then mint hats individually (only for eligible members)
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         bool success2 = IHats(SEPOLIA_HATS).mintHat(marketingHatId, marketingMember2);
         assertTrue(success2, "Hat minting should succeed for eligible member");
 
         // Try to mint for ineligible member3 - should fail
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         vm.expectRevert(); // Should revert because member3 is not eligible
         IHats(SEPOLIA_HATS).mintHat(marketingHatId, marketingMember3);
 
@@ -3231,7 +3237,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         initialStanding[0] = true;
         initialStanding[1] = true;
 
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         uint256 campaignHatId = EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -3267,9 +3273,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         assertFalse(eligible3, "Member 3 should not be eligible for campaign hat by default");
         assertTrue(standing3, "Member 3 should have good standing by default");
 
-        // Test that only the marketing executive can create hats under their role
-        vm.prank(marketingMember1);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotAuthorizedAdmin.selector));
+        // Test that only the super admin can create hats — even the marketing executive fails now
+        vm.prank(marketingExecutive);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
         EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -3286,8 +3292,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             })
             );
 
-        // Test that marketing executive can manage eligibility of their created hats
-        vm.prank(marketingExecutive);
+        // Test that the executor (super admin) can manage eligibility of created hats
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(marketingMember3, campaignHatId, true, true);
 
         // Verify member3 is now eligible for the campaign hat
@@ -3305,7 +3311,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         member3Standing[0] = true;
 
         // Set eligibility first
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .batchSetWearerEligibility(campaignHatId, member3Array, member3Eligible, member3Standing);
 
@@ -3344,7 +3350,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         initialStanding[0] = true;
         initialStanding[1] = true;
 
-        vm.prank(executive);
+        vm.prank(setup.exec);
         uint256 teamHatId = EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -3773,7 +3779,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // Now register this hat creation - should emit HatCreatedWithEligibility event
         vm.expectEmit(true, true, true, true);
         emit HatCreatedWithEligibility(
-            executive, // creator
+            setup.exec, // creator (super admin)
             setup.defaultRoleHat, // parentHatId
             newHatId, // newHatId
             true, // defaultEligible
@@ -3781,7 +3787,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             0 // mintedCount (registerHatCreation doesn't mint)
         );
 
-        vm.prank(executive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).registerHatCreation(newHatId, setup.defaultRoleHat, true, true);
     }
 
@@ -3808,9 +3814,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // Expect DefaultEligibilityUpdated event
         vm.expectEmit(true, false, false, true);
-        emit DefaultEligibilityUpdated(newHatId, false, true, executive);
+        emit DefaultEligibilityUpdated(newHatId, false, true, setup.exec);
 
-        vm.prank(executive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .registerHatCreation(
                 newHatId,
@@ -3820,7 +3826,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             );
     }
 
-    // Test authorization - only superAdmin or hat admin can call registerHatCreation
+    // Test authorization - only superAdmin can call registerHatCreation
     function testRegisterHatCreationAuthorization() public {
         TestOrgSetup memory setup = _createTestOrg("Auth Test DAO");
         address executive = voter1;
@@ -3845,11 +3851,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // Unauthorized user should not be able to register
         vm.prank(unauthorized);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotAuthorizedAdmin.selector));
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
         EligibilityModule(setup.eligibilityModule).registerHatCreation(newHatId, setup.defaultRoleHat, true, true);
 
-        // Hat admin (executive) should be able to register
+        // Hat admin (executive) is no longer authorized — only the super admin (executor) can
         vm.prank(executive);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
+        EligibilityModule(setup.eligibilityModule).registerHatCreation(newHatId, setup.defaultRoleHat, true, true);
+
+        // Super admin should be able to register
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).registerHatCreation(newHatId, setup.defaultRoleHat, true, true);
     }
 
@@ -3876,7 +3887,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             );
 
         // Register with specific eligibility settings (not eligible, good standing)
-        vm.prank(executive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .registerHatCreation(
                 newHatId,
@@ -3991,6 +4002,241 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             EligibilityModule(setup.eligibilityModule).getWearerStatus(address(0x777), newHatId);
         assertTrue(eligible, "Wearer should be eligible by default after registration");
         assertTrue(standing, "Wearer should have good standing by default after registration");
+    }
+
+    /*═══════════════════════════════════════════════════════════════════════════════════
+                  SUPER-ADMIN GATING — POST-HIERARCHY-LOCKDOWN TESTS
+
+        Verifies the invariant introduced when `onlyHatAdmin` was replaced by
+        `onlySuperAdmin` on all EligibilityModule write paths: only the org's
+        Executor (the superAdmin) may mutate eligibility, hat configuration, or
+        metadata. Hats-protocol hierarchical admins may still vouch (when
+        `combineWithHierarchy` is enabled) but cannot directly write — and the
+        eligibility check now blocks the previously-implicit "admin mints hat"
+        bypass.
+    ═══════════════════════════════════════════════════════════════════════════════════*/
+
+    /// @dev Returns voter1 wearing the executive role hat — a Hats hierarchical admin
+    ///      of the default and member role hats, but NOT the EligibilityModule's superAdmin.
+    function _hierarchyAdmin(TestOrgSetup memory setup) internal returns (address hierarchyAdmin) {
+        hierarchyAdmin = voter1;
+        _mintAdminHat(setup.exec, setup.eligibilityModule, setup.executiveRoleHat, hierarchyAdmin);
+    }
+
+    function testHierarchyAdminCannotSetWearerEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: setWearer");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(address(0x55), setup.defaultRoleHat, true, true);
+    }
+
+    function testHierarchyAdminCannotSetDefaultEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: setDefault");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setDefaultEligibility(setup.defaultRoleHat, false, false);
+    }
+
+    function testHierarchyAdminCannotClearWearerEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: clear");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        // Executor first grants per-wearer eligibility so there's something to clear.
+        vm.prank(setup.exec);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(address(0x55), setup.defaultRoleHat, true, true);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).clearWearerEligibility(address(0x55), setup.defaultRoleHat);
+    }
+
+    function testHierarchyAdminCannotSetBulkWearerEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: setBulk");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address[] memory wearers = new address[](1);
+        wearers[0] = address(0x55);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setBulkWearerEligibility(wearers, setup.defaultRoleHat, true, true);
+    }
+
+    function testHierarchyAdminCannotBatchSetWearerEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: batchSet");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address[] memory wearers = new address[](1);
+        wearers[0] = address(0x55);
+        bool[] memory eligibles = new bool[](1);
+        eligibles[0] = true;
+        bool[] memory standings = new bool[](1);
+        standings[0] = true;
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule)
+            .batchSetWearerEligibility(setup.defaultRoleHat, wearers, eligibles, standings);
+    }
+
+    function testHierarchyAdminCannotCreateHatWithEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: createHat");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule)
+            .createHatWithEligibility(
+                EligibilityModule.CreateHatParams({
+                parentHatId: setup.defaultRoleHat,
+                details: "Forbidden Child Hat",
+                maxSupply: 1,
+                _mutable: true,
+                imageURI: "",
+                defaultEligible: true,
+                defaultStanding: true,
+                mintToAddresses: new address[](0),
+                wearerEligibleFlags: new bool[](0),
+                wearerStandingFlags: new bool[](0)
+            })
+            );
+    }
+
+    function testHierarchyAdminCannotUpdateHatMetadata() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: updateMeta");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).updateHatMetadata(setup.defaultRoleHat, "Renamed", bytes32(0));
+    }
+
+    /// @dev The critical end-to-end test: with vouching configured + default eligibility false,
+    ///      a Hats-hierarchical admin cannot mint a wearer into the hat by ANY path. The only
+    ///      way for a new wearer to join is through the vouching mechanism.
+    function testHierarchyAdminCannotBypassVouchingViaDirectMint() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: bypass vouching");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address candidate = address(0xC4);
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, candidate);
+
+        // Vouching configured: 1 vouch from an executiveRoleHat wearer (the membership hat) suffices.
+        // Default eligibility is set to false so vouching is the only entry path.
+        _configureVouching(
+            setup.eligibilityModule, setup.exec, setup.defaultRoleHat, 1, setup.executiveRoleHat, false, true
+        );
+
+        // Path 1 (eligibility write) — blocked: hierarchy admin is not the superAdmin.
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(candidate, setup.defaultRoleHat, true, true);
+
+        // Path 2 (direct Hats mint) — blocked: candidate is ineligible by default, Hats reverts.
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert();
+        IHats(SEPOLIA_HATS).mintHat(setup.defaultRoleHat, candidate);
+        _assertWearingHat(candidate, setup.defaultRoleHat, false, "candidate after blocked direct-mint");
+
+        // Path 3 (vouching) — the documented entry path succeeds. hierarchyAdmin wears the
+        // executive role hat, which is the configured membership hat for this vouch.
+        _vouchFor(hierarchyAdmin, setup.eligibilityModule, candidate, setup.defaultRoleHat);
+        _assertEligibilityStatus(
+            setup.eligibilityModule, candidate, setup.defaultRoleHat, true, true, "candidate after vouch"
+        );
+
+        vm.prank(candidate);
+        EligibilityModule(setup.eligibilityModule).claimVouchedHat(setup.defaultRoleHat);
+        _assertWearingHat(candidate, setup.defaultRoleHat, true, "candidate after claim");
+    }
+
+    /// @dev A hierarchy admin cannot force-revoke an existing wearer either — the only
+    ///      revocation paths are the executor's setWearerEligibility(false) or
+    ///      claim-time vouch revocation.
+    function testHierarchyAdminCannotForceRevokeWearer() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: force revoke");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address member = address(0xBE);
+
+        // Executor mints the hat to member.
+        vm.prank(setup.exec);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(member, setup.defaultRoleHat, true, true);
+        _mintHat(setup.exec, setup.defaultRoleHat, member);
+        _assertWearingHat(member, setup.defaultRoleHat, true, "member wearing hat pre-attack");
+
+        // Hierarchy admin's attempt to revoke is rejected.
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(member, setup.defaultRoleHat, false, false);
+
+        _assertWearingHat(member, setup.defaultRoleHat, true, "member still wearing hat after blocked revoke");
+    }
+
+    /// @dev Positive case: `combineWithHierarchy` still lets a Hats-hierarchical admin
+    ///      participate as a voucher even when they do not wear the configured
+    ///      membership hat directly. This is the one residual power hierarchy retains.
+    function testHierarchyAdminCanStillVouchWhenCombineEnabled() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: hierarchy vouches");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address candidate = address(0xC5);
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, candidate);
+
+        // Membership hat = memberRoleHat (which hierarchyAdmin does NOT wear).
+        // combineWithHierarchy = true means Hats-hierarchical admins of defaultRoleHat may also vouch.
+        _configureVouching(
+            setup.eligibilityModule, setup.exec, setup.defaultRoleHat, 1, setup.memberRoleHat, true, true
+        );
+
+        // hierarchyAdmin wears the executive role hat → admin of defaultRoleHat in Hats →
+        // qualifies as a voucher through the hierarchy branch of the auth check.
+        _vouchFor(hierarchyAdmin, setup.eligibilityModule, candidate, setup.defaultRoleHat);
+        _assertEligibilityStatus(
+            setup.eligibilityModule,
+            candidate,
+            setup.defaultRoleHat,
+            true,
+            true,
+            "candidate eligible via hierarchy-vouch path"
+        );
+    }
+
+    /// @dev Negative twin of the above: with `combineWithHierarchy = false`, a hierarchical
+    ///      admin who does not wear the membership hat is rejected as a voucher.
+    function testHierarchyAdminCannotVouchWhenCombineDisabled() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: hierarchy denied");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address candidate = address(0xC6);
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, candidate);
+
+        // Membership hat = memberRoleHat (not worn by hierarchyAdmin), combineWithHierarchy = false.
+        _configureVouching(
+            setup.eligibilityModule, setup.exec, setup.defaultRoleHat, 1, setup.memberRoleHat, false, true
+        );
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotAuthorizedToVouch.selector);
+        EligibilityModule(setup.eligibilityModule).vouchFor(candidate, setup.defaultRoleHat);
+    }
+
+    /// @dev A non-superAdmin who has no hat affiliation at all is still rejected. Covers
+    ///      the trivial case alongside the hierarchy-aware cases above so that any future
+    ///      regression that re-introduces a wildcard auth branch fails clearly.
+    function testUnaffiliatedAddressCannotMutateEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: stranger");
+        address stranger = address(0xDEAD);
+
+        vm.prank(stranger);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(stranger, setup.defaultRoleHat, true, true);
+
+        vm.prank(stranger);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setDefaultEligibility(setup.defaultRoleHat, true, true);
+
+        vm.prank(stranger);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).updateHatMetadata(setup.defaultRoleHat, "X", bytes32(0));
     }
 
     /*══════════════════════════════════════════════════════════════════════════════
