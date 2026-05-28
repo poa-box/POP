@@ -796,6 +796,42 @@ contract ZkEmailInvitesTest is Test {
         zk.registerAndClaimByEmailWithPasskey(passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p2);
     }
 
+    /*────────── Account-code requirement (isCodeExist) ──────────*/
+
+    function testClaimRoleByDomain_revertWhenCodeNotEmbedded() public {
+        _setDomain(_hatIds(1), 0);
+        EmailProof memory p = _makeProof(SALT_ALICE, bytes32(uint256(1)), user);
+        p.isCodeExist = false;
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.AccountCodeMissing.selector);
+        zk.claimRoleByDomain(p, user);
+        // Nullifier must NOT have been consumed (whole tx reverted).
+        assertFalse(zk.isNullifierUsed(p.emailNullifier), "nullifier untouched on revert");
+    }
+
+    function testClaimRoleByEmail_revertWhenCodeNotEmbedded() public {
+        _setEmail(SALT_ALICE, _hatIds(1), 0);
+        EmailProof memory p = _makeProof(SALT_ALICE, bytes32(uint256(1)), user);
+        p.isCodeExist = false;
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.AccountCodeMissing.selector);
+        zk.claimRoleByEmail(p, user);
+
+        (,,, bool claimed) = zk.getEmailRule(SALT_ALICE);
+        assertFalse(claimed, "email rule not consumed on revert");
+    }
+
+    function testRegisterAndClaimByDomainWithPasskey_revertWhenCodeNotEmbedded() public {
+        _setDomain(_hatIds(1), 0);
+        ZkEmailInvites.PasskeyEnrollment memory passkey = _enroll();
+        address expectedAccount = address(uint160(uint256(keccak256(abi.encode("acct", passkey.credentialId)))));
+        EmailProof memory p = _makeProof(SALT_ALICE, bytes32(uint256(1)), expectedAccount);
+        p.isCodeExist = false;
+        vm.expectRevert(ZkEmailInvites.AccountCodeMissing.selector);
+        zk.registerAndClaimByDomainWithPasskey(passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p);
+        assertEq(executorMock.mintCount(), 0, "no hats minted on revert");
+    }
+
     /*────────── Reentrancy ──────────*/
 
     function testReentrancy_isBlocked() public {

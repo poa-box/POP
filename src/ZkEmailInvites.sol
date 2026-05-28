@@ -57,6 +57,10 @@ interface IUniversalPasskeyAccountFactory {
  *           Per-rule idempotency: per-email one-shot; per-domain one-shot-per-domain.
  *         - Address binding: the proof's `maskedCommand` must end with the `claimer` address as
  *           a "0x..." hex string (e.g. body or subject: "Claim POP role for 0xABC...").
+ *         - Account code required: proofs MUST carry an embedded account code
+ *           (`isCodeExist == true`). Otherwise `accountSalt` is not a real
+ *           Poseidon(emailAddress, accountCode) commitment, which would break both per-email
+ *           rule lookups and per-domain claim idempotency. Such proofs are rejected.
  *
  * Trust model
  * -----------
@@ -94,6 +98,7 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     error RuleExpired();
     error AlreadyClaimed();
     error AddressMismatch();
+    error AccountCodeMissing();
     error EmptyHats();
     error EmptyDomain();
     error ZeroClaimer();
@@ -371,6 +376,12 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         bytes32 dh = keccak256(bytes(_lower(proof.domainName)));
         if (!l.dkimRegistry.isKeyHashValid(dh, proof.publicKeyHash)) revert InvalidDKIMKey();
         if (!l.verifier.verifyEmailProof(proof)) revert InvalidProof();
+
+        // The account code must be embedded: accountSalt = Poseidon(emailAddress, accountCode).
+        // When isCodeExist is false the code was absent, so accountSalt is not a trustworthy
+        // (email, accountCode) commitment — which both email-rule lookups and per-domain claim
+        // idempotency depend on. Checked after verifyEmailProof so isCodeExist is the proven value.
+        if (!proof.isCodeExist) revert AccountCodeMissing();
 
         address bound = CommandUtils.extractTrailingEthAddr(proof.maskedCommand);
         if (bound != claimer) revert AddressMismatch();
