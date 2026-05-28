@@ -463,9 +463,12 @@ contract MockToken is Test, IERC20 {
                 vm.prank(member1);
                 tm.claimTask(id);
 
-                // attempt to update claimed task should revert
-                vm.prank(pm1);
-                vm.expectRevert(TaskManager.BadStatus.selector);
+                // outsider holds no hats and is not a project manager — post-claim updates from a
+                // non-PM, non-EDIT_FULL caller revert. (_prepareFlow promotes pm1 to PM, so pm1 now
+                // implicitly has EDIT_FULL on this project; PM bypass and EDIT_FULL hat positive
+                // paths are covered in TaskManagerEditPermsTest.)
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.updateTask(id, 5 ether, bytes("newhash"), bytes32(0), address(0), 0);
             }
 
@@ -4143,9 +4146,11 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 tm.assignTask(0, member1);
 
-                // Update bounty after claim should revert
-                vm.prank(creator1);
-                vm.expectRevert(TaskManager.BadStatus.selector);
+                // outsider has no EDIT_FULL grant and is not a PM — post-claim updates revert Unauthorized.
+                // (creator1 is a project manager and would now succeed; PM bypass is covered by
+                // dedicated positive-path tests.)
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.updateTask(0, 1 ether, bytes("updated_metadata"), bytes32(0), address(bountyToken2), 0.6 ether);
             }
 
@@ -5387,9 +5392,9 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 tm.assignTask(0, member1);
 
-                // Update bounty after claim should revert
-                vm.prank(creator1);
-                vm.expectRevert(TaskManager.BadStatus.selector);
+                // outsider has no EDIT_FULL grant and is not a PM — post-claim updates revert Unauthorized.
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken2), 3 ether);
             }
 
@@ -5591,12 +5596,12 @@ contract MockToken is Test, IERC20 {
                 (cap, spent) = abi.decode(result, (uint256, uint256));
                 assertEq(spent, 1.5 ether, "Spent should be updated correctly");
 
-                // Update after claiming should revert
+                // Update after claiming reverts for non-PM, non-EDIT_FULL callers.
                 vm.prank(creator1);
                 tm.assignTask(0, member1);
 
-                vm.prank(creator1);
-                vm.expectRevert(TaskManager.BadStatus.selector);
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.updateTask(0, 1 ether, bytes("updated2"), bytes32(0), address(bountyToken1), 1 ether);
             }
 
@@ -7526,5 +7531,706 @@ contract MockToken is Test, IERC20 {
 
                 vm.prank(budgetEditor);
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(PID, uint256(100 ether)));
+            }
+        }
+
+        /*──────────────────── Edit Permission Tests ────────────────────*/
+        contract TaskManagerEditPermsTest is TaskManagerTestBase {
+            uint256 constant EDIT_META_HAT = 10;
+            uint256 constant EDIT_FULL_HAT = 11;
+
+            address editorMeta = makeAddr("editorMeta");
+            address editorFull = makeAddr("editorFull");
+
+            bytes32 PID;
+            uint256 _nextId;
+
+            function setUp() public {
+                setUpBase();
+
+                // Mint the new editor hats and grant the corresponding TaskPerm bits globally.
+                setHat(editorMeta, EDIT_META_HAT);
+                setHat(editorFull, EDIT_FULL_HAT);
+
+                vm.startPrank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(EDIT_META_HAT, TaskPerm.EDIT_META));
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(EDIT_FULL_HAT, TaskPerm.EDIT_FULL));
+                vm.stopPrank();
+
+                PID = _createDefaultProject("EDIT_PERMS", 100 ether);
+            }
+
+            /// @dev Returns the on-chain task's payout, bountyToken, bountyPayout, status, claimer.
+            function _taskFields(uint256 id)
+                internal
+                view
+                returns (
+                    uint256 payout,
+                    address bountyToken,
+                    uint256 bountyPayout,
+                    TaskManager.Status status,
+                    address claimer
+                )
+            {
+                bytes memory result = lens.getStorage(
+                    address(tm), TaskManagerLens.StorageKey.TASK_FULL_INFO, abi.encode(id)
+                );
+                bytes32 projectId;
+                bool requiresApplication;
+                (payout, bountyPayout, bountyToken, status, claimer, projectId, requiresApplication) =
+                    abi.decode(result, (uint256, uint256, address, TaskManager.Status, address, bytes32, bool));
+            }
+
+            function _projectSpent(bytes32 pid) internal view returns (uint256) {
+                bytes memory result =
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PROJECT_INFO, abi.encode(pid));
+                (, uint256 spent,) = abi.decode(result, (uint256, uint256, bool));
+                return spent;
+            }
+
+            function _createAndClaim(uint256 payout) internal returns (uint256 id) {
+                id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(payout, bytes("orig"), bytes32(0), PID, address(0), 0, false);
+                vm.prank(member1);
+                tm.claimTask(id);
+            }
+
+            function test_EditFull_UpdatesPayoutPostClaim() public {
+                uint256 id = _createAndClaim(2 ether);
+                assertEq(_projectSpent(PID), 2 ether);
+
+                vm.prank(editorFull);
+                tm.updateTask(id, 5 ether, bytes("new-title"), bytes32(0), address(0), 0);
+
+                (uint256 payout,,, TaskManager.Status status,) = _taskFields(id);
+                assertEq(payout, 5 ether, "payout should be updated");
+                assertEq(uint256(status), uint256(TaskManager.Status.CLAIMED), "status unchanged");
+                assertEq(_projectSpent(PID), 5 ether, "p.spent must net the delta");
+            }
+
+            function test_EditMeta_UpdatesMetadataPostClaim() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                vm.prank(editorMeta);
+                tm.updateTaskMetadata(id, bytes("renamed"), bytes32(uint256(0xdeadbeef)));
+
+                // Payout / bounty unchanged.
+                (uint256 payout, address bToken, uint256 bPay,,) = _taskFields(id);
+                assertEq(payout, 2 ether);
+                assertEq(bToken, address(0));
+                assertEq(bPay, 0);
+                assertEq(_projectSpent(PID), 2 ether, "metadata-only edit must not touch budget");
+            }
+
+            function test_EditMeta_CannotChangePayoutViaUpdateTask() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                // EDIT_META alone is insufficient for the full updateTask post-claim.
+                vm.prank(editorMeta);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTask(id, 5 ether, bytes("new"), bytes32(0), address(0), 0);
+            }
+
+            function test_EditFull_CanAlsoCallUpdateTaskMetadata() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                // EDIT_FULL is a strict superset of EDIT_META.
+                vm.prank(editorFull);
+                tm.updateTaskMetadata(id, bytes("renamed"), bytes32(uint256(0xfeed)));
+            }
+
+            function test_EditFull_RevertsOnCompletedTask() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("done"));
+                vm.prank(pm1); // pm1 wears PM_HAT (REVIEW perm)
+                tm.completeTask(id);
+
+                vm.prank(editorFull);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0);
+
+                vm.prank(editorFull);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.updateTaskMetadata(id, bytes("x"), bytes32(0));
+            }
+
+            function test_EditFull_RevertsOnCancelledTask() public {
+                uint256 id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(2 ether, bytes("c"), bytes32(0), PID, address(0), 0, false);
+                vm.prank(creator1);
+                tm.cancelTask(id);
+
+                vm.prank(editorFull);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0);
+            }
+
+            function test_Pm_ImplicitEditFullPostClaim() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                // creator1 is the project manager (auto-added on createProject). No EDIT_FULL grant.
+                vm.prank(creator1);
+                tm.updateTask(id, 7 ether, bytes("pm-edit"), bytes32(0), address(0), 0);
+
+                (uint256 payout,,,,) = _taskFields(id);
+                assertEq(payout, 7 ether);
+                assertEq(_projectSpent(PID), 7 ether);
+            }
+
+            function test_Executor_ImplicitEditFullPostClaim() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                vm.prank(executor);
+                tm.updateTask(id, 9 ether, bytes("exec-edit"), bytes32(0), address(0), 0);
+
+                (uint256 payout,,,,) = _taskFields(id);
+                assertEq(payout, 9 ether);
+            }
+
+            function test_EditFull_SubmittedTaskEditable() public {
+                uint256 id = _createAndClaim(2 ether);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("done"));
+
+                vm.prank(editorFull);
+                tm.updateTask(id, 3 ether, bytes("late-bump"), bytes32(0), address(0), 0);
+
+                (uint256 payout,,, TaskManager.Status status,) = _taskFields(id);
+                assertEq(payout, 3 ether);
+                assertEq(uint256(status), uint256(TaskManager.Status.SUBMITTED));
+            }
+
+            function test_EditMeta_OutsiderReverts() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTaskMetadata(id, bytes("x"), bytes32(0));
+            }
+
+            function test_EditMeta_CreatorHatWorksPreClaimOnly() public {
+                uint256 id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(2 ether, bytes("c"), bytes32(0), PID, address(0), 0, false);
+
+                // creator2 has CREATE perm via CREATOR_HAT but is NOT the PM of this project.
+                vm.prank(creator2);
+                tm.updateTaskMetadata(id, bytes("pre-claim-edit"), bytes32(uint256(0xab)));
+
+                // Claim and try again — pre-claim CREATE path no longer applies.
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.prank(creator2);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTaskMetadata(id, bytes("post-claim-edit"), bytes32(0));
+            }
+
+            function test_BountyTokenSwapPostClaim() public {
+                MockERC20 tokenA = new MockERC20();
+                MockERC20 tokenB = new MockERC20();
+                tokenA.mint(address(tm), 10 ether);
+                tokenB.mint(address(tm), 10 ether);
+
+                address[] memory bountyTokens = new address[](2);
+                bountyTokens[0] = address(tokenA);
+                bountyTokens[1] = address(tokenB);
+                uint256[] memory bountyCaps = new uint256[](2);
+                bountyCaps[0] = 10 ether;
+                bountyCaps[1] = 10 ether;
+                bytes32 bountyPid = _createProjectWithBountyBudget("BPROJ", 100 ether, bountyTokens, bountyCaps);
+
+                uint256 id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(1 ether, bytes("b"), bytes32(0), bountyPid, address(tokenA), 2 ether, false);
+                vm.prank(creator1);
+                tm.assignTask(id, member1);
+
+                _assertBountySpent(bountyPid, address(tokenA), 2 ether);
+                _assertBountySpent(bountyPid, address(tokenB), 0);
+
+                vm.prank(editorFull);
+                tm.updateTask(id, 1 ether, bytes("b-swap"), bytes32(0), address(tokenB), 3 ether);
+
+                _assertBountySpent(bountyPid, address(tokenA), 0);
+                _assertBountySpent(bountyPid, address(tokenB), 3 ether);
+            }
+
+            function test_BountyTokenSwapToDisabledTokenReverts() public {
+                MockERC20 tokenA = new MockERC20();
+                MockERC20 tokenB = new MockERC20();
+                tokenA.mint(address(tm), 10 ether);
+
+                address[] memory bountyTokens = new address[](1);
+                bountyTokens[0] = address(tokenA);
+                uint256[] memory bountyCaps = new uint256[](1);
+                bountyCaps[0] = 10 ether;
+                bytes32 bountyPid = _createProjectWithBountyBudget("BPROJ2", 100 ether, bountyTokens, bountyCaps);
+
+                uint256 id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(1 ether, bytes("b"), bytes32(0), bountyPid, address(tokenA), 2 ether, false);
+                vm.prank(creator1);
+                tm.assignTask(id, member1);
+
+                // tokenB has no budget on this project (cap = 0 = DISABLED) — swap reverts via BudgetLib.
+                vm.prank(editorFull);
+                vm.expectRevert(BudgetLib.BudgetExceeded.selector);
+                tm.updateTask(id, 1 ether, bytes("b-bad"), bytes32(0), address(tokenB), 1 ether);
+            }
+
+            function test_ProjectOverrideRemovesEditFull() public {
+                // editorFull has TaskPerm.EDIT_FULL globally. Override the per-project mask to
+                // something non-zero that does NOT include EDIT_FULL (project mask replaces global
+                // when set to any non-zero value; setting to 0 would fall back to global).
+                // Calls on PID should revert, calls on a second project still succeed via global.
+                bytes32 otherPid = _createDefaultProject("OTHER", 100 ether);
+
+                vm.prank(creator1);
+                tm.setProjectRolePerm(PID, EDIT_FULL_HAT, TaskPerm.CLAIM);
+
+                uint256 id = _createAndClaim(2 ether);
+                vm.prank(editorFull);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0);
+
+                // On the other project (no override), the global EDIT_FULL still grants access.
+                uint256 otherId = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(2 ether, bytes("o"), bytes32(0), otherPid, address(0), 0, false);
+                vm.prank(member1);
+                tm.claimTask(otherId);
+
+                vm.prank(editorFull);
+                tm.updateTask(otherId, 3 ether, bytes("ok"), bytes32(0), address(0), 0);
+            }
+
+            function test_EditFull_OnCreateAndAssignTask() public {
+                // createAndAssignTask lands tasks directly in CLAIMED — prove they are still
+                // editable by EDIT_FULL holders (would have been uneditable forever pre-v5).
+                uint256 id = _nextId++;
+                vm.prank(creator1); // creator1 is the PM (and has both CREATE and ASSIGN via creator hat? no — needs explicit)
+                // creator1 is a PM via auto-add on createProject. PMs satisfy the createAndAssignTask
+                // permission gate (hasCreateAndAssign || isPM).
+                tm.createAndAssignTask(2 ether, bytes("ca"), bytes32(0), PID, member1, address(0), 0, false);
+
+                (uint256 payoutBefore,,, TaskManager.Status statusBefore,) = _taskFields(id);
+                assertEq(uint256(statusBefore), uint256(TaskManager.Status.CLAIMED));
+                assertEq(payoutBefore, 2 ether);
+
+                // EDIT_FULL holder can edit the directly-claimed task.
+                vm.prank(editorFull);
+                tm.updateTask(id, 4 ether, bytes("ca-edited"), bytes32(0), address(0), 0);
+
+                (uint256 payoutAfter,,,,) = _taskFields(id);
+                assertEq(payoutAfter, 4 ether);
+                assertEq(_projectSpent(PID), 4 ether);
+            }
+
+            function test_EditedPayoutFlowsThroughCompleteTask() public {
+                // Critical invariant: edits to t.payout post-claim must flow through to the PT
+                // minted at completion. Otherwise edits would be silently lost.
+                uint256 id = _createAndClaim(2 ether);
+
+                vm.prank(editorFull);
+                tm.updateTask(id, 7 ether, bytes("bumped"), bytes32(0), address(0), 0);
+
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("done"));
+
+                uint256 balBefore = token.balanceOf(member1);
+                vm.prank(pm1); // pm1 has PM_HAT → REVIEW perm
+                tm.completeTask(id);
+                uint256 balAfter = token.balanceOf(member1);
+
+                assertEq(balAfter - balBefore, 7 ether, "completeTask should mint the edited payout, not the original");
+            }
+
+            function test_Pm_CanCallUpdateTaskMetadata() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                vm.prank(creator1); // PM via auto-add
+                tm.updateTaskMetadata(id, bytes("pm-meta-edit"), bytes32(uint256(0x42)));
+
+                // Payout untouched.
+                (uint256 payout,,,,) = _taskFields(id);
+                assertEq(payout, 2 ether);
+            }
+
+            function test_TaskUpdatedEventEmittedOnMetadataOnlyEdit() public {
+                uint256 id = _createAndClaim(2 ether);
+
+                // Subgraph consumers depend on TaskUpdated to know about metadata changes. Re-emit
+                // includes the existing payout/bountyToken/bountyPayout verbatim so a naive
+                // indexer that overwrites all fields stays correct.
+                vm.expectEmit(true, false, false, true);
+                emit TaskManager.TaskUpdated(id, 2 ether, address(0), 0, bytes("meta-renamed"), bytes32(uint256(0x99)));
+
+                vm.prank(editorMeta);
+                tm.updateTaskMetadata(id, bytes("meta-renamed"), bytes32(uint256(0x99)));
+            }
+
+            function _assertBountySpent(bytes32 pid, address token, uint256 expected) internal {
+                bytes memory result =
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.BOUNTY_BUDGET, abi.encode(pid, token));
+                (, uint256 spent) = abi.decode(result, (uint256, uint256));
+                assertEq(spent, expected, "bounty spent mismatch");
+            }
+        }
+
+        /*──────────────────── bootstrapGlobalPerms tests ────────────────────*/
+        contract TaskManagerBootstrapGlobalPermsTest is Test {
+            /* test actors */
+            address deployer = makeAddr("deployer");
+            address executor = makeAddr("executor");
+            address creator1 = makeAddr("creator1");
+            address member1 = makeAddr("member1");
+            address outsider = makeAddr("outsider");
+            address editorFull = makeAddr("editorFull");
+
+            uint256 constant CREATOR_HAT = 1;
+            uint256 constant MEMBER_HAT = 3;
+            uint256 constant EDIT_FULL_HAT = 11;
+            uint256 constant EDIT_META_HAT = 10;
+            uint256 constant BUDGET_HAT = 12;
+
+            TaskManager tm;
+            TaskManagerLens lens;
+            MockToken token;
+            MockHats hats;
+
+            function setUp() public {
+                token = new MockToken();
+                hats = new MockHats();
+
+                hats.mintHat(CREATOR_HAT, creator1);
+                hats.mintHat(MEMBER_HAT, member1);
+                hats.mintHat(EDIT_FULL_HAT, editorFull);
+
+                TaskManager _tmImpl = new TaskManager();
+                UpgradeableBeacon _tmBeacon = new UpgradeableBeacon(address(_tmImpl), address(this));
+                tm = TaskManager(address(new BeaconProxy(address(_tmBeacon), "")));
+                lens = new TaskManagerLens();
+
+                uint256[] memory creatorHats = new uint256[](1);
+                creatorHats[0] = CREATOR_HAT;
+
+                // Initialize with `deployer` as the bootstrap-window admin. No global CLAIM grant
+                // is needed because _setupProjectAndTask seeds CLAIM via the project's claimHats
+                // array — keeping the global permissionHatIds enumeration empty at baseline so the
+                // tests can assert exact counts.
+                tm.initialize(address(token), address(hats), creatorHats, executor, deployer);
+            }
+
+            /* ---------- Edge case 1: happy path ---------- */
+            function test_BootstrapGlobalPerms_GrantsSetMaskAndAddToPermissionHats() public {
+                uint256[] memory hatIds = new uint256[](2);
+                uint8[] memory masks = new uint8[](2);
+                hatIds[0] = EDIT_FULL_HAT;
+                hatIds[1] = EDIT_META_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+                masks[1] = TaskPerm.EDIT_META;
+
+                vm.expectEmit(true, false, false, true);
+                emit TaskManager.RolePermSet(EDIT_FULL_HAT, TaskPerm.EDIT_FULL);
+                vm.expectEmit(true, false, false, true);
+                emit TaskManager.RolePermSet(EDIT_META_HAT, TaskPerm.EDIT_META);
+
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                uint256[] memory permHats =
+                    abi.decode(
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
+                );
+                assertEq(permHats.length, 2, "two hats now enumerated");
+                // Order is not guaranteed; check both are present.
+                bool foundFull;
+                bool foundMeta;
+                for (uint256 i; i < permHats.length; ++i) {
+                    if (permHats[i] == EDIT_FULL_HAT) foundFull = true;
+                    if (permHats[i] == EDIT_META_HAT) foundMeta = true;
+                }
+                assertTrue(foundFull && foundMeta, "both hats enumerated");
+            }
+
+            /* ---------- Edge case 2: non-deployer reverts ---------- */
+            function test_BootstrapGlobalPerms_NotDeployerReverts() public {
+                uint256[] memory hatIds = new uint256[](1);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+
+                // Try every wrong sender: executor, creator, outsider — all should revert.
+                vm.prank(executor);
+                vm.expectRevert(TaskManager.NotDeployer.selector);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                vm.prank(creator1);
+                vm.expectRevert(TaskManager.NotDeployer.selector);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.NotDeployer.selector);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+            }
+
+            /* ---------- Edge case 3: after clearDeployer ---------- */
+            function test_BootstrapGlobalPerms_AfterClearDeployerReverts() public {
+                vm.prank(deployer);
+                tm.clearDeployer();
+
+                uint256[] memory hatIds = new uint256[](1);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+
+                // Even the original deployer is now blocked — l.deployer is address(0).
+                vm.prank(deployer);
+                vm.expectRevert(TaskManager.NotDeployer.selector);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+            }
+
+            /* ---------- Edge case 4: empty arrays = no-op (must not revert) ---------- */
+            function test_BootstrapGlobalPerms_EmptyArraysIsNoOp() public {
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(new uint256[](0), new uint8[](0));
+
+                uint256[] memory permHats =
+                    abi.decode(
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
+                );
+                assertEq(permHats.length, 0, "no hats enumerated");
+            }
+
+            /* ---------- Edge case 5: length mismatch reverts ArrayLengthMismatch ---------- */
+            function test_BootstrapGlobalPerms_LengthMismatchReverts() public {
+                uint256[] memory hatIds = new uint256[](2);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                hatIds[1] = EDIT_META_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+
+                vm.prank(deployer);
+                vm.expectRevert(TaskManager.ArrayLengthMismatch.selector);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+            }
+
+            /* ---------- Edge case 6: duplicate hat IDs — last write wins ---------- */
+            function test_BootstrapGlobalPerms_DuplicateHatLastWins() public {
+                uint256[] memory hatIds = new uint256[](2);
+                uint8[] memory masks = new uint8[](2);
+                hatIds[0] = EDIT_FULL_HAT;
+                hatIds[1] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+                masks[1] = TaskPerm.EDIT_META; // last write wins
+
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                // Grant a project, claim a task, then verify EDIT_FULL_HAT cannot edit payout (only meta).
+                bytes32 pid = _setupProjectAndTask();
+                vm.prank(member1);
+                tm.claimTask(0);
+
+                vm.prank(editorFull);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTask(0, 5 ether, bytes("nope"), bytes32(0), address(0), 0);
+
+                // But metadata-only succeeds because EDIT_META was the last-written mask.
+                vm.prank(editorFull);
+                tm.updateTaskMetadata(0, bytes("ok"), bytes32(uint256(0xaa)));
+                pid; // silence unused
+            }
+
+            /* ---------- Edge case 7: mask = 0 removes hat from permissionHatIds ---------- */
+            function test_BootstrapGlobalPerms_ZeroMaskRemovesHat() public {
+                // First grant EDIT_FULL.
+                uint256[] memory hatIds = new uint256[](1);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                uint256[] memory permHatsBefore =
+                    abi.decode(
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
+                );
+                assertEq(permHatsBefore.length, 1, "hat enumerated after grant");
+
+                // Now zero it out — should be removed from permissionHatIds.
+                masks[0] = 0;
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                uint256[] memory permHatsAfter =
+                    abi.decode(
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
+                );
+                assertEq(permHatsAfter.length, 0, "hat de-enumerated after mask=0");
+            }
+
+            /* ---------- Edge case 8: equivalence with setConfig(ROLE_PERM) ---------- */
+            function test_BootstrapGlobalPerms_EquivalentToSetConfig() public {
+                uint256[] memory hatIds = new uint256[](1);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                // Re-applying via setConfig must be a no-op (idempotent) and leave the same enumerated state.
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(EDIT_FULL_HAT, TaskPerm.EDIT_FULL));
+
+                uint256[] memory permHats =
+                    abi.decode(
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
+                );
+                assertEq(permHats.length, 1, "no duplicate enumeration");
+                assertEq(permHats[0], EDIT_FULL_HAT);
+            }
+
+            /* ---------- Edge case 9: end-to-end — bootstrapped EDIT_FULL hat can edit a CLAIMED task ---------- */
+            function test_BootstrapGlobalPerms_GrantedHatCanEditPostClaim() public {
+                uint256[] memory hatIds = new uint256[](1);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                _setupProjectAndTask();
+                vm.prank(member1);
+                tm.claimTask(0);
+
+                // The bootstrap-granted hat wearer can immediately edit.
+                vm.prank(editorFull);
+                tm.updateTask(0, 5 ether, bytes("bumped"), bytes32(0), address(0), 0);
+            }
+
+            /* ---------- Edge case 10: multiple bits OR'd into one mask ---------- */
+            function test_BootstrapGlobalPerms_MultipleBitsInOneMask() public {
+                uint256[] memory hatIds = new uint256[](1);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL | TaskPerm.BUDGET; // combined grant
+
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                // Editor hat can now also resize budgets via setConfig(PROJECT_CAP, ...).
+                _setupProjectAndTask();
+                vm.prank(editorFull);
+                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(bytes32(uint256(0)), uint256(20 ether)));
+            }
+
+            /* ---------- Edge case 11: ordering — bootstrap perms before bootstrap projects works ---------- */
+            function test_BootstrapGlobalPerms_OrderingWithProjectBootstrap() public {
+                // Simulate the OrgDeployer ordering: bootstrapGlobalPerms first, then bootstrapProjectsAndTasks.
+                uint256[] memory hatIds = new uint256[](1);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                // Now bootstrap a project + task atomically via the deployer path.
+                TaskManager.BootstrapProjectConfig[] memory projects = new TaskManager.BootstrapProjectConfig[](1);
+                uint256[] memory cHats = new uint256[](1);
+                cHats[0] = CREATOR_HAT;
+                uint256[] memory clHats = new uint256[](1);
+                clHats[0] = MEMBER_HAT;
+                projects[0] = TaskManager.BootstrapProjectConfig({
+                    title: bytes("BP"),
+                    metadataHash: bytes32(0),
+                    cap: 100 ether,
+                    managers: new address[](0),
+                    createHats: cHats,
+                    claimHats: clHats,
+                    reviewHats: new uint256[](0),
+                    assignHats: new uint256[](0),
+                    bountyTokens: new address[](0),
+                    bountyCaps: new uint256[](0)
+                });
+
+                TaskManager.BootstrapTaskConfig[] memory btasks = new TaskManager.BootstrapTaskConfig[](1);
+                btasks[0] = TaskManager.BootstrapTaskConfig({
+                    projectIndex: 0,
+                    payout: 1 ether,
+                    title: bytes("bt"),
+                    metadataHash: bytes32(0),
+                    bountyToken: address(0),
+                    bountyPayout: 0,
+                    requiresApplication: false
+                });
+
+                vm.prank(deployer);
+                tm.bootstrapProjectsAndTasks(projects, btasks);
+
+                // Task 0 is unclaimed; claim it via the member.
+                vm.prank(member1);
+                tm.claimTask(0);
+
+                // Editor hat (bootstrapped) can edit the now-CLAIMED task.
+                vm.prank(editorFull);
+                tm.updateTask(0, 2 ether, bytes("post"), bytes32(0), address(0), 0);
+            }
+
+            /* ---------- Edge case 12: per-project override still beats bootstrap-granted global ---------- */
+            function test_BootstrapGlobalPerms_ProjectOverrideStillWins() public {
+                uint256[] memory hatIds = new uint256[](1);
+                uint8[] memory masks = new uint8[](1);
+                hatIds[0] = EDIT_FULL_HAT;
+                masks[0] = TaskPerm.EDIT_FULL;
+                vm.prank(deployer);
+                tm.bootstrapGlobalPerms(hatIds, masks);
+
+                _setupProjectAndTask();
+
+                // Set a per-project override that does NOT include EDIT_FULL.
+                vm.prank(creator1);
+                tm.setProjectRolePerm(bytes32(uint256(0)), EDIT_FULL_HAT, TaskPerm.CLAIM);
+
+                vm.prank(member1);
+                tm.claimTask(0);
+
+                // Editor hat is denied on this project despite the global EDIT_FULL grant.
+                vm.prank(editorFull);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTask(0, 5 ether, bytes("nope"), bytes32(0), address(0), 0);
+            }
+
+            /* ---------- Helpers ---------- */
+            function _setupProjectAndTask() internal returns (bytes32 pid) {
+                uint256[] memory cHats = new uint256[](1);
+                cHats[0] = CREATOR_HAT;
+                uint256[] memory clHats = new uint256[](1);
+                clHats[0] = MEMBER_HAT;
+
+                vm.prank(creator1);
+                pid = tm.createProject(
+                    TaskManager.BootstrapProjectConfig({
+                        title: bytes("P"),
+                        metadataHash: bytes32(0),
+                        cap: 100 ether,
+                        managers: new address[](0),
+                        createHats: cHats,
+                        claimHats: clHats,
+                        reviewHats: new uint256[](0),
+                        assignHats: new uint256[](0),
+                        bountyTokens: new address[](0),
+                        bountyCaps: new uint256[](0)
+                    })
+                );
+                vm.prank(creator1);
+                tm.createTask(2 ether, bytes("t"), bytes32(0), pid, address(0), 0, false);
             }
         }
