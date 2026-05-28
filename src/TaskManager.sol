@@ -514,6 +514,37 @@ contract TaskManager is Initializable, ContextUpgradeable {
         l.deployer = address(0);
     }
 
+    /**
+     * @notice Bulk-grant org-wide `rolePermGlobal` masks during the bootstrap window.
+     * @dev Deployer-only escape hatch, identical access pattern to {bootstrapProjectsAndTasks}.
+     *      Reverts {NotDeployer} once {clearDeployer} has been called. Effects per pair:
+     *        - Writes `rolePermGlobal[hatId] = mask` (last write wins for duplicate hat IDs).
+     *        - Calls `_syncPermissionHat(hatId)` so the enumeration array stays consistent
+     *          (a `mask == 0` write removes the hat unless it still has any project-specific mask).
+     *        - Emits {RolePermSet} per hat — the same event `setConfig(ROLE_PERM, ...)` emits, so
+     *          subgraph consumers index these grants exactly the same way as runtime grants.
+     *      Empty `hatIds` is a no-op (does not revert) — lets the caller pass zero grants without
+     *      branching at the call site.
+     * @param hatIds Hat IDs to grant masks to.
+     * @param masks  TaskPerm bitmasks (bitwise-OR of {TaskPerm} constants). Length must match `hatIds`.
+     */
+    function bootstrapGlobalPerms(uint256[] calldata hatIds, uint8[] calldata masks) external {
+        Layout storage l = _layout();
+        if (_msgSender() != l.deployer) revert NotDeployer();
+        if (hatIds.length != masks.length) revert ArrayLengthMismatch();
+
+        for (uint256 i; i < hatIds.length;) {
+            uint256 hatId = hatIds[i];
+            uint8 mask = masks[i];
+            l.rolePermGlobal[hatId] = mask;
+            _syncPermissionHat(hatId);
+            emit RolePermSet(hatId, mask);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     /*──────── Task Logic ───────*/
     /**
      * @notice Create a task under `pid` with the given payout and optional bounty.
@@ -606,8 +637,22 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /**
-     * @notice Update an UNCLAIMED task's payout, title, metadata, and bounty fields.
-     * @dev Permission: CREATE on the task's project. Reverts BadStatus once the task is claimed.
+     * @notice Update a task's payout, title, metadata, and bounty fields.
+     * @dev Status gate: COMPLETED / CANCELLED always revert `BadStatus` — terminal states are
+     *      immutable to avoid accounting drift (payouts have already been minted or refunded).
+     *
+     *      Permission gate (any non-terminal status):
+     *      - Executor or project manager: always allowed.
+     *      - Hat with `TaskPerm.EDIT_FULL`: allowed in any non-terminal status.
+     *      - Hat with `TaskPerm.CREATE`: allowed only while the task is `UNCLAIMED`
+     *        (preserves the original pre-claim editing path).
+     *
+     *      Post-claim edits silently change the claimer's payout / bounty expectation —
+     *      the subgraph picks up the new values via the existing `TaskUpdated` event.
+     *      Swapping `newBountyToken` to a token whose `bountyBudgets[token].cap` is zero
+     *      (DISABLED) reverts via `BudgetLib.addSpent`; enable the new token's budget first
+     *      with `setConfig(BOUNTY_CAP, ...)`.
+     *
      *      Re-runs validation on the new values and adjusts both PT and bounty budgets.
      * @param id               Task ID.
      * @param newPayout        New participation-token payout.
@@ -624,16 +669,24 @@ contract TaskManager is Initializable, ContextUpgradeable {
         address newBountyToken,
         uint256 newBountyPayout
     ) external {
-        _requireCanCreate(_layout()._tasks[id].projectId);
         Layout storage l = _layout();
+        Task storage t = _task(l, id);
+        if (t.status == Status.COMPLETED || t.status == Status.CANCELLED) revert BadStatus();
+
+        bytes32 pid = t.projectId;
+        address s = _msgSender();
+        if (s != l.executor && !_isPM(pid, s)) {
+            uint8 mask = _permMask(s, pid);
+            bool canEditFull = TaskPerm.has(mask, TaskPerm.EDIT_FULL);
+            bool canEditUnclaimed = t.status == Status.UNCLAIMED && TaskPerm.has(mask, TaskPerm.CREATE);
+            if (!canEditFull && !canEditUnclaimed) revert Unauthorized();
+        }
+
         ValidationLib.requireValidTitle(newTitle);
         ValidationLib.requireValidPayout96(newPayout);
         ValidationLib.requireValidBountyConfig(newBountyToken, newBountyPayout);
 
-        Task storage t = _task(l, id);
-        if (t.status != Status.UNCLAIMED) revert BadStatus();
-
-        Project storage p = l._projects[t.projectId];
+        Project storage p = l._projects[pid];
 
         // Update participation token budget
         // PT cap: 0 = unlimited (minted tokens)
@@ -658,6 +711,42 @@ contract TaskManager is Initializable, ContextUpgradeable {
         t.bountyPayout = uint96(newBountyPayout);
 
         emit TaskUpdated(id, newPayout, newBountyToken, newBountyPayout, newTitle, newMetadataHash);
+    }
+
+    /**
+     * @notice Update only a non-terminal task's title and metadata hash; payout and bounty fields
+     *         are preserved verbatim.
+     * @dev Status gate matches {updateTask}: COMPLETED / CANCELLED revert `BadStatus`.
+     *
+     *      Permission gate (any non-terminal status):
+     *      - Executor or project manager: always allowed.
+     *      - Hat with `TaskPerm.EDIT_META` or `TaskPerm.EDIT_FULL`: allowed in any non-terminal status.
+     *      - Hat with `TaskPerm.CREATE`: allowed only while the task is `UNCLAIMED`
+     *        (parity with the pre-claim editing path on {updateTask}).
+     *
+     *      No budget side effects — the on-chain payout / bountyToken / bountyPayout fields are
+     *      re-emitted unchanged so subgraph consumers can index the metadata update via the
+     *      existing `TaskUpdated` event.
+     * @param id              Task ID.
+     * @param newTitle        New title.
+     * @param newMetadataHash New IPFS CID (emitted; not stored).
+     */
+    function updateTaskMetadata(uint256 id, bytes calldata newTitle, bytes32 newMetadataHash) external {
+        Layout storage l = _layout();
+        Task storage t = _task(l, id);
+        if (t.status == Status.COMPLETED || t.status == Status.CANCELLED) revert BadStatus();
+
+        bytes32 pid = t.projectId;
+        address s = _msgSender();
+        if (s != l.executor && !_isPM(pid, s)) {
+            uint8 mask = _permMask(s, pid);
+            bool canEditMeta = TaskPerm.has(mask, TaskPerm.EDIT_META) || TaskPerm.has(mask, TaskPerm.EDIT_FULL);
+            bool canEditUnclaimed = t.status == Status.UNCLAIMED && TaskPerm.has(mask, TaskPerm.CREATE);
+            if (!canEditMeta && !canEditUnclaimed) revert Unauthorized();
+        }
+
+        ValidationLib.requireValidTitle(newTitle);
+        emit TaskUpdated(id, t.payout, t.bountyToken, t.bountyPayout, newTitle, newMetadataHash);
     }
 
     /**
