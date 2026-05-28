@@ -147,6 +147,10 @@ contract OrgDeployer is Initializable {
         address universalPasskeyFactory; // Universal PasskeyAccountFactory for all orgs
         uint256 _status; // manual reentrancy guard
         IHats hatsV2; // upgrade-safe hats reference (inside ERC-7201 namespace)
+        // ZK Email protocol infra (set once per chain via PoaManager). If unset, ZkEmailInvites
+        // module deployment is skipped per-org and the feature is gracefully unavailable.
+        address zkEmailVerifier;
+        address zkEmailDkimRegistry;
     }
 
     /// @dev Legacy slot-0 hats variable. Kept for ABI compatibility with existing proxies.
@@ -219,6 +223,17 @@ contract OrgDeployer is Initializable {
         l.universalPasskeyFactory = _universalFactory;
     }
 
+    /// @notice Wire the per-chain ZK Email protocol infra. Once both are non-zero, every new
+    ///         org gets a ZkEmailInvites proxy alongside its other modules.
+    /// @dev Only callable by PoaManager. Passing address(0) for either field is a no-op for
+    ///      that field; pass both non-zero to enable the feature.
+    function setZkEmailInfrastructure(address verifier, address dkimRegistry) external {
+        Layout storage l = _layout();
+        if (msg.sender != l.poaManager) revert InvalidAddress();
+        if (verifier != address(0)) l.zkEmailVerifier = verifier;
+        if (dkimRegistry != address(0)) l.zkEmailDkimRegistry = dkimRegistry;
+    }
+
     /*════════════════  DEPLOYMENT STRUCTS  ════════════════*/
 
     struct DeploymentResult {
@@ -231,6 +246,9 @@ contract OrgDeployer is Initializable {
         address educationHub;
         address paymentManager;
         address eligibilityModule;
+        // address(0) on chains where ZK Email protocol infra (verifier + DKIM registry)
+        // has not been wired into the OrgDeployer yet — the module is skipped.
+        address zkEmailInvites;
     }
 
     struct RoleAssignments {
@@ -450,13 +468,18 @@ contract OrgDeployer is Initializable {
                 roleHatIds: gov.roleHatIds,
                 autoUpgrade: params.autoUpgrade,
                 roleAssignments: moduleRoles,
-                educationHubConfig: params.educationHubConfig
+                educationHubConfig: params.educationHubConfig,
+                zkEmailVerifier: l.zkEmailVerifier,
+                zkEmailDkimRegistry: l.zkEmailDkimRegistry,
+                accountRegistry: params.registryAddr,
+                universalFactory: l.universalPasskeyFactory
             });
 
             modules = l.modulesFactory.deployModules(moduleParams);
             result.taskManager = modules.taskManager;
             result.educationHub = modules.educationHub;
             result.paymentManager = modules.paymentManager;
+            result.zkEmailInvites = modules.zkEmailInvites;
         }
 
         /* 7. Deploy Voting Mechanisms (HybridVoting, DirectDemocracyVoting) */
@@ -486,6 +509,11 @@ contract OrgDeployer is Initializable {
 
         /* 9. Authorize QuickJoin to mint hats */
         IExecutorAdmin(result.executor).setHatMinterAuthorization(result.quickJoin, true);
+
+        /* 9b. Authorize ZkEmailInvites to mint hats (only if the module was deployed) */
+        if (result.zkEmailInvites != address(0)) {
+            IExecutorAdmin(result.executor).setHatMinterAuthorization(result.zkEmailInvites, true);
+        }
 
         /* 10. Link executor to governor */
         IExecutorAdmin(result.executor).setCaller(result.hybridVoting);
@@ -867,9 +895,11 @@ contract OrgDeployer is Initializable {
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
     {
-        // Count: QuickJoin(6) + TaskManager(14) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4)
+        // Count: QuickJoin(6) + TaskManager(14) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 4)
         uint256 count = 41;
         if (educationEnabled) count += 4;
+        bool zkEmailEnabled = result.zkEmailInvites != address(0);
+        if (zkEmailEnabled) count += 4;
 
         targets = new address[](count);
         selectors = new bytes4[](count);
@@ -896,10 +926,55 @@ contract OrgDeployer is Initializable {
             i += 4;
         }
 
-        // Set all rules to allowed with 0 gas hint (use default)
+        if (zkEmailEnabled) {
+            i = _appendZkEmailInvitesRules(targets, selectors, gasHints, result.zkEmailInvites, i);
+        }
+
+        // Set all rules to allowed (gas hints already populated where non-zero).
         for (uint256 j = 0; j < count; j++) {
             allowed[j] = true;
         }
+    }
+
+    /// @dev EmailProof tuple: (string,bytes32,uint256,string,bytes32,bytes32,bool,bytes)
+    ///      PasskeyEnrollment tuple: (bytes32,bytes32,bytes32,uint256)
+    ///      WebAuthnAuth tuple: (bytes,bytes,uint256,uint256,bytes32,bytes32)
+    function _appendZkEmailInvitesRules(
+        address[] memory targets,
+        bytes4[] memory selectors,
+        uint32[] memory gasHints,
+        address zk,
+        uint256 i
+    ) private pure returns (uint256) {
+        // Bare claim: Groth16 verify (~250k) + DKIM lookup + hat mint.
+        targets[i] = zk;
+        selectors[i] =
+            bytes4(keccak256("claimRoleByDomain((string,bytes32,uint256,string,bytes32,bytes32,bool,bytes),address)"));
+        gasHints[i] = 800_000;
+        i++;
+        targets[i] = zk;
+        selectors[i] =
+            bytes4(keccak256("claimRoleByEmail((string,bytes32,uint256,string,bytes32,bytes32,bool,bytes),address)"));
+        gasHints[i] = 800_000;
+        i++;
+        // Combined register + claim: passkey registration + account create + proof verify + hat mint.
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(string,bytes32,uint256,string,bytes32,bytes32,bool,bytes))"
+            )
+        );
+        gasHints[i] = 1_200_000;
+        i++;
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(string,bytes32,uint256,string,bytes32,bytes32,bool,bytes))"
+            )
+        );
+        gasHints[i] = 1_200_000;
+        i++;
+        return i;
     }
 
     function _appendQuickJoinRules(address[] memory targets, bytes4[] memory selectors, address qj, uint256 i)

@@ -19,6 +19,7 @@ import {EligibilityModule} from "../../src/EligibilityModule.sol";
 import {ToggleModule} from "../../src/ToggleModule.sol";
 import {PasskeyAccount} from "../../src/PasskeyAccount.sol";
 import {PasskeyAccountFactory} from "../../src/PasskeyAccountFactory.sol";
+import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
 
 // Infrastructure
 import {ImplementationRegistry} from "../../src/ImplementationRegistry.sol";
@@ -115,6 +116,7 @@ contract DeployInfrastructure is Script {
         address toggleImpl = address(new ToggleModule());
         address passkeyAccountImpl = address(new PasskeyAccount());
         address passkeyAccountFactoryImpl = address(new PasskeyAccountFactory());
+        address zkEmailInvitesImpl = address(new ZkEmailInvites());
         address implRegImpl = address(new ImplementationRegistry());
         address orgRegImpl = address(new OrgRegistry());
         address deployerImpl = address(new OrgDeployer());
@@ -215,6 +217,9 @@ contract DeployInfrastructure is Script {
         pm.addContractType("ToggleModule", toggleImpl);
         pm.addContractType("PasskeyAccount", passkeyAccountImpl);
         pm.addContractType("PasskeyAccountFactory", passkeyAccountFactoryImpl);
+        // ZkEmailInvites beacon registered unconditionally; the per-org module stays dormant
+        // until OrgDeployer.setZkEmailInfrastructure wires the verifier + DKIM registry.
+        pm.addContractType("ZkEmailInvites", zkEmailInvitesImpl);
 
         console.log("\n--- Contract Types Registered ---");
 

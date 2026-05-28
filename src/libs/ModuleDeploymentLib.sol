@@ -9,6 +9,10 @@ import {ModuleTypes} from "./ModuleTypes.sol";
 interface IPoaManager {
     function getBeaconById(bytes32 typeId) external view returns (address);
     function getCurrentImplementationById(bytes32 typeId) external view returns (address);
+    /// @dev Public `beacons` mapping getter. Unlike `getBeaconById`, returns address(0)
+    ///      for an unregistered type instead of reverting `TypeUnknown` — lets callers
+    ///      probe for optional module types without bricking on absence.
+    function beacons(bytes32 typeId) external view returns (address);
 }
 
 interface IHybridVotingInit {
@@ -92,6 +96,16 @@ interface IPaymentManagerInit {
 interface IPasskeyAccountFactoryInit {
     function initialize(address poaManager_, address accountBeacon_, address poaGuardian_, uint48 recoveryDelay_)
         external;
+}
+
+interface IZkEmailInvitesInit {
+    function initialize(
+        address executor,
+        address verifier,
+        address dkimRegistry,
+        address accountRegistry,
+        address universalFactory
+    ) external;
 }
 
 library ModuleDeploymentLib {
@@ -303,5 +317,25 @@ library ModuleDeploymentLib {
             IPasskeyAccountFactoryInit.initialize.selector, poaManager, accountBeacon, poaGuardian, recoveryDelay
         );
         factoryProxy = deployCore(config, ModuleTypes.PASSKEY_ACCOUNT_FACTORY_ID, init, factoryBeacon);
+    }
+
+    function deployZkEmailInvites(
+        DeployConfig memory config,
+        address executorAddr,
+        address verifier,
+        address dkimRegistry,
+        address accountRegistry,
+        address universalFactory,
+        address beacon
+    ) internal returns (address proxy) {
+        bytes memory init = abi.encodeWithSelector(
+            IZkEmailInvitesInit.initialize.selector,
+            executorAddr,
+            verifier,
+            dkimRegistry,
+            accountRegistry,
+            universalFactory
+        );
+        proxy = deployCore(config, ModuleTypes.ZKEMAIL_INVITES_ID, init, beacon);
     }
 }
