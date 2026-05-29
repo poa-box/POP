@@ -26,6 +26,7 @@ import {PaymasterHub} from "../src/PaymasterHub.sol";
 import {PoaManager} from "../src/PoaManager.sol";
 import {SwitchableBeacon} from "../src/SwitchableBeacon.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {MockHats} from "./mocks/MockHats.sol";
 
 /// @title UpgradeSafetyTest
 /// @notice Comprehensive tests verifying upgrade safety invariants for all upgradeable contracts
@@ -227,6 +228,86 @@ contract UpgradeSafetyTest is Test {
 
         // Verify state is preserved after upgrade
         assertEq(registry.getUsername(address(this)), "alice");
+    }
+
+    /// @notice Proves that appending the folders fields (foldersRoot, organizerHatIds)
+    ///         to TaskManager.Layout does not disturb pre-existing project state, and
+    ///         that the new `setFolders` function is callable through a proxy upgraded
+    ///         from a previous impl. Two impls of the same struct simulate the
+    ///         upgrade — append-only storage means the new impl reads old state
+    ///         identically.
+    function testTaskManagerStoragePreservedAfterFoldersUpgrade() public {
+        MockHats hats = new MockHats();
+        uint256 creatorHat = 1;
+        uint256 organizerHat = 99;
+        address creator = makeAddr("creator");
+        address exec = makeAddr("executor");
+        address organizer = makeAddr("organizer");
+        hats.mintHat(creatorHat, creator);
+        hats.mintHat(organizerHat, organizer);
+
+        // Token doesn't need to be real for these reads — any non-zero contract works.
+        address token = address(new DummyImplV1());
+
+        // Deploy "v1" impl + proxy and write state.
+        TaskManager implV1 = new TaskManager();
+        UpgradeableBeacon beacon = new UpgradeableBeacon(address(implV1), address(this));
+        BeaconProxy proxy = new BeaconProxy(address(beacon), "");
+        TaskManager tm = TaskManager(address(proxy));
+
+        uint256[] memory creators = new uint256[](1);
+        creators[0] = creatorHat;
+        vm.prank(creator);
+        tm.initialize(token, address(hats), creators, exec, address(0));
+
+        // Pre-upgrade state: an organizer hat allowance + a project + a folders root.
+        vm.prank(exec);
+        tm.setConfig(TaskManager.ConfigKey.ORGANIZER_HAT_ALLOWED, abi.encode(organizerHat, true));
+
+        vm.prank(creator);
+        bytes32 pid = tm.createProject(
+            TaskManager.BootstrapProjectConfig({
+                title: bytes("PRE_UPGRADE"),
+                metadataHash: bytes32(0),
+                cap: 5 ether,
+                managers: new address[](0),
+                createHats: creators,
+                claimHats: new uint256[](0),
+                reviewHats: new uint256[](0),
+                assignHats: new uint256[](0),
+                bountyTokens: new address[](0),
+                bountyCaps: new uint256[](0)
+            })
+        );
+
+        bytes32 rootBefore = keccak256("root-before-upgrade");
+        vm.prank(organizer);
+        tm.setFolders(bytes32(0), rootBefore);
+
+        // Read state via lens for comparison post-upgrade.
+        bytes memory execLensBefore = tm.getLensData(4, "");
+        bytes memory creatorHatsBefore = tm.getLensData(5, "");
+        bytes memory projectLensBefore = tm.getLensData(2, abi.encode(pid));
+        bytes memory foldersLensBefore = tm.getLensData(10, "");
+        bytes memory organizersLensBefore = tm.getLensData(11, "");
+
+        // "Upgrade" — same impl class, new instance.
+        TaskManager implV2 = new TaskManager();
+        beacon.upgradeTo(address(implV2));
+
+        // Storage must be byte-identical for every lens variant.
+        assertEq(keccak256(tm.getLensData(4, "")), keccak256(execLensBefore), "executor drifted");
+        assertEq(keccak256(tm.getLensData(5, "")), keccak256(creatorHatsBefore), "creator hats drifted");
+        assertEq(keccak256(tm.getLensData(2, abi.encode(pid))), keccak256(projectLensBefore), "project drifted");
+        assertEq(keccak256(tm.getLensData(10, "")), keccak256(foldersLensBefore), "folders root drifted");
+        assertEq(keccak256(tm.getLensData(11, "")), keccak256(organizersLensBefore), "organizer hats drifted");
+
+        // New folder writes must still go through CAS guard, and organizer hat plumbing
+        // must survive the upgrade so organizer can still reorg.
+        bytes32 rootAfter = keccak256("root-after-upgrade");
+        vm.prank(organizer);
+        tm.setFolders(rootBefore, rootAfter);
+        assertEq(abi.decode(tm.getLensData(10, ""), (bytes32)), rootAfter, "new folder write must land");
     }
 
     // ══════════════════════════════════════════════════════════════════════

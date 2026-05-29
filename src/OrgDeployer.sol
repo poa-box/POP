@@ -90,6 +90,8 @@ interface ITaskManagerBootstrap {
         external
         returns (bytes32[] memory projectIds);
 
+    function bootstrapGlobalPerms(uint256[] calldata hatIds, uint8[] calldata masks) external;
+
     function clearDeployer() external;
 }
 
@@ -250,6 +252,28 @@ contract OrgDeployer is Initializable {
         ITaskManagerBootstrap.BootstrapTaskConfig[] tasks;
     }
 
+    /// @notice Optional org-wide TaskManager role-permission grants applied during bootstrap.
+    /// @dev    Each `roleIndices[i]` is resolved against `params.roles[]` to a hat ID and assigned
+    ///         the corresponding `masks[i]` (a bitwise OR of `TaskPerm` bits). Equivalent to the
+    ///         executor calling `setConfig(ROLE_PERM, abi.encode(hatId, mask))` post-deployment,
+    ///         but baked into the atomic deploy. Empty arrays = skip (no grants). `roleIndices.length`
+    ///         must equal `masks.length`. Duplicate role indices: last write wins.
+    ///         Use this for org-wide grants of `TaskPerm.EDIT_META`, `EDIT_FULL`, `BUDGET`,
+    ///         `SELF_REVIEW`, or any future TaskPerm bit. Per-project grants still go through
+    ///         `BootstrapProjectConfig.{create,claim,review,assign}Hats`.
+    ///
+    ///         CAVEAT — per-project overrides shadow global grants. `TaskManager._permMask` returns
+    ///         the per-project mask for a hat IF non-zero, otherwise the global mask. If a bootstrap
+    ///         project sets per-project perms for the same hat (e.g. `createHats: [executiveRole]`),
+    ///         the global mask granted here is silently ignored on that project. To grant EDIT_FULL
+    ///         on a bootstrap project, either (a) call `setProjectRolePerm(pid, hat, existing | EDIT_FULL)`
+    ///         post-deploy via governance, or (b) create the project post-deploy without per-project
+    ///         perms for that hat. Fresh post-deploy projects inherit the global grant correctly.
+    struct TaskManagerPermConfig {
+        uint256[] roleIndices;
+        uint8[] masks;
+    }
+
     struct PaymasterConfig {
         uint256 operatorRoleIndex; // Role index for paymaster operator hat; type(uint256).max = skip (topHat-only)
         bool autoWhitelistContracts; // If true, auto-whitelist deployed org contracts
@@ -286,6 +310,7 @@ contract OrgDeployer is Initializable {
         ModulesFactory.EducationHubConfig educationHubConfig; // EducationHub deployment configuration
         BootstrapConfig bootstrap; // Optional: initial projects and tasks to create
         PaymasterConfig paymasterConfig; // Optional: paymaster configuration (funding via msg.value)
+        TaskManagerPermConfig taskManagerPerms; // Optional: org-wide TaskManager ROLE_PERM grants
     }
 
     /*════════════════  VALIDATION  ════════════════*/
@@ -473,6 +498,18 @@ contract OrgDeployer is Initializable {
             IParticipationToken(result.participationToken).setEducationHub(result.educationHub);
         }
 
+        /* 8.5a. Bootstrap org-wide TaskManager ROLE_PERM grants (EDIT_META/EDIT_FULL/BUDGET/etc).
+                 Runs BEFORE project bootstrap so per-project hat masks can override the global
+                 mask (project mask != 0 takes precedence in _permMask).
+                 Enter the block whenever EITHER array is non-empty so the length-mismatch check
+                 inside `bootstrapGlobalPerms` fires for malformed configs (e.g. empty roleIndices
+                 + non-empty masks would otherwise be silently dropped). */
+        if (params.taskManagerPerms.roleIndices.length > 0 || params.taskManagerPerms.masks.length > 0) {
+            uint256[] memory permHatIds =
+                _resolveRoleIndicesToHatIds(params.taskManagerPerms.roleIndices, gov.roleHatIds);
+            ITaskManagerBootstrap(result.taskManager).bootstrapGlobalPerms(permHatIds, params.taskManagerPerms.masks);
+        }
+
         /* 8.5. Bootstrap initial projects and tasks if configured */
         if (params.bootstrap.projects.length > 0) {
             // Resolve role indices to hat IDs in bootstrap config
@@ -646,6 +683,7 @@ contract OrgDeployer is Initializable {
         govParams.regSignature = params.regSignature;
         govParams.autoUpgrade = params.autoUpgrade;
         govParams.hybridThresholdPct = params.hybridThresholdPct;
+        govParams.hybridEarlyCloseTurnoutPct = params.hybridEarlyCloseTurnoutPct;
         govParams.ddThresholdPct = params.ddThresholdPct;
         govParams.hybridClasses = params.hybridClasses;
         govParams.hybridProposalCreatorRolesBitmap = params.roleAssignments.hybridProposalCreatorRolesBitmap;
@@ -869,8 +907,8 @@ contract OrgDeployer is Initializable {
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
     {
-        // Count: QuickJoin(6) + TaskManager(13) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4)
-        uint256 count = 40;
+        // Count: QuickJoin(6) + TaskManager(14) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4)
+        uint256 count = 41;
         if (educationEnabled) count += 4;
 
         targets = new address[](count);
@@ -986,6 +1024,11 @@ contract OrgDeployer is Initializable {
         i++;
         targets[i] = tm;
         selectors[i] = bytes4(keccak256("deleteProject(bytes32)"));
+        i++;
+        // TaskManager v4: setFolders is gated on executor OR organizerHatIds wearer;
+        // whitelist for gasless 4337/passkey calls by organizer-hat holders.
+        targets[i] = tm;
+        selectors[i] = bytes4(keccak256("setFolders(bytes32,bytes32)"));
         i++;
         return i;
     }

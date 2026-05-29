@@ -17,6 +17,8 @@ import {Executor} from "../src/Executor.sol";
 import {ParticipationToken} from "../src/ParticipationToken.sol";
 import {QuickJoin} from "../src/QuickJoin.sol";
 import {TaskManager} from "../src/TaskManager.sol";
+import {TaskManagerLens} from "../src/lens/TaskManagerLens.sol";
+import {TaskPerm} from "../src/libs/TaskPerm.sol";
 import {EducationHub} from "../src/EducationHub.sol";
 import {PaymentManager} from "../src/PaymentManager.sol";
 import {IPaymentManager} from "../src/interfaces/IPaymentManager.sol";
@@ -185,7 +187,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -283,6 +286,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             new ITaskManagerBootstrap.BootstrapProjectConfig[](0);
         ITaskManagerBootstrap.BootstrapTaskConfig[] memory tasks = new ITaskManagerBootstrap.BootstrapTaskConfig[](0);
         return OrgDeployer.BootstrapConfig({projects: projects, tasks: tasks});
+    }
+
+    function _emptyTaskManagerPerms() internal pure returns (OrgDeployer.TaskManagerPermConfig memory) {
+        return OrgDeployer.TaskManagerPermConfig({roleIndices: new uint256[](0), masks: new uint8[](0)});
     }
 
     /// @dev Helper to build bootstrap config with one project and two tasks
@@ -444,7 +451,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -506,7 +514,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -872,7 +881,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1006,7 +1016,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _buildBootstrapWithTasks(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1054,6 +1065,356 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         ITaskManagerBootstrap(result.taskManager).clearDeployer();
     }
 
+    /*━━━━━━━━━━━━━━━━━━━━ taskManagerPerms bootstrap (v5) ━━━━━━━━━━━━━━━━━━━━*/
+
+    /// @dev Common builder for a deploy that grants `mask` to the role at `roleIndex` globally.
+    function _buildParamsWithTaskPerm(uint256 roleIndex, uint8 mask)
+        internal
+        view
+        returns (OrgDeployer.DeploymentParams memory params)
+    {
+        string[] memory names = new string[](2);
+        names[0] = "DEFAULT";
+        names[1] = "EXECUTIVE";
+        string[] memory images = new string[](2);
+        images[0] = "ipfs://default";
+        images[1] = "ipfs://executive";
+        bool[] memory voting = new bool[](2);
+        voting[0] = true;
+        voting[1] = true;
+
+        uint256[] memory roleIndices = new uint256[](1);
+        roleIndices[0] = roleIndex;
+        uint8[] memory masks = new uint8[](1);
+        masks[0] = mask;
+
+        params = OrgDeployer.DeploymentParams({
+            orgId: ORG_ID,
+            orgName: "v5-bootstrap-perms",
+            metadataHash: bytes32(0),
+            registryAddr: accountRegProxy,
+            deployerAddress: orgOwner,
+            deployerUsername: "",
+            regDeadline: 0,
+            regNonce: 0,
+            regSignature: "",
+            autoUpgrade: true,
+            hybridThresholdPct: 50,
+            hybridEarlyCloseTurnoutPct: 50,
+            ddThresholdPct: 50,
+            hybridClasses: _buildLegacyClasses(50, 50, false, 4 ether),
+            ddInitialTargets: new address[](0),
+            roles: _buildSimpleRoleConfigs(names, images, voting),
+            roleAssignments: _buildDefaultRoleAssignments(),
+            metadataAdminRoleIndex: type(uint256).max,
+            passkeyEnabled: false,
+            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
+            bootstrap: _buildBootstrapWithTasks(),
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+        });
+    }
+
+    /// @dev Create a fresh project + task post-deploy with no per-project mask for the editor hat
+    ///      (so the global ROLE_PERM grant isn't shadowed). Uses the executor as creator/PM to
+    ///      avoid leaking per-project perms to any role we care about, and to give the test a
+    ///      caller that bypasses createTask's permission gate. The claimer is then a hat wearer
+    ///      whose hat IS in claimHats. Returns the fresh pid and the claimed task id.
+    function _createFreshProjectAndClaim(
+        TaskManager tm,
+        address executorAddr,
+        uint256 claimerHatId,
+        address claimerAddr
+    ) internal returns (bytes32 pid, uint256 taskId) {
+        uint256[] memory clHats = new uint256[](1);
+        clHats[0] = claimerHatId;
+
+        // Executor creates the project — bypasses createProject's creator-hat gate. We
+        // deliberately pass empty createHats so no role gets a per-project CREATE mask that
+        // could shadow a global grant we want to test.
+        vm.prank(executorAddr);
+        pid = tm.createProject(
+            TaskManager.BootstrapProjectConfig({
+                title: bytes("fresh"),
+                metadataHash: bytes32(0),
+                cap: 100 ether,
+                managers: new address[](0),
+                createHats: new uint256[](0),
+                claimHats: clHats,
+                reviewHats: new uint256[](0),
+                assignHats: new uint256[](0),
+                bountyTokens: new address[](0),
+                bountyCaps: new uint256[](0)
+            })
+        );
+
+        // Compute the next task id BEFORE pranking, otherwise the staticcall inside _nextTaskId
+        // consumes the vm.prank and createTask runs as the test contract.
+        taskId = _nextTaskId(tm);
+        vm.prank(executorAddr);
+        tm.createTask(2 ether, bytes("fresh-task"), bytes32(0), pid, address(0), 0, false);
+
+        vm.prank(claimerAddr);
+        tm.claimTask(taskId);
+    }
+
+    /// @dev Probe the next available task id without relying on internal storage.
+    function _nextTaskId(TaskManager tm) internal view returns (uint256 id) {
+        for (uint256 i; i < 1_000_000; ++i) {
+            (bool ok,) = address(tm)
+                .staticcall(abi.encodeWithSelector(TaskManager.getLensData.selector, uint8(1), abi.encode(i)));
+            if (!ok) return i;
+        }
+        revert("no available task id");
+    }
+
+    function testBootstrapTaskManagerPerms_GrantsEditFullAtDeployTime() public {
+        // Grant EDIT_FULL to EXECUTIVE (role 1) at deploy time. orgOwner wears EXECUTIVE.
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(1, TaskPerm.EDIT_FULL);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        TaskManager tm = TaskManager(result.taskManager);
+
+        // Pre-flight: orgOwner must wear EXECUTIVE for the rest of this test to mean anything.
+        uint256 executiveHat = orgRegistry.getRoleHat(ORG_ID, 1);
+        require(IHats(SEPOLIA_HATS).isWearerOfHat(orgOwner, executiveHat), "orgOwner must wear EXECUTIVE");
+
+        // QuickJoin a member who'll claim the fresh task.
+        address member = makeAddr("v5-member");
+        vm.prank(result.executor);
+        QuickJoin(result.quickJoin).quickJoinNoUserMasterDeploy(member);
+
+        // Create a fresh project with no per-project perms for any role — global EDIT_FULL
+        // grant for EXECUTIVE applies via _permMask's fallback path.
+        uint256 defaultHat = orgRegistry.getRoleHat(ORG_ID, 0);
+        (, uint256 taskId) = _createFreshProjectAndClaim(tm, result.executor, defaultHat, member);
+
+        // orgOwner wears EXECUTIVE → has global EDIT_FULL → can edit the CLAIMED task on the
+        // fresh project (no per-project mask shadowing the global grant).
+        vm.prank(orgOwner);
+        tm.updateTask(taskId, 25 ether, bytes("edited-at-deploy"), bytes32(0), address(0), 0);
+
+        // And updateTaskMetadata is also available to EDIT_FULL holders.
+        vm.prank(orgOwner);
+        tm.updateTaskMetadata(taskId, bytes("meta-edit"), bytes32(uint256(0xfeed)));
+    }
+
+    function testBootstrapTaskManagerPerms_GrantsEditMetaOnlyAtDeployTime() public {
+        // Grant EDIT_META (not EDIT_FULL) to EXECUTIVE.
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(1, TaskPerm.EDIT_META);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        TaskManager tm = TaskManager(result.taskManager);
+
+        address member = makeAddr("v5-member-meta");
+        vm.prank(result.executor);
+        QuickJoin(result.quickJoin).quickJoinNoUserMasterDeploy(member);
+
+        uint256 defaultHat = orgRegistry.getRoleHat(ORG_ID, 0);
+        (, uint256 taskId) = _createFreshProjectAndClaim(tm, result.executor, defaultHat, member);
+
+        // EDIT_META only — metadata edit succeeds, full edit reverts.
+        vm.prank(orgOwner);
+        tm.updateTaskMetadata(taskId, bytes("meta-only"), bytes32(uint256(0xab)));
+
+        vm.prank(orgOwner);
+        vm.expectRevert(TaskManager.Unauthorized.selector);
+        tm.updateTask(taskId, 50 ether, bytes("nope"), bytes32(0), address(0), 0);
+    }
+
+    function testBootstrapTaskManagerPerms_BootstrapProjectOverrideShadowsGlobalGrant() public {
+        // CRITICAL CAVEAT: if a bootstrap project ALSO sets per-project perms for the same hat,
+        // the project mask replaces the global mask in _permMask. The global EDIT_FULL grant is
+        // silently shadowed on that project. To get EDIT_FULL on a bootstrap project, the operator
+        // must call setProjectRolePerm(pid, hat, existingMask | EDIT_FULL) post-deploy. This test
+        // pins that behavior so the caveat doesn't regress.
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(1, TaskPerm.EDIT_FULL);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        TaskManager tm = TaskManager(result.taskManager);
+
+        // Bootstrap task 0 is in the bootstrap project, which set per-project perms for EXECUTIVE
+        // (createHats/claimHats/etc.). The global EDIT_FULL grant is shadowed there.
+        address member = makeAddr("v5-shadow-member");
+        vm.prank(result.executor);
+        QuickJoin(result.quickJoin).quickJoinNoUserMasterDeploy(member);
+        vm.prank(member);
+        tm.claimTask(0);
+
+        vm.prank(orgOwner);
+        vm.expectRevert(TaskManager.Unauthorized.selector);
+        tm.updateTask(0, 25 ether, bytes("shadowed"), bytes32(0), address(0), 0);
+    }
+
+    function testBootstrapTaskManagerPerms_EmptyRoleIndicesWithMasksRevertsAtomic() public {
+        // Regression: an earlier draft only entered the bootstrapGlobalPerms branch when
+        // roleIndices.length > 0, which silently dropped a malformed config that had empty
+        // roleIndices + non-empty masks. The deploy must revert atomically so the misconfig
+        // surfaces immediately.
+        vm.startPrank(orgOwner);
+
+        string[] memory names = new string[](2);
+        names[0] = "DEFAULT";
+        names[1] = "EXECUTIVE";
+        string[] memory images = new string[](2);
+        images[0] = "ipfs://default";
+        images[1] = "ipfs://executive";
+        bool[] memory voting = new bool[](2);
+        voting[0] = true;
+        voting[1] = true;
+
+        // Empty roleIndices + non-empty masks — the malformed-config case.
+        uint256[] memory roleIndices = new uint256[](0);
+        uint8[] memory masks = new uint8[](1);
+        masks[0] = TaskPerm.EDIT_FULL;
+
+        OrgDeployer.DeploymentParams memory params = OrgDeployer.DeploymentParams({
+            orgId: ORG_ID,
+            orgName: "v5-empty-roles-masks",
+            metadataHash: bytes32(0),
+            registryAddr: accountRegProxy,
+            deployerAddress: orgOwner,
+            deployerUsername: "",
+            regDeadline: 0,
+            regNonce: 0,
+            regSignature: "",
+            autoUpgrade: true,
+            hybridThresholdPct: 50,
+            hybridEarlyCloseTurnoutPct: 50,
+            ddThresholdPct: 50,
+            hybridClasses: _buildLegacyClasses(50, 50, false, 4 ether),
+            ddInitialTargets: new address[](0),
+            roles: _buildSimpleRoleConfigs(names, images, voting),
+            roleAssignments: _buildDefaultRoleAssignments(),
+            metadataAdminRoleIndex: type(uint256).max,
+            passkeyEnabled: false,
+            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
+            bootstrap: _emptyBootstrap(),
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+        });
+
+        vm.expectRevert(TaskManager.ArrayLengthMismatch.selector);
+        deployer.deployFullOrg(params);
+        vm.stopPrank();
+    }
+
+    function testBootstrapTaskManagerPerms_LengthMismatchRevertsAtomicDeploy() public {
+        vm.startPrank(orgOwner);
+
+        string[] memory names = new string[](2);
+        names[0] = "DEFAULT";
+        names[1] = "EXECUTIVE";
+        string[] memory images = new string[](2);
+        images[0] = "ipfs://default";
+        images[1] = "ipfs://executive";
+        bool[] memory voting = new bool[](2);
+        voting[0] = true;
+        voting[1] = true;
+
+        uint256[] memory roleIndices = new uint256[](2);
+        roleIndices[0] = 0;
+        roleIndices[1] = 1;
+        uint8[] memory masks = new uint8[](1); // mismatched length
+        masks[0] = TaskPerm.EDIT_FULL;
+
+        OrgDeployer.DeploymentParams memory params = OrgDeployer.DeploymentParams({
+            orgId: ORG_ID,
+            orgName: "v5-bad-perms",
+            metadataHash: bytes32(0),
+            registryAddr: accountRegProxy,
+            deployerAddress: orgOwner,
+            deployerUsername: "",
+            regDeadline: 0,
+            regNonce: 0,
+            regSignature: "",
+            autoUpgrade: true,
+            hybridThresholdPct: 50,
+            hybridEarlyCloseTurnoutPct: 50,
+            ddThresholdPct: 50,
+            hybridClasses: _buildLegacyClasses(50, 50, false, 4 ether),
+            ddInitialTargets: new address[](0),
+            roles: _buildSimpleRoleConfigs(names, images, voting),
+            roleAssignments: _buildDefaultRoleAssignments(),
+            metadataAdminRoleIndex: type(uint256).max,
+            passkeyEnabled: false,
+            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
+            bootstrap: _emptyBootstrap(),
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+        });
+
+        // The whole deploy reverts atomically — no partial state.
+        vm.expectRevert(TaskManager.ArrayLengthMismatch.selector);
+        deployer.deployFullOrg(params);
+        vm.stopPrank();
+    }
+
+    function testBootstrapTaskManagerPerms_InvalidRoleIndexReverts() public {
+        vm.startPrank(orgOwner);
+
+        // Role index 99 is out of bounds (only 2 roles defined).
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(99, TaskPerm.EDIT_FULL);
+
+        vm.expectRevert(bytes("Invalid role index in bootstrap config"));
+        deployer.deployFullOrg(params);
+        vm.stopPrank();
+    }
+
+    function testBootstrapTaskManagerPerms_GrantedHatIsEnumeratedPostDeploy() public {
+        // After deploy, the granted hat should be in permissionHatIds (so setProjectRolePerm
+        // and other downstream consumers can iterate it correctly).
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(1, TaskPerm.EDIT_FULL);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        TaskManager tm = TaskManager(result.taskManager);
+        TaskManagerLens permsLens = new TaskManagerLens();
+        uint256[] memory permHats =
+            abi.decode(permsLens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[]));
+
+        // Bootstrap also added per-project perms for createHats/claimHats/etc, so we just assert
+        // that the granted EXECUTIVE hat is present.
+        uint256 executiveHatId = orgRegistry.getRoleHat(ORG_ID, 1);
+        bool found;
+        for (uint256 i; i < permHats.length; ++i) {
+            if (permHats[i] == executiveHatId) {
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "executive hat enumerated after bootstrap");
+    }
+
+    function testBootstrapTaskManagerPerms_EmptyArraysSkipsTheCall() public {
+        // Backwards-compat: empty taskManagerPerms = no grants, no revert (existing deploys work).
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(0, 0); // overwritten below
+        params.taskManagerPerms = _emptyTaskManagerPerms();
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        // Deploy succeeded. Without any global EDIT_FULL grant, post-claim edits revert.
+        TaskManager tm = TaskManager(result.taskManager);
+
+        address member = makeAddr("v5-empty-member");
+        vm.prank(result.executor);
+        QuickJoin(result.quickJoin).quickJoinNoUserMasterDeploy(member);
+        vm.prank(member);
+        tm.claimTask(0);
+
+        vm.prank(orgOwner);
+        vm.expectRevert(TaskManager.Unauthorized.selector);
+        tm.updateTask(0, 50 ether, bytes("nope"), bytes32(0), address(0), 0);
+    }
+
     function testDeployFullOrgMismatchExecutorReverts() public {
         _deployFullOrg();
         address other = address(99);
@@ -1096,7 +1457,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -1141,7 +1503,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1229,7 +1592,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1276,8 +1640,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "voter1 wearing executive hat should be admin of default hat"
         );
 
-        // Now voter1 should be able to change eligibility for voter2's default role hat
-        vm.prank(voter1);
+        // Now the executor (super admin) can change eligibility for voter2's default role hat
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
         // Verify the eligibility was changed for voter2
@@ -1303,7 +1667,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         );
 
         // Change voter2 back to eligible
-        vm.prank(voter1);
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, true, true);
 
         // Verify the eligibility was changed back for voter2
@@ -1316,17 +1680,19 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "voter2's default role hat should have good standing"
         );
 
-        // Test that someone without the executive role hat cannot change eligibility
-        vm.prank(voter2);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotAuthorizedAdmin.selector));
+        // Test that someone other than the super admin cannot change eligibility
+        // (Even voter1 wearing the executive hat is no longer a hat-admin — only superAdmin can write.)
+        vm.prank(voter1);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
-        // In the new system, admin permissions are handled natively by the Hats tree structure
-        // The EligibilityAdminHat is admin of all role hats created under it
+        vm.prank(voter2);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
+        EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
-        // Test full flow: Executive makes someone eligible and they claim the hat
+        // Test full flow: Executor makes someone ineligible and verifies mint reverts
         // First, make voter2 ineligible for the default role hat
-        vm.prank(voter1);
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
         // Verify voter2 cannot mint the default role hat when ineligible
@@ -1334,8 +1700,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         vm.expectRevert();
         IHats(SEPOLIA_HATS).mintHat(defaultRoleHat, voter2);
 
-        // Executive (voter1) makes voter2 eligible for the default role hat
-        vm.prank(voter1);
+        // Executor makes voter2 eligible for the default role hat
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, true, true);
 
         // Now exec should be able to mint the default role hat for voter2
@@ -1355,7 +1721,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         assertTrue(standing2, "voter2 should have good standing for default role hat");
 
         // Test revoking eligibility while wearing the hat
-        vm.prank(voter1);
+        vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).setWearerEligibility(voter2, defaultRoleHat, false, false);
 
         // Verify voter2 is now ineligible (and thus no longer wearing the hat)
@@ -1384,10 +1750,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         _mintAdminHat(setup.exec, setup.eligibilityModule, setup.executiveRoleHat, voter1);
         _assertWearingHat(voter1, setup.executiveRoleHat, true, "voter1 executive hat");
 
-        // Executive (voter1) makes both people eligible for the DEFAULT role hat
-        vm.prank(voter1);
+        // Executor (super admin) makes both people eligible for the DEFAULT role hat
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person1, setup.defaultRoleHat, true, true);
-        vm.prank(voter1);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person2, setup.defaultRoleHat, true, true);
 
         // Verify both people are eligible for the DEFAULT role hat
@@ -1407,8 +1773,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         _assertWearingHat(person1, setup.defaultRoleHat, true, "person1 after minting");
         _assertWearingHat(person2, setup.defaultRoleHat, true, "person2 after minting");
 
-        // Executive (voter1) turns off person1's hat but leaves person2's hat on
-        vm.prank(voter1);
+        // Executor turns off person1's hat but leaves person2's hat on
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person1, setup.defaultRoleHat, false, false);
 
         // Verify person1 is no longer eligible and not wearing the hat
@@ -1423,16 +1789,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         );
         _assertWearingHat(person2, setup.defaultRoleHat, true, "person2 still wearing");
 
-        // Executive can turn person1's hat back on
-        vm.prank(voter1);
+        // Executor can turn person1's hat back on
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person1, setup.defaultRoleHat, true, true);
 
         // Verify person1 is eligible again
         _assertEligibilityStatus(setup.eligibilityModule, person1, setup.defaultRoleHat, true, true, "person1 restored");
         _assertWearingHat(person1, setup.defaultRoleHat, true, "person1 restored");
 
-        // Executive can also turn off person2's hat
-        vm.prank(voter1);
+        // Executor can also turn off person2's hat
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person2, setup.defaultRoleHat, false, false);
 
         // Verify person2 is no longer eligible and not wearing the hat
@@ -1441,9 +1807,13 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         );
         _assertWearingHat(person2, setup.defaultRoleHat, false, "person2 revoked");
 
-        // Test that only the executive can control these hats - person1 cannot control person2's hat
+        // Test that only the super admin can control these hats - even voter1 wearing the executive hat fails
+        vm.prank(voter1);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(person2, setup.defaultRoleHat, true, true);
+
         vm.prank(person1);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotAuthorizedAdmin.selector));
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(person2, setup.defaultRoleHat, true, true);
 
         // Test that the super admin (executor) can still control all hats
@@ -1504,7 +1874,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1643,11 +2014,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         _mintHat(setup.exec, setup.memberRoleHat, voter2);
         _mintHat(setup.exec, setup.memberRoleHat, voucher2);
 
-        // Test 1: Admin can directly make someone eligible (hierarchy path)
-        vm.prank(voter1);
+        // Test 1: Super admin (executor) can directly make someone eligible
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(candidate1, setup.defaultRoleHat, true, true);
         _assertEligibilityStatus(
-            setup.eligibilityModule, candidate1, setup.defaultRoleHat, true, true, "Candidate1 via hierarchy"
+            setup.eligibilityModule, candidate1, setup.defaultRoleHat, true, true, "Candidate1 via super admin"
         );
 
         // Test 2: Someone else can become eligible via vouching path
@@ -1662,8 +2033,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             setup.eligibilityModule, candidate2, setup.defaultRoleHat, true, true, "Candidate2 via vouching"
         );
 
-        // Test 3: Admin can revoke hierarchy eligibility, but vouching still works
-        vm.prank(voter1);
+        // Test 3: Super admin attempts to revoke per-wearer eligibility, but vouching still keeps candidate eligible
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(candidate2, setup.defaultRoleHat, false, false);
         _assertEligibilityStatus(
             setup.eligibilityModule,
@@ -1671,10 +2042,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             setup.defaultRoleHat,
             true,
             true,
-            "Candidate2 after hierarchy revocation"
+            "Candidate2 after super-admin revocation"
         );
 
-        // Test 4: If vouching is revoked, hierarchy takes over
+        // Test 4: If vouching is revoked, the per-wearer setting takes over
         _revokeVouch(voter2, setup.eligibilityModule, candidate2, setup.defaultRoleHat);
         _assertEligibilityStatus(
             setup.eligibilityModule, candidate2, setup.defaultRoleHat, false, false, "Candidate2 after vouch revocation"
@@ -1723,7 +2094,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1968,7 +2340,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2109,7 +2482,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.expectRevert(OrgDeployer.InvalidRoleConfiguration.selector);
@@ -2389,7 +2763,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2650,7 +3025,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2737,7 +3113,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -2793,7 +3170,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2964,7 +3342,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -3141,7 +3520,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // Marketing executive creates a new marketing hat for their team
         // (Executive role wearers are admins of the default role, so they can create child hats under it)
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         uint256 marketingHatId = EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -3180,12 +3559,12 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         singleStanding[0] = true;
 
         // First set eligibility
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .batchSetWearerEligibility(marketingHatId, singleMember, singleEligible, singleStanding);
 
-        // Then mint the hat directly (marketing executive has admin rights)
-        vm.prank(marketingExecutive);
+        // Then mint the hat directly (executor mints since marketing executive no longer has admin rights)
+        vm.prank(setup.exec);
         bool success = IHats(SEPOLIA_HATS).mintHat(marketingHatId, marketingMember1);
         assertTrue(success, "Hat minting should succeed");
 
@@ -3209,17 +3588,17 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         multipleStanding[1] = false; // Member3 has poor standing
 
         // First set eligibility for multiple members
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .batchSetWearerEligibility(marketingHatId, multipleMembers, multipleEligible, multipleStanding);
 
         // Then mint hats individually (only for eligible members)
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         bool success2 = IHats(SEPOLIA_HATS).mintHat(marketingHatId, marketingMember2);
         assertTrue(success2, "Hat minting should succeed for eligible member");
 
         // Try to mint for ineligible member3 - should fail
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         vm.expectRevert(); // Should revert because member3 is not eligible
         IHats(SEPOLIA_HATS).mintHat(marketingHatId, marketingMember3);
 
@@ -3248,7 +3627,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         initialStanding[0] = true;
         initialStanding[1] = true;
 
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         uint256 campaignHatId = EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -3284,9 +3663,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         assertFalse(eligible3, "Member 3 should not be eligible for campaign hat by default");
         assertTrue(standing3, "Member 3 should have good standing by default");
 
-        // Test that only the marketing executive can create hats under their role
-        vm.prank(marketingMember1);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotAuthorizedAdmin.selector));
+        // Test that only the super admin can create hats — even the marketing executive fails now
+        vm.prank(marketingExecutive);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
         EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -3303,8 +3682,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             })
             );
 
-        // Test that marketing executive can manage eligibility of their created hats
-        vm.prank(marketingExecutive);
+        // Test that the executor (super admin) can manage eligibility of created hats
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(marketingMember3, campaignHatId, true, true);
 
         // Verify member3 is now eligible for the campaign hat
@@ -3322,7 +3701,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         member3Standing[0] = true;
 
         // Set eligibility first
-        vm.prank(marketingExecutive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .batchSetWearerEligibility(campaignHatId, member3Array, member3Eligible, member3Standing);
 
@@ -3361,7 +3740,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         initialStanding[0] = true;
         initialStanding[1] = true;
 
-        vm.prank(executive);
+        vm.prank(setup.exec);
         uint256 teamHatId = EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -3790,7 +4169,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // Now register this hat creation - should emit HatCreatedWithEligibility event
         vm.expectEmit(true, true, true, true);
         emit HatCreatedWithEligibility(
-            executive, // creator
+            setup.exec, // creator (super admin)
             setup.defaultRoleHat, // parentHatId
             newHatId, // newHatId
             true, // defaultEligible
@@ -3798,7 +4177,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             0 // mintedCount (registerHatCreation doesn't mint)
         );
 
-        vm.prank(executive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).registerHatCreation(newHatId, setup.defaultRoleHat, true, true);
     }
 
@@ -3825,9 +4204,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // Expect DefaultEligibilityUpdated event
         vm.expectEmit(true, false, false, true);
-        emit DefaultEligibilityUpdated(newHatId, false, true, executive);
+        emit DefaultEligibilityUpdated(newHatId, false, true, setup.exec);
 
-        vm.prank(executive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .registerHatCreation(
                 newHatId,
@@ -3837,7 +4216,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             );
     }
 
-    // Test authorization - only superAdmin or hat admin can call registerHatCreation
+    // Test authorization - only superAdmin can call registerHatCreation
     function testRegisterHatCreationAuthorization() public {
         TestOrgSetup memory setup = _createTestOrg("Auth Test DAO");
         address executive = voter1;
@@ -3862,11 +4241,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // Unauthorized user should not be able to register
         vm.prank(unauthorized);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotAuthorizedAdmin.selector));
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
         EligibilityModule(setup.eligibilityModule).registerHatCreation(newHatId, setup.defaultRoleHat, true, true);
 
-        // Hat admin (executive) should be able to register
+        // Hat admin (executive) is no longer authorized — only the super admin (executor) can
         vm.prank(executive);
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
+        EligibilityModule(setup.eligibilityModule).registerHatCreation(newHatId, setup.defaultRoleHat, true, true);
+
+        // Super admin should be able to register
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).registerHatCreation(newHatId, setup.defaultRoleHat, true, true);
     }
 
@@ -3893,7 +4277,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             );
 
         // Register with specific eligibility settings (not eligible, good standing)
-        vm.prank(executive);
+        vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule)
             .registerHatCreation(
                 newHatId,
@@ -3952,7 +4336,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         // Record logs to verify HatCreatedWithEligibility events were emitted
@@ -4011,6 +4396,241 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         assertTrue(standing, "Wearer should have good standing by default after registration");
     }
 
+    /*═══════════════════════════════════════════════════════════════════════════════════
+                  SUPER-ADMIN GATING — POST-HIERARCHY-LOCKDOWN TESTS
+
+        Verifies the invariant introduced when `onlyHatAdmin` was replaced by
+        `onlySuperAdmin` on all EligibilityModule write paths: only the org's
+        Executor (the superAdmin) may mutate eligibility, hat configuration, or
+        metadata. Hats-protocol hierarchical admins may still vouch (when
+        `combineWithHierarchy` is enabled) but cannot directly write — and the
+        eligibility check now blocks the previously-implicit "admin mints hat"
+        bypass.
+    ═══════════════════════════════════════════════════════════════════════════════════*/
+
+    /// @dev Returns voter1 wearing the executive role hat — a Hats hierarchical admin
+    ///      of the default and member role hats, but NOT the EligibilityModule's superAdmin.
+    function _hierarchyAdmin(TestOrgSetup memory setup) internal returns (address hierarchyAdmin) {
+        hierarchyAdmin = voter1;
+        _mintAdminHat(setup.exec, setup.eligibilityModule, setup.executiveRoleHat, hierarchyAdmin);
+    }
+
+    function testHierarchyAdminCannotSetWearerEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: setWearer");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(address(0x55), setup.defaultRoleHat, true, true);
+    }
+
+    function testHierarchyAdminCannotSetDefaultEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: setDefault");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setDefaultEligibility(setup.defaultRoleHat, false, false);
+    }
+
+    function testHierarchyAdminCannotClearWearerEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: clear");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        // Executor first grants per-wearer eligibility so there's something to clear.
+        vm.prank(setup.exec);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(address(0x55), setup.defaultRoleHat, true, true);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).clearWearerEligibility(address(0x55), setup.defaultRoleHat);
+    }
+
+    function testHierarchyAdminCannotSetBulkWearerEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: setBulk");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address[] memory wearers = new address[](1);
+        wearers[0] = address(0x55);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setBulkWearerEligibility(wearers, setup.defaultRoleHat, true, true);
+    }
+
+    function testHierarchyAdminCannotBatchSetWearerEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: batchSet");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address[] memory wearers = new address[](1);
+        wearers[0] = address(0x55);
+        bool[] memory eligibles = new bool[](1);
+        eligibles[0] = true;
+        bool[] memory standings = new bool[](1);
+        standings[0] = true;
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule)
+            .batchSetWearerEligibility(setup.defaultRoleHat, wearers, eligibles, standings);
+    }
+
+    function testHierarchyAdminCannotCreateHatWithEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: createHat");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule)
+            .createHatWithEligibility(
+                EligibilityModule.CreateHatParams({
+                parentHatId: setup.defaultRoleHat,
+                details: "Forbidden Child Hat",
+                maxSupply: 1,
+                _mutable: true,
+                imageURI: "",
+                defaultEligible: true,
+                defaultStanding: true,
+                mintToAddresses: new address[](0),
+                wearerEligibleFlags: new bool[](0),
+                wearerStandingFlags: new bool[](0)
+            })
+            );
+    }
+
+    function testHierarchyAdminCannotUpdateHatMetadata() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: updateMeta");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).updateHatMetadata(setup.defaultRoleHat, "Renamed", bytes32(0));
+    }
+
+    /// @dev The critical end-to-end test: with vouching configured + default eligibility false,
+    ///      a Hats-hierarchical admin cannot mint a wearer into the hat by ANY path. The only
+    ///      way for a new wearer to join is through the vouching mechanism.
+    function testHierarchyAdminCannotBypassVouchingViaDirectMint() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: bypass vouching");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address candidate = address(0xC4);
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, candidate);
+
+        // Vouching configured: 1 vouch from an executiveRoleHat wearer (the membership hat) suffices.
+        // Default eligibility is set to false so vouching is the only entry path.
+        _configureVouching(
+            setup.eligibilityModule, setup.exec, setup.defaultRoleHat, 1, setup.executiveRoleHat, false, true
+        );
+
+        // Path 1 (eligibility write) — blocked: hierarchy admin is not the superAdmin.
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(candidate, setup.defaultRoleHat, true, true);
+
+        // Path 2 (direct Hats mint) — blocked: candidate is ineligible by default, Hats reverts.
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert();
+        IHats(SEPOLIA_HATS).mintHat(setup.defaultRoleHat, candidate);
+        _assertWearingHat(candidate, setup.defaultRoleHat, false, "candidate after blocked direct-mint");
+
+        // Path 3 (vouching) — the documented entry path succeeds. hierarchyAdmin wears the
+        // executive role hat, which is the configured membership hat for this vouch.
+        _vouchFor(hierarchyAdmin, setup.eligibilityModule, candidate, setup.defaultRoleHat);
+        _assertEligibilityStatus(
+            setup.eligibilityModule, candidate, setup.defaultRoleHat, true, true, "candidate after vouch"
+        );
+
+        vm.prank(candidate);
+        EligibilityModule(setup.eligibilityModule).claimVouchedHat(setup.defaultRoleHat);
+        _assertWearingHat(candidate, setup.defaultRoleHat, true, "candidate after claim");
+    }
+
+    /// @dev A hierarchy admin cannot force-revoke an existing wearer either — the only
+    ///      revocation paths are the executor's setWearerEligibility(false) or
+    ///      claim-time vouch revocation.
+    function testHierarchyAdminCannotForceRevokeWearer() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: force revoke");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address member = address(0xBE);
+
+        // Executor mints the hat to member.
+        vm.prank(setup.exec);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(member, setup.defaultRoleHat, true, true);
+        _mintHat(setup.exec, setup.defaultRoleHat, member);
+        _assertWearingHat(member, setup.defaultRoleHat, true, "member wearing hat pre-attack");
+
+        // Hierarchy admin's attempt to revoke is rejected.
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(member, setup.defaultRoleHat, false, false);
+
+        _assertWearingHat(member, setup.defaultRoleHat, true, "member still wearing hat after blocked revoke");
+    }
+
+    /// @dev Positive case: `combineWithHierarchy` still lets a Hats-hierarchical admin
+    ///      participate as a voucher even when they do not wear the configured
+    ///      membership hat directly. This is the one residual power hierarchy retains.
+    function testHierarchyAdminCanStillVouchWhenCombineEnabled() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: hierarchy vouches");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address candidate = address(0xC5);
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, candidate);
+
+        // Membership hat = memberRoleHat (which hierarchyAdmin does NOT wear).
+        // combineWithHierarchy = true means Hats-hierarchical admins of defaultRoleHat may also vouch.
+        _configureVouching(
+            setup.eligibilityModule, setup.exec, setup.defaultRoleHat, 1, setup.memberRoleHat, true, true
+        );
+
+        // hierarchyAdmin wears the executive role hat → admin of defaultRoleHat in Hats →
+        // qualifies as a voucher through the hierarchy branch of the auth check.
+        _vouchFor(hierarchyAdmin, setup.eligibilityModule, candidate, setup.defaultRoleHat);
+        _assertEligibilityStatus(
+            setup.eligibilityModule,
+            candidate,
+            setup.defaultRoleHat,
+            true,
+            true,
+            "candidate eligible via hierarchy-vouch path"
+        );
+    }
+
+    /// @dev Negative twin of the above: with `combineWithHierarchy = false`, a hierarchical
+    ///      admin who does not wear the membership hat is rejected as a voucher.
+    function testHierarchyAdminCannotVouchWhenCombineDisabled() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: hierarchy denied");
+        address hierarchyAdmin = _hierarchyAdmin(setup);
+        address candidate = address(0xC6);
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, candidate);
+
+        // Membership hat = memberRoleHat (not worn by hierarchyAdmin), combineWithHierarchy = false.
+        _configureVouching(
+            setup.eligibilityModule, setup.exec, setup.defaultRoleHat, 1, setup.memberRoleHat, false, true
+        );
+
+        vm.prank(hierarchyAdmin);
+        vm.expectRevert(EligibilityModule.NotAuthorizedToVouch.selector);
+        EligibilityModule(setup.eligibilityModule).vouchFor(candidate, setup.defaultRoleHat);
+    }
+
+    /// @dev A non-superAdmin who has no hat affiliation at all is still rejected. Covers
+    ///      the trivial case alongside the hierarchy-aware cases above so that any future
+    ///      regression that re-introduces a wildcard auth branch fails clearly.
+    function testUnaffiliatedAddressCannotMutateEligibility() public {
+        TestOrgSetup memory setup = _createTestOrg("Auth: stranger");
+        address stranger = address(0xDEAD);
+
+        vm.prank(stranger);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(stranger, setup.defaultRoleHat, true, true);
+
+        vm.prank(stranger);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).setDefaultEligibility(setup.defaultRoleHat, true, true);
+
+        vm.prank(stranger);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        EligibilityModule(setup.eligibilityModule).updateHatMetadata(setup.defaultRoleHat, "X", bytes32(0));
+    }
+
     /*══════════════════════════════════════════════════════════════════════════════
                            OPTIONAL EDUCATIONHUB TESTS
     ══════════════════════════════════════════════════════════════════════════════*/
@@ -4057,7 +4677,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4123,7 +4744,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4202,7 +4824,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4639,7 +5262,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(deployerSigner);
@@ -4686,7 +5310,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -4744,7 +5369,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(deployerSigner);
@@ -4798,7 +5424,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -4850,7 +5477,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -4906,7 +5534,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -4956,7 +5585,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params); // Should NOT revert
@@ -5008,7 +5638,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5075,7 +5706,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5096,6 +5728,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // Check TaskManager claimTask(uint256) is whitelisted
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("claimTask(uint256)")));
         assertTrue(rule.allowed, "TaskManager claimTask should be whitelisted");
+
+        // Check TaskManager setFolders is whitelisted (v4 bootstrap)
+        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)")));
+        assertTrue(rule.allowed, "TaskManager setFolders should be whitelisted (v4 bootstrap)");
 
         // Check HybridVoting vote is whitelisted
         bytes4 voteSel = bytes4(keccak256("vote(uint256,uint8[],uint8[])"));
@@ -5170,7 +5806,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5225,7 +5862,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5296,7 +5934,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5364,7 +6003,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5441,7 +6081,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5648,7 +6289,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5724,7 +6366,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5794,7 +6437,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5863,7 +6507,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         // No ETH sent — budgets are the only config
@@ -6103,7 +6748,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: true,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -6362,7 +7008,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -6587,7 +7234,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
