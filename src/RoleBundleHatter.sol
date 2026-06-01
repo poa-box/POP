@@ -323,7 +323,15 @@ contract RoleBundleHatter is Initializable, IRoleBundleHatter {
             address em = l.eligibilityModule;
             if (em != address(0)) {
                 for (uint256 i; i < count;) {
-                    _setEligibilityTrue(em, user, toMint[i]);
+                    // Only re-enable eligibility for a wearer who ALREADY has an explicit rule
+                    // (e.g. a prior cascade-revoke wrote (false,false)). Wearers with no specific
+                    // rule are left to the hat's DEFAULT eligibility, so an eligibility gate such as
+                    // vouching (defaults.eligible=false) is not bypassed on a first-time mint. This
+                    // still fixes re-mint-after-revoke (those wearers have a specific rule) and skips
+                    // the wasted write for fresh wearers (the common case).
+                    if (_hasSpecificEligibilityRule(em, user, toMint[i])) {
+                        _setEligibilityTrue(em, user, toMint[i]);
+                    }
                     unchecked {
                         ++i;
                     }
@@ -341,6 +349,16 @@ contract RoleBundleHatter is Initializable, IRoleBundleHatter {
         }
 
         emit RoleMinted(roleHat, user, count);
+    }
+
+    /// @dev True if the EligibilityModule already holds an explicit per-wearer rule for
+    ///      (user, hatId). Scopes the pre-mint eligibility reset to wearers who were set
+    ///      explicitly before (e.g. cascade-revoked), so the reset never overrides a
+    ///      default-driven gate (such as vouching) for a fresh wearer.
+    function _hasSpecificEligibilityRule(address em, address user, uint256 hatId) internal view returns (bool) {
+        (bool ok, bytes memory ret) =
+            em.staticcall(abi.encodeWithSignature("hasSpecificWearerRules(address,uint256)", user, hatId));
+        return ok && ret.length >= 32 && abi.decode(ret, (bool));
     }
 
     /// @dev Internal helper to set a wearer's eligibility to true. Mirrors

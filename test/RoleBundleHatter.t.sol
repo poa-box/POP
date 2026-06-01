@@ -68,6 +68,10 @@ contract MockEligibilityModule {
     // mintRole correctly re-enables eligibility before invoking the mint.
     uint256 public resetCount;
     bool public shouldRevert;
+    // Mirror EligibilityModule's `hasSpecificWearerRules`: once an explicit (user, hat) rule has
+    // been written, this is true. RoleBundleHatter.mintRole gates its pre-mint eligibility reset
+    // on this, so the mock must track it for the re-mint-after-revoke path to behave like prod.
+    mapping(address => mapping(uint256 => bool)) internal _hasRule;
 
     constructor(IHats _hats) {
         hats = _hats;
@@ -85,9 +89,14 @@ contract MockEligibilityModule {
         } else {
             resetCount++;
         }
+        _hasRule[user][hatId] = true;
         // Mirror the live behavior: write eligibility through to Hats so isWearerOfHat queries
         // see the post-revoke state.
         hats.setHatWearerStatus(hatId, user, eligible, standing);
+    }
+
+    function hasSpecificWearerRules(address user, uint256 hatId) external view returns (bool) {
+        return _hasRule[user][hatId];
     }
 
     function recordCount() external view returns (uint256) {
@@ -1572,11 +1581,11 @@ contract RoleBundleHatterTest is Test {
         assertTrue(hats.isWearerOfHat(ALICE, CAP_TASK_CREATE));
         assertTrue(hats.isEligible(ALICE, VP_HAT));
 
-        // resetCount should equal the count of hats minted on re-grant
-        // 1st mint = 5 resets (idempotent on a fresh user — caps aren't worn yet)
-        // revoke   = 5 revokes
-        // 2nd mint = 5 resets again
-        assertEq(em.resetCount(), 10);
+        // The pre-mint eligibility reset is gated on hasSpecificWearerRules:
+        // 1st mint = 0 resets (fresh user has no specific rule yet — gate skips the write)
+        // revoke   = 5 revokes (writes specific (false,false) rules)
+        // 2nd mint = 5 resets (those 5 hats now have rules, so the reset re-enables them)
+        assertEq(em.resetCount(), 5);
         assertEq(em.revokeCount(), 5);
     }
 
@@ -1630,8 +1639,17 @@ contract RoleBundleHatterTest is Test {
 
     function testRemint_BubblesUpEligibilityResetRevert() public {
         MockEligibilityModule em = _setupRevokeFixture();
-        em.setShouldRevert(true);
 
+        // Establish specific wearer rules via a grant + revoke cycle so the re-mint's eligibility
+        // reset path is actually exercised (the reset is gated on hasSpecificWearerRules — a fresh
+        // user has no rule and would skip it).
+        vm.prank(MINTER);
+        hatter.mintRole(VP_HAT, ALICE);
+        vm.prank(MINTER);
+        hatter.revokeRole(VP_HAT, ALICE);
+
+        // Now make the eligibility reset revert; the re-mint must bubble it up.
+        em.setShouldRevert(true);
         vm.prank(MINTER);
         vm.expectRevert(); // mock-level "MockEligibility: revert"
         hatter.mintRole(VP_HAT, ALICE);

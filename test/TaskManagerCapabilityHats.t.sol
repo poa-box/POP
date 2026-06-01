@@ -137,7 +137,8 @@ contract TaskManagerCapabilityHatsTest is Test {
     function testUnknownRolePermFlagReverts() public {
         vm.prank(EXECUTOR);
         vm.expectRevert(TaskManager.InvalidCapMask.selector);
-        tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(uint256(123), uint8(0x80))); // bit 7 unused
+        // mask 0 selects no gate — rejected (every defined bit maps to a gate).
+        tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(uint256(123), uint8(0)));
     }
 
     function testOrCombinedMaskRevertsGlobal() public {
@@ -347,7 +348,8 @@ contract TaskManagerCapabilityHatsTest is Test {
         bytes32 pid = _createDefaultProject();
         vm.prank(PROJECT_CREATOR);
         vm.expectRevert(TaskManager.InvalidCapMask.selector);
-        tm.setProjectRolePerm(pid, 999, 0x20); // bit 5: unused — not a TaskPerm flag
+        // OR-combined (multi-bit) mask is not a single TaskPerm flag — rejected.
+        tm.setProjectRolePerm(pid, 999, uint8(TaskPerm.CREATE | TaskPerm.CLAIM));
     }
 
     /// @notice Sanity: each of the five valid single-bit masks is accepted.

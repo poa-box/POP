@@ -22,7 +22,6 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     /*═══════════════════════════════════════════ ERRORS ═══════════════════════════════════════════*/
 
     error NotSuperAdmin();
-    error NotAuthorizedAdmin();
     error ZeroAddress();
     error InvalidQuorum();
     error InvalidMembershipHat();
@@ -205,23 +204,16 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         _;
     }
 
-    modifier onlyHatAdmin(uint256 targetHatId) {
+    /// @dev Allows the superAdmin OR an explicitly-authorized revoker to pass. This is the
+    ///      ONE narrow exception to the superAdmin-only write lockdown (PR #167): it exists
+    ///      so the per-org RoleBundleHatter can cascade-revoke / reset capability-hat
+    ///      eligibility during role grant/revoke. `authorizedRevokers` is a superAdmin-managed
+    ///      allowlist, so the superAdmin stays in full control of who may write — this does
+    ///      NOT reintroduce the removed Hats-hierarchy admin path. Used ONLY by
+    ///      `setWearerEligibility`; every other write path stays strictly `onlySuperAdmin`.
+    modifier onlySuperAdminOrRevoker() {
         Layout storage l = _layout();
-        if (msg.sender != l.superAdmin && !l.hats.isAdminOfHat(msg.sender, targetHatId)) revert NotAuthorizedAdmin();
-        _;
-    }
-
-    /// @dev Like `onlyHatAdmin`, but ALSO allows entries in `authorizedRevokers` to pass.
-    ///      Intentionally narrow — only used on functions whose abuse surface is acceptable
-    ///      to delegate to the RoleBundleHatter (eligibility-flag writes for an existing
-    ///      hat). Do NOT extend to functions that create hats, change metadata, or set
-    ///      defaults; those keep the strict `onlyHatAdmin` modifier.
-    modifier onlyHatAdminOrRevoker(uint256 targetHatId) {
-        Layout storage l = _layout();
-        if (
-            msg.sender != l.superAdmin && !l.authorizedRevokers[msg.sender]
-                && !l.hats.isAdminOfHat(msg.sender, targetHatId)
-        ) revert NotAuthorizedAdmin();
+        if (msg.sender != l.superAdmin && !l.authorizedRevokers[msg.sender]) revert NotSuperAdmin();
         _;
     }
 
@@ -259,15 +251,11 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         return _layout()._paused;
     }
 
-    /*═══════════════════════════════════ AUTHORIZATION LOGIC ═══════════════════════════════════════*/
-
-    // Authorization is now handled natively by the Hats tree structure using onlyHatAdmin modifier
-
     /*═══════════════════════════════════ ELIGIBILITY MANAGEMENT ═══════════════════════════════════════*/
 
     function setWearerEligibility(address wearer, uint256 hatId, bool _eligible, bool _standing)
         external
-        onlyHatAdminOrRevoker(hatId)
+        onlySuperAdminOrRevoker
         whenNotPaused
     {
         if (wearer == address(0)) revert ZeroAddress();
@@ -276,7 +264,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     function setDefaultEligibility(uint256 hatId, bool _eligible, bool _standing)
         external
-        onlyHatAdmin(hatId)
+        onlySuperAdmin
         whenNotPaused
     {
         Layout storage l = _layout();
@@ -284,7 +272,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         emit DefaultEligibilityUpdated(hatId, _eligible, _standing, msg.sender);
     }
 
-    function clearWearerEligibility(address wearer, uint256 hatId) external onlyHatAdmin(hatId) whenNotPaused {
+    function clearWearerEligibility(address wearer, uint256 hatId) external onlySuperAdmin whenNotPaused {
         if (wearer == address(0)) revert ZeroAddress();
         Layout storage l = _layout();
         delete l.wearerRules[wearer][hatId];
@@ -294,7 +282,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     function setBulkWearerEligibility(address[] calldata wearers, uint256 hatId, bool _eligible, bool _standing)
         external
-        onlyHatAdmin(hatId)
+        onlySuperAdmin
     {
         uint256 length = wearers.length;
         if (length == 0) revert ArrayLengthMismatch();
@@ -330,7 +318,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         address[] calldata wearers,
         bool[] calldata eligibleFlags,
         bool[] calldata standingFlags
-    ) external onlyHatAdmin(hatId) {
+    ) external onlySuperAdmin {
         uint256 length = wearers.length;
         if (length != eligibleFlags.length || length != standingFlags.length) {
             revert ArrayLengthMismatch();
@@ -507,7 +495,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     function createHatWithEligibility(CreateHatParams calldata params)
         external
-        onlyHatAdmin(params.parentHatId)
+        onlySuperAdmin
         returns (uint256 newHatId)
     {
         Layout storage l = _layout();
@@ -553,7 +541,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     /// @param defaultStanding Whether wearers have good standing by default
     function registerHatCreation(uint256 hatId, uint256 parentHatId, bool defaultEligible, bool defaultStanding)
         external
-        onlyHatAdmin(parentHatId)
+        onlySuperAdmin
     {
         Layout storage l = _layout();
         l.defaultRules[hatId] = WearerRules(_packWearerFlags(defaultEligible, defaultStanding));
@@ -639,7 +627,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     ///         `setWearerEligibility` for the purpose of cascading capability-hat revocations.
     ///         Strictly additive — does not remove the existing hat-admin or superAdmin checks.
     /// @dev Authorization is narrowly scoped: revokers can ONLY call `setWearerEligibility`
-    ///      (via the `onlyHatAdminOrRevoker` modifier). They cannot create hats, set defaults,
+    ///      (via the `onlySuperAdminOrRevoker` modifier). They cannot create hats, set defaults,
     ///      update metadata, or call any other admin-gated function. Only the superAdmin
     ///      (executor in production) can change the revoker list.
     function setAuthorizedRevoker(address revoker, bool authorized) external onlySuperAdmin {
@@ -676,7 +664,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
      */
     function updateHatMetadata(uint256 hatId, string memory name, bytes32 metadataCID)
         external
-        onlyHatAdmin(hatId)
+        onlySuperAdmin
         whenNotPaused
     {
         string memory details = _formatHatDetails(name, metadataCID);
@@ -1046,9 +1034,21 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         return _layout().vouchers[hatId][wearer][voucher];
     }
 
-    function hasAdminRights(address user, uint256 targetHatId) external view returns (bool) {
-        Layout storage l = _layout();
-        return user == l.superAdmin || l.hats.isAdminOfHat(user, targetHatId);
+    /// @notice Whether `user` can mutate eligibility state on this module.
+    /// @dev Mirrors the `onlySuperAdmin` gate used by every write path. The `targetHatId`
+    ///      parameter is retained for ABI continuity but no longer affects the answer —
+    ///      Hats-hierarchical admin status is not consulted (since the lockdown that
+    ///      replaced `onlyHatAdmin` with `onlySuperAdmin` on all writes). Off-chain
+    ///      callers that need Hats-hierarchy admin info should query Hats directly.
+    function hasAdminRights(
+        address user,
+        uint256 /* targetHatId */
+    )
+        external
+        view
+        returns (bool)
+    {
+        return user == _layout().superAdmin;
     }
 
     function getUserJoinTime(address user) external view returns (uint256) {

@@ -49,17 +49,17 @@ contract EligibilityModuleRevokerScopeTest is Test {
         // No assertion needed; if the call didn't revert, the revoker path works.
     }
 
-    /* ─────────── Blocked: every other onlyHatAdmin function ─────────── */
+    /* ─────────── Blocked: every other onlySuperAdmin function ─────────── */
 
     function testRevokerCannotSetDefaultEligibility() public {
         vm.prank(REVOKER);
-        vm.expectRevert(EligibilityModule.NotAuthorizedAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.setDefaultEligibility(HAT_ID, true, true);
     }
 
     function testRevokerCannotClearWearerEligibility() public {
         vm.prank(REVOKER);
-        vm.expectRevert(EligibilityModule.NotAuthorizedAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.clearWearerEligibility(ALICE, HAT_ID);
     }
 
@@ -67,7 +67,7 @@ contract EligibilityModuleRevokerScopeTest is Test {
         address[] memory wearers = new address[](1);
         wearers[0] = ALICE;
         vm.prank(REVOKER);
-        vm.expectRevert(EligibilityModule.NotAuthorizedAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.setBulkWearerEligibility(wearers, HAT_ID, false, false);
     }
 
@@ -77,7 +77,7 @@ contract EligibilityModuleRevokerScopeTest is Test {
         bool[] memory eligibleFlags = new bool[](1);
         bool[] memory standingFlags = new bool[](1);
         vm.prank(REVOKER);
-        vm.expectRevert(EligibilityModule.NotAuthorizedAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.batchSetWearerEligibility(HAT_ID, wearers, eligibleFlags, standingFlags);
     }
 
@@ -95,19 +95,19 @@ contract EligibilityModuleRevokerScopeTest is Test {
             wearerStandingFlags: new bool[](0)
         });
         vm.prank(REVOKER);
-        vm.expectRevert(EligibilityModule.NotAuthorizedAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.createHatWithEligibility(params);
     }
 
     function testRevokerCannotUpdateHatMetadata() public {
         vm.prank(REVOKER);
-        vm.expectRevert(EligibilityModule.NotAuthorizedAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.updateHatMetadata(HAT_ID, "rename", bytes32(0));
     }
 
     function testRevokerCannotRegisterHatCreation() public {
         vm.prank(REVOKER);
-        vm.expectRevert(EligibilityModule.NotAuthorizedAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.registerHatCreation(HAT_ID, PARENT_HAT_ID, true, true);
     }
 
@@ -123,15 +123,16 @@ contract EligibilityModuleRevokerScopeTest is Test {
         mod.setWearerEligibility(ALICE, HAT_ID, true, true);
     }
 
-    /* ─────────── Hat admin still works for non-eligibility functions ─────────── */
+    /* ─────────── Hat admins have NO special powers post-#167 lockdown ─────────── */
 
-    function testHatAdminCanSetDefaultEligibility() public {
+    function testHatAdminCannotSetDefaultEligibility() public {
+        // Post-#167 lockdown: being a hat-admin grants no write powers. Only the superAdmin
+        // (and authorized revokers, for setWearerEligibility only) may write. A user who merely
+        // wears/administers the hat is rejected with NotSuperAdmin.
         address hatAdmin = address(0xBA51C);
-        // MockHats.isAdminOfHat returns wearers[user][hat]; make this user wear the hat
-        // so they pass isAdminOfHat. The relationship admin-of-hat == wearer-of-hat is
-        // an artifact of the mock; in production they're separate concepts.
         hats.mintHat(HAT_ID, hatAdmin);
         vm.prank(hatAdmin);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.setDefaultEligibility(HAT_ID, true, true);
     }
 
@@ -143,7 +144,7 @@ contract EligibilityModuleRevokerScopeTest is Test {
         assertFalse(mod.isAuthorizedRevoker(REVOKER));
 
         vm.prank(REVOKER);
-        vm.expectRevert(EligibilityModule.NotAuthorizedAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
         mod.setWearerEligibility(ALICE, HAT_ID, false, false);
     }
 
