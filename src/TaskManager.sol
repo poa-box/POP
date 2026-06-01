@@ -526,9 +526,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
      *      of `setConfig(ROLE_PERM, abi.encode(hatId, flag))`. Pass `hatId == 0` to clear a gate.
      *      Last write wins when multiple pairs target the same gate.
      *
-     *      Emits {RolePermSet}(hatId, mask) per pair — the same event the runtime
-     *      `setConfig(ROLE_PERM, ...)` path emits, so subgraph consumers index deploy-time and
-     *      runtime global grants identically. Empty `hatIds` is a no-op (does not revert).
+     *      Emits one single-flag {RolePermSet}(hatId, flag) per set bit — the same event shape the
+     *      runtime `setConfig(ROLE_PERM, ...)` path emits, so subgraph consumers index deploy-time
+     *      and runtime global grants identically (one event == one gate→hat assignment). Empty
+     *      `hatIds` (or a zero mask) is a no-op (does not revert).
      * @param hatIds Capability hat IDs to assign to gates.
      * @param masks  TaskPerm flags (bitwise-OR of {TaskPerm} constants). Length must match `hatIds`.
      */
@@ -540,16 +541,42 @@ contract TaskManager is Initializable, ContextUpgradeable {
         for (uint256 i; i < hatIds.length;) {
             uint256 hatId = hatIds[i];
             uint8 mask = masks[i];
-            // Expand the mask: assign `hatId` as the global capability hat for each gate set.
-            if (TaskPerm.has(mask, TaskPerm.CREATE)) l.createHat = hatId;
-            if (TaskPerm.has(mask, TaskPerm.CLAIM)) l.claimHat = hatId;
-            if (TaskPerm.has(mask, TaskPerm.REVIEW)) l.reviewHat = hatId;
-            if (TaskPerm.has(mask, TaskPerm.ASSIGN)) l.assignHat = hatId;
-            if (TaskPerm.has(mask, TaskPerm.SELF_REVIEW)) l.selfReviewHat = hatId;
-            if (TaskPerm.has(mask, TaskPerm.BUDGET)) l.budgetHat = hatId;
-            if (TaskPerm.has(mask, TaskPerm.EDIT_META)) l.editMetaHat = hatId;
-            if (TaskPerm.has(mask, TaskPerm.EDIT_FULL)) l.editFullHat = hatId;
-            emit RolePermSet(hatId, mask);
+            // Expand the mask into individual gate assignments. Each set bit emits its OWN
+            // single-flag RolePermSet — identical event shape to the runtime setConfig(ROLE_PERM)
+            // path, so indexers handle deploy-time and runtime grants uniformly (one event == one
+            // gate→hat assignment). A mask with no bits set is a no-op (emits nothing).
+            if (TaskPerm.has(mask, TaskPerm.CREATE)) {
+                l.createHat = hatId;
+                emit RolePermSet(hatId, TaskPerm.CREATE);
+            }
+            if (TaskPerm.has(mask, TaskPerm.CLAIM)) {
+                l.claimHat = hatId;
+                emit RolePermSet(hatId, TaskPerm.CLAIM);
+            }
+            if (TaskPerm.has(mask, TaskPerm.REVIEW)) {
+                l.reviewHat = hatId;
+                emit RolePermSet(hatId, TaskPerm.REVIEW);
+            }
+            if (TaskPerm.has(mask, TaskPerm.ASSIGN)) {
+                l.assignHat = hatId;
+                emit RolePermSet(hatId, TaskPerm.ASSIGN);
+            }
+            if (TaskPerm.has(mask, TaskPerm.SELF_REVIEW)) {
+                l.selfReviewHat = hatId;
+                emit RolePermSet(hatId, TaskPerm.SELF_REVIEW);
+            }
+            if (TaskPerm.has(mask, TaskPerm.BUDGET)) {
+                l.budgetHat = hatId;
+                emit RolePermSet(hatId, TaskPerm.BUDGET);
+            }
+            if (TaskPerm.has(mask, TaskPerm.EDIT_META)) {
+                l.editMetaHat = hatId;
+                emit RolePermSet(hatId, TaskPerm.EDIT_META);
+            }
+            if (TaskPerm.has(mask, TaskPerm.EDIT_FULL)) {
+                l.editFullHat = hatId;
+                emit RolePermSet(hatId, TaskPerm.EDIT_FULL);
+            }
             unchecked {
                 ++i;
             }
