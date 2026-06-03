@@ -57,6 +57,7 @@ contract AccessFactory {
         address executor;
         address deployer; // OrgDeployer address for registration callbacks
         address registryAddr; // Universal account registry
+        address roleBundleHatter; // Per-org RoleBundleHatter (deployed by GovernanceFactory)
         uint256[] roleHatIds;
         bool autoUpgrade;
         RoleAssignments roleAssignments;
@@ -108,8 +109,19 @@ contract AccessFactory {
                 customImpl: address(0)
             });
 
+            // TEMPORARY SHIM (Task #5): role-bitmap resolution still produces an array of role hats.
+            // For now, the first resolved role hat is used as the member capability hat. Full
+            // capability-hat config indexing lands with the OrgDeployer threading work.
+            uint256 qjMemberHat = memberHats.length > 0 ? memberHats[0] : 0;
+
             result.quickJoin = ModuleDeploymentLib.deployQuickJoin(
-                config, params.executor, params.registryAddr, address(this), memberHats, quickJoinBeacon
+                config,
+                params.executor,
+                params.registryAddr,
+                address(this),
+                qjMemberHat,
+                params.roleBundleHatter,
+                quickJoinBeacon
             );
         }
 
@@ -141,8 +153,13 @@ contract AccessFactory {
                 customImpl: address(0)
             });
 
+            // TEMPORARY SHIM (Task #5): ParticipationToken now takes single capability hats.
+            // Picks the first resolved hat from each bitmap until factory threading lands.
+            uint256 ptMemberHat = memberHats.length > 0 ? memberHats[0] : 0;
+            uint256 ptApproverHat = approverHats.length > 0 ? approverHats[0] : 0;
+
             result.participationToken = ModuleDeploymentLib.deployParticipationToken(
-                config, params.executor, tName, tSymbol, memberHats, approverHats, participationTokenBeacon
+                config, params.executor, tName, tSymbol, ptMemberHat, ptApproverHat, participationTokenBeacon
             );
         }
 

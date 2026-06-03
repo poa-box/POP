@@ -17,6 +17,7 @@ interface IHatsTreeSetup {
     struct SetupResult {
         uint256 topHatId;
         uint256[] roleHatIds;
+        uint256[] capabilityHatIds;
         address eligibilityModule;
         address toggleModule;
     }
@@ -27,6 +28,7 @@ interface IHatsTreeSetup {
         bytes32 orgId;
         address eligibilityModule;
         address toggleModule;
+        address roleBundleHatter;
         address deployer;
         address deployerAddress;
         address executor;
@@ -37,6 +39,8 @@ interface IHatsTreeSetup {
         uint256 regNonce;
         bytes regSignature;
         RoleConfigStructs.RoleConfig[] roles;
+        RoleConfigStructs.CapabilityHatConfig[] capabilityHats;
+        RoleConfigStructs.RoleBundleConfig[] roleBundles;
     }
 
     function setupHatsTree(SetupParams memory params) external returns (SetupResult memory);
@@ -87,6 +91,10 @@ contract GovernanceFactory {
         uint256 ddCreatorRolesBitmap; // Bit N set = Role N can create polls
         address[] ddInitialTargets; // Allowed execution targets for DirectDemocracyVoting
         RoleConfigStructs.RoleConfig[] roles; // Complete role configuration
+        // Hats-native capability layer: created under ELIGIBILITY_ADMIN; bundles tell RoleBundleHatter
+        // which capability hats to auto-mint when a role hat is granted.
+        RoleConfigStructs.CapabilityHatConfig[] capabilityHats;
+        RoleConfigStructs.RoleBundleConfig[] roleBundles;
     }
 
     /*──────────────────── Governance Deployment Result ────────────────────*/
@@ -94,11 +102,13 @@ contract GovernanceFactory {
         address executor;
         address eligibilityModule;
         address toggleModule;
+        address roleBundleHatter; // Per-org RoleBundleHatter — routes role→capability mint expansion
         address hybridVoting; // Governance mechanism
         address directDemocracyVoting; // Polling mechanism
         address execBeacon; // Executor's SwitchableBeacon (for two-step ownership acceptance)
         uint256 topHatId;
         uint256[] roleHatIds;
+        uint256[] capabilityHatIds; // Hat IDs of created capability hats (indexed by config order)
     }
 
     /*══════════════  INFRASTRUCTURE DEPLOYMENT  ═════════════=*/
@@ -152,41 +162,36 @@ contract GovernanceFactory {
             params.orgId, params.poaManager, params.orgRegistry, params.hats, params.autoUpgrade, result.executor
         );
 
+        /* 2.5 Deploy RoleBundleHatter (no registration yet — registered below) */
+        address roleBundleHatterBeacon;
+        (result.roleBundleHatter, roleBundleHatterBeacon) = _deployRoleBundleHatter(
+            params.orgId,
+            params.poaManager,
+            params.orgRegistry,
+            params.hats,
+            params.autoUpgrade,
+            result.executor,
+            params.deployer
+        );
+
         /* 3. Setup Hats Tree */
         {
             // Transfer superAdmin rights to HatsTreeSetup contract
             IEligibilityModule(result.eligibilityModule).transferSuperAdmin(params.hatsTreeSetup);
             IToggleModule(result.toggleModule).transferAdmin(params.hatsTreeSetup);
 
-            // Call HatsTreeSetup to do all the Hats configuration
-            IHatsTreeSetup.SetupParams memory setupParams = IHatsTreeSetup.SetupParams({
-                hats: IHats(params.hats),
-                orgRegistry: OrgRegistry(params.orgRegistry),
-                orgId: params.orgId,
-                eligibilityModule: result.eligibilityModule,
-                toggleModule: result.toggleModule,
-                deployer: address(this),
-                deployerAddress: params.deployerAddress,
-                executor: result.executor,
-                accountRegistry: params.accountRegistry,
-                orgName: params.orgName,
-                deployerUsername: params.deployerUsername,
-                regDeadline: params.regDeadline,
-                regNonce: params.regNonce,
-                regSignature: params.regSignature,
-                roles: params.roles
-            });
-
+            // Delegate struct construction to a helper to keep the stack manageable
             IHatsTreeSetup.SetupResult memory setupResult =
-                IHatsTreeSetup(params.hatsTreeSetup).setupHatsTree(setupParams);
+                IHatsTreeSetup(params.hatsTreeSetup).setupHatsTree(_buildSetupParams(params, result));
 
             result.topHatId = setupResult.topHatId;
             result.roleHatIds = setupResult.roleHatIds;
+            result.capabilityHatIds = setupResult.capabilityHatIds;
         }
 
-        /* 4. Batch register all 3 deployed contracts */
+        /* 4. Batch register all 4 deployed contracts */
         {
-            OrgRegistry.ContractRegistration[] memory registrations = new OrgRegistry.ContractRegistration[](3);
+            OrgRegistry.ContractRegistration[] memory registrations = new OrgRegistry.ContractRegistration[](4);
 
             registrations[0] = OrgRegistry.ContractRegistration({
                 typeId: ModuleTypes.EXECUTOR_ID, proxy: result.executor, beacon: execBeacon, owner: address(this)
@@ -203,6 +208,13 @@ contract GovernanceFactory {
                 typeId: ModuleTypes.TOGGLE_MODULE_ID,
                 proxy: result.toggleModule,
                 beacon: toggleBeacon,
+                owner: address(this)
+            });
+
+            registrations[3] = OrgRegistry.ContractRegistration({
+                typeId: ModuleTypes.ROLE_BUNDLE_HATTER_ID,
+                proxy: result.roleBundleHatter,
+                beacon: roleBundleHatterBeacon,
                 owner: address(this)
             });
 
@@ -264,8 +276,12 @@ contract GovernanceFactory {
                 customImpl: address(0)
             });
 
+            // TEMPORARY SHIM (Task #5): role-bitmap resolution returns an array; the
+            // capability-hat indexing replaces this with a single hat ID with OrgDeployer threading.
+            uint256 hvCreatorHat = creatorHats.length > 0 ? creatorHats[0] : 0;
+
             hybridVoting = ModuleDeploymentLib.deployHybridVoting(
-                config, executor, creatorHats, params.hybridThresholdPct, finalClasses, hybridBeacon
+                config, executor, hvCreatorHat, params.hybridThresholdPct, finalClasses, hybridBeacon
             );
         }
 
@@ -294,8 +310,14 @@ contract GovernanceFactory {
                 customImpl: address(0)
             });
 
+            // TEMPORARY SHIM (Task #5): role-bitmap resolution returns an array; capability
+            // hat config indexing lands with the OrgDeployer threading work. Pick the first
+            // resolved hat as the single capability hat for now.
+            uint256 ddVotingHat = votingHats.length > 0 ? votingHats[0] : 0;
+            uint256 ddCreatorHat = creatorHats.length > 0 ? creatorHats[0] : 0;
+
             directDemocracyVoting = ModuleDeploymentLib.deployDirectDemocracyVoting(
-                config, executor, votingHats, creatorHats, params.ddInitialTargets, params.ddThresholdPct, ddBeacon
+                config, executor, ddVotingHat, ddCreatorHat, params.ddInitialTargets, params.ddThresholdPct, ddBeacon
             );
         }
 
@@ -339,9 +361,11 @@ contract GovernanceFactory {
                     classes[i].asset = token;
                 }
             }
-            // For both DIRECT and ERC20_BAL, use all role hats if hatIds not specified
-            if (classes[i].hatIds.length == 0) {
-                classes[i].hatIds = roleHatIds;
+            // Hats-native: each class has a single capability hat. If unset (hatId == 0),
+            // shim to the first resolved role hat. Full capability-hat indexing lands with
+            // OrgDeployer threading work (Task #5).
+            if (classes[i].hatId == 0 && roleHatIds.length > 0) {
+                classes[i].hatId = roleHatIds[0];
             }
         }
         return classes;
@@ -409,5 +433,67 @@ contract GovernanceFactory {
         });
 
         tmProxy = ModuleDeploymentLib.deployToggleModule(config, address(this), beacon);
+    }
+
+    /// @dev Builds the SetupParams struct for HatsTreeSetup using field-by-field assignment.
+    ///      The named-arg constructor pattern blows the stack with this many fields under IR;
+    ///      assigning one slot at a time keeps the live-variable set bounded.
+    function _buildSetupParams(GovernanceParams memory params, GovernanceResult memory result)
+        internal
+        view
+        returns (IHatsTreeSetup.SetupParams memory s)
+    {
+        s.hats = IHats(params.hats);
+        s.orgRegistry = OrgRegistry(params.orgRegistry);
+        s.orgId = params.orgId;
+        s.eligibilityModule = result.eligibilityModule;
+        s.toggleModule = result.toggleModule;
+        s.roleBundleHatter = result.roleBundleHatter;
+        s.deployer = address(this);
+        s.deployerAddress = params.deployerAddress;
+        s.executor = result.executor;
+        s.accountRegistry = params.accountRegistry;
+        s.orgName = params.orgName;
+        s.deployerUsername = params.deployerUsername;
+        s.regDeadline = params.regDeadline;
+        s.regNonce = params.regNonce;
+        s.regSignature = params.regSignature;
+        s.roles = params.roles;
+        s.capabilityHats = params.capabilityHats;
+        s.roleBundles = params.roleBundles;
+    }
+
+    /**
+     * @notice Deploys the per-org RoleBundleHatter BeaconProxy (without registration).
+     * @dev Registration handled via batch in deployInfrastructure.
+     *      Initial executor is the org's Executor; deployer is the OrgDeployer so it can
+     *      configure bundles + authorized minters before sealing via clearDeployer.
+     * @return rbhProxy The deployed RoleBundleHatter proxy address
+     * @return beacon The beacon address for this module
+     */
+    function _deployRoleBundleHatter(
+        bytes32 orgId,
+        address poaManager,
+        address orgRegistry,
+        address hats,
+        bool autoUpgrade,
+        address executor,
+        address deployer
+    ) internal returns (address rbhProxy, address beacon) {
+        beacon = BeaconDeploymentLib.createBeacon(
+            ModuleTypes.ROLE_BUNDLE_HATTER_ID, poaManager, executor, autoUpgrade, address(0)
+        );
+
+        ModuleDeploymentLib.DeployConfig memory config = ModuleDeploymentLib.DeployConfig({
+            poaManager: IPoaManager(poaManager),
+            orgRegistry: OrgRegistry(orgRegistry),
+            hats: hats,
+            orgId: orgId,
+            moduleOwner: executor,
+            autoUpgrade: autoUpgrade,
+            customImpl: address(0)
+        });
+
+        rbhProxy = ModuleDeploymentLib.deployRoleBundleHatter(config, executor, deployer, beacon);
     }
 }

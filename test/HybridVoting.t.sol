@@ -135,7 +135,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: democracyHats
+                hatId: democracyHats.length > 0 ? democracyHats[0] : 0
             });
 
             // Class 1: Participation Token (50%)
@@ -145,7 +145,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: votingHats
+                hatId: votingHats.length > 0 ? votingHats[0] : 0
             });
 
             bytes memory initData = abi.encodeCall(
@@ -153,7 +153,7 @@ contract MockERC20 is IERC20 {
                 (
                     address(hats), // hats
                     address(exec), // executor
-                    creatorHats, // allowed creator hats
+                    CREATOR_HAT_ID, // proposalCreatorHat (single capability hat)
                     targets, // allowed target(s)
                     uint8(50), // threshold %
                     classes // class configurations
@@ -365,7 +365,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: executiveOnly
+                hatId: executiveOnly.length > 0 ? executiveOnly[0] : 0
             });
 
             newClasses[1] = HybridVoting.ClassConfig({
@@ -374,7 +374,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: executiveOnly
+                hatId: executiveOnly.length > 0 ? executiveOnly[0] : 0
             });
 
             hv.setClasses(newClasses);
@@ -406,17 +406,18 @@ contract MockERC20 is IERC20 {
             hv.vote(proposalId, idx, w);
         }
 
-        function testSetCreatorHatAllowed() public {
-            // Test that executor can modify creator hat permissions
+        function testSetProposalCreatorHat() public {
+            // Test that executor can swap the proposal-creator capability hat
             uint256 newCreatorHat = 99;
             address newCreator = vm.addr(20);
 
             // Give new creator the new hat
             hats.mintHat(newCreatorHat, newCreator);
 
-            // Enable new hat as creator hat
+            // Swap proposalCreatorHat
             vm.prank(address(exec));
-            hv.setCreatorHatAllowed(newCreatorHat, true);
+            hv.setProposalCreatorHat(newCreatorHat);
+            assertEq(hv.proposalCreatorHat(), newCreatorHat);
 
             // New creator should be able to create proposal
             IExecutor.Call[][] memory batches = new IExecutor.Call[][](2);
@@ -428,11 +429,11 @@ contract MockERC20 is IERC20 {
             hv.createProposal(bytes("Test Proposal"), bytes32(0), 15, 2, batches, hatIds);
             assertEq(hv.proposalsCount(), 1);
 
-            // Disable new hat
+            // Clear the creator hat (set to 0)
             vm.prank(address(exec));
-            hv.setCreatorHatAllowed(newCreatorHat, false);
+            hv.setProposalCreatorHat(0);
 
-            // Should now fail
+            // Should now fail — no one wears hat 0
             vm.prank(newCreator);
             vm.expectRevert(VotingErrors.Unauthorized.selector);
             hv.createProposal(bytes("Test Proposal 2"), bytes32(0), 15, 2, batches, hatIds);
@@ -451,9 +452,9 @@ contract MockERC20 is IERC20 {
             vm.expectRevert();
             hv.setConfig(HybridVoting.ConfigKey.EXECUTOR, abi.encode(nonExecutor));
 
-            // Set creator hat allowed
+            // Set proposal creator hat
             vm.expectRevert();
-            hv.setCreatorHatAllowed(CREATOR_HAT_ID, false);
+            hv.setProposalCreatorHat(CREATOR_HAT_ID);
 
             // Set target allowed
             vm.expectRevert();
@@ -649,7 +650,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: ddHats
+                hatId: ddHats.length > 0 ? ddHats[0] : 0
             });
 
             // Class 1: Token holders (50%)
@@ -661,7 +662,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: tokenHats
+                hatId: tokenHats.length > 0 ? tokenHats[0] : 0
             });
 
             // Class 2: Service providers (20%)
@@ -673,7 +674,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: serviceHats
+                hatId: serviceHats.length > 0 ? serviceHats[0] : 0
             });
 
             hv.setClasses(classes);
@@ -701,7 +702,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: hats
+                hatId: hats.length > 0 ? hats[0] : 0
             });
 
             classes[1] = HybridVoting.ClassConfig({
@@ -710,7 +711,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: hats
+                hatId: hats.length > 0 ? hats[0] : 0
             });
 
             vm.expectRevert(VotingErrors.InvalidSliceSum.selector);
@@ -725,7 +726,7 @@ contract MockERC20 is IERC20 {
                     quadratic: false,
                     minBalance: 0,
                     asset: address(0),
-                    hatIds: hats
+                    hatId: hats.length > 0 ? hats[0] : 0
                 });
             }
 
@@ -750,7 +751,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: ddHats
+                hatId: ddHats.length > 0 ? ddHats[0] : 0
             });
 
             // Class 1: Token holders (50%)
@@ -763,7 +764,7 @@ contract MockERC20 is IERC20 {
                 quadratic: true, // Enable quadratic for token class
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: tokenHats
+                hatId: tokenHats.length > 0 ? tokenHats[0] : 0
             });
 
             hv.setClasses(classes);
@@ -807,7 +808,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: hats
+                hatId: hats.length > 0 ? hats[0] : 0
             });
             hv.setClasses(classes1);
             vm.stopPrank();
@@ -824,7 +825,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: hats
+                hatId: hats.length > 0 ? hats[0] : 0
             });
             classes2[1] = HybridVoting.ClassConfig({
                 strategy: HybridVoting.ClassStrategy.ERC20_BAL,
@@ -832,7 +833,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: hats
+                hatId: hats.length > 0 ? hats[0] : 0
             });
             hv.setClasses(classes2);
             vm.stopPrank();
@@ -865,7 +866,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: coreHats
+                hatId: coreHats.length > 0 ? coreHats[0] : 0
             });
 
             // Class 1: Token Holders - Token weighted (50%)
@@ -877,7 +878,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: tokenHats
+                hatId: tokenHats.length > 0 ? tokenHats[0] : 0
             });
 
             // Class 2: Community - DIRECT voting (20%)
@@ -889,7 +890,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: communityHats
+                hatId: communityHats.length > 0 ? communityHats[0] : 0
             });
 
             hv.setClasses(classes);
@@ -945,7 +946,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: founderHats
+                hatId: founderHats.length > 0 ? founderHats[0] : 0
             });
 
             // Class 1: Large Token Holders - Quadratic (35%)
@@ -955,7 +956,7 @@ contract MockERC20 is IERC20 {
                 quadratic: true, // Quadratic to reduce whale influence
                 minBalance: 10 ether,
                 asset: address(token),
-                hatIds: emptyHats // Anyone with enough tokens
+                hatId: 0 // Anyone with enough tokens
             });
 
             // Class 2: Small Token Holders - Linear (25%)
@@ -965,7 +966,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             // Class 3: Service Providers - DIRECT (15%)
@@ -977,7 +978,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: serviceHats
+                hatId: serviceHats.length > 0 ? serviceHats[0] : 0
             });
 
             hv.setClasses(classes);
@@ -1036,7 +1037,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             classes[1] = HybridVoting.ClassConfig({
@@ -1045,7 +1046,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             hv.setClasses(classes);
@@ -1086,7 +1087,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             classes[1] = HybridVoting.ClassConfig({
@@ -1095,7 +1096,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             hv.setClasses(classes);
@@ -1145,7 +1146,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false, // Linear
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             // Quadratic token voting (50%)
@@ -1155,7 +1156,7 @@ contract MockERC20 is IERC20 {
                 quadratic: true, // Quadratic
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             hv.setClasses(classes);
@@ -1240,7 +1241,7 @@ contract MockERC20 is IERC20 {
                     quadratic: false,
                     minBalance: 0,
                     asset: address(0),
-                    hatIds: emptyHats
+                    hatId: 0
                 });
             }
 
@@ -1251,7 +1252,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             hv.setClasses(classes);
@@ -1279,7 +1280,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: ddHats
+                hatId: ddHats.length > 0 ? ddHats[0] : 0
             });
 
             uint256[] memory tokenHats = new uint256[](1);
@@ -1290,7 +1291,7 @@ contract MockERC20 is IERC20 {
                 quadratic: true,
                 minBalance: 2 ether,
                 asset: address(token),
-                hatIds: tokenHats
+                hatId: tokenHats.length > 0 ? tokenHats[0] : 0
             });
 
             // Calculate expected hash
@@ -1330,7 +1331,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: multiHats
+                hatId: multiHats.length > 0 ? multiHats[0] : 0
             });
 
             // Class 1: ERC20 with quadratic
@@ -1342,7 +1343,7 @@ contract MockERC20 is IERC20 {
                 quadratic: true,
                 minBalance: 5 ether,
                 asset: address(token),
-                hatIds: tokenHats
+                hatId: tokenHats.length > 0 ? tokenHats[0] : 0
             });
 
             // Class 2: Direct with no hats (open)
@@ -1353,7 +1354,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: emptyHats
+                hatId: 0
             });
 
             hv.setClasses(classes);
@@ -1361,15 +1362,13 @@ contract MockERC20 is IERC20 {
             // Verify all fields are stored and would be emitted
             HybridVoting.ClassConfig[] memory stored = hv.getClasses();
 
-            // Check class 0
+            // Check class 0 — single capability hat per class now
             assertEq(uint8(stored[0].strategy), uint8(HybridVoting.ClassStrategy.DIRECT));
             assertEq(stored[0].slicePct, 30);
             assertEq(stored[0].quadratic, false);
             assertEq(stored[0].minBalance, 0);
             assertEq(stored[0].asset, address(0));
-            assertEq(stored[0].hatIds.length, 2);
-            assertEq(stored[0].hatIds[0], EXECUTIVE_HAT_ID);
-            assertEq(stored[0].hatIds[1], CREATOR_HAT_ID);
+            assertEq(stored[0].hatId, EXECUTIVE_HAT_ID);
 
             // Check class 1
             assertEq(uint8(stored[1].strategy), uint8(HybridVoting.ClassStrategy.ERC20_BAL));
@@ -1377,12 +1376,11 @@ contract MockERC20 is IERC20 {
             assertEq(stored[1].quadratic, true);
             assertEq(stored[1].minBalance, 5 ether);
             assertEq(stored[1].asset, address(token));
-            assertEq(stored[1].hatIds.length, 1);
 
-            // Check class 2
+            // Check class 2 — unrestricted (hatId == 0)
             assertEq(uint8(stored[2].strategy), uint8(HybridVoting.ClassStrategy.DIRECT));
             assertEq(stored[2].slicePct, 20);
-            assertEq(stored[2].hatIds.length, 0);
+            assertEq(stored[2].hatId, 0);
 
             vm.stopPrank();
         }
@@ -1402,7 +1400,7 @@ contract MockERC20 is IERC20 {
                 quadratic: true,
                 minBalance: 1 ether,
                 asset: address(token),
-                hatIds: govHats
+                hatId: govHats.length > 0 ? govHats[0] : 0
             });
 
             // Core contributors (35%)
@@ -1414,7 +1412,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: coreHats
+                hatId: coreHats.length > 0 ? coreHats[0] : 0
             });
 
             // Community members (25%)
@@ -1426,7 +1424,7 @@ contract MockERC20 is IERC20 {
                 quadratic: false,
                 minBalance: 0,
                 asset: address(0),
-                hatIds: communityHats
+                hatId: communityHats.length > 0 ? communityHats[0] : 0
             });
 
             hv.setClasses(classes);

@@ -35,7 +35,7 @@ contract DebugDeploy is Script {
             quadratic: false,
             minBalance: 0,
             asset: address(0),
-            hatIds: emptyHatIds
+            hatId: 0
         });
         params.hybridClasses[1] = IHybridVotingInit.ClassConfig({
             strategy: IHybridVotingInit.ClassStrategy.ERC20_BAL,
@@ -43,7 +43,7 @@ contract DebugDeploy is Script {
             quadratic: false,
             minBalance: 1 ether,
             asset: address(0),
-            hatIds: emptyHatIds
+            hatId: 0
         });
 
         params.ddInitialTargets = new address[](0);

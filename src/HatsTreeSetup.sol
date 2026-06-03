@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {IEligibilityModule, IToggleModule} from "./interfaces/IHatsModules.sol";
-
 import {OrgRegistry} from "./OrgRegistry.sol";
 import {RoleConfigStructs} from "./libs/RoleConfigStructs.sol";
 
@@ -33,6 +32,7 @@ contract HatsTreeSetup {
     struct SetupResult {
         uint256 topHatId;
         uint256[] roleHatIds;
+        uint256[] capabilityHatIds;
         address eligibilityModule;
         address toggleModule;
     }
@@ -43,6 +43,7 @@ contract HatsTreeSetup {
         bytes32 orgId;
         address eligibilityModule;
         address toggleModule;
+        address roleBundleHatter; // Per-org RoleBundleHatter (bundle config target)
         address deployer;
         address deployerAddress; // Address to receive ADMIN hat
         address executor;
@@ -53,6 +54,8 @@ contract HatsTreeSetup {
         uint256 regNonce; // User's current nonce on the registry
         bytes regSignature; // User's EIP-712 ECDSA signature for username registration
         RoleConfigStructs.RoleConfig[] roles; // Complete role configuration
+        RoleConfigStructs.CapabilityHatConfig[] capabilityHats; // Capability hats (created under ELIGIBILITY_ADMIN)
+        RoleConfigStructs.RoleBundleConfig[] roleBundles; // Role → capability index bundles
     }
 
     /**
@@ -288,6 +291,11 @@ contract HatsTreeSetup {
             IEligibilityModule(params.eligibilityModule).batchMintHats(hatIdsToMint, wearersToMint);
         }
 
+        // Create capability hats under ELIGIBILITY_ADMIN. They're not minted to anyone here —
+        // RoleBundleHatter.setBundle is called by OrgDeployer (which is the bundle hatter's
+        // deployer) AFTER this returns, then mintRole picks them up on demand.
+        result.capabilityHatIds = _createCapabilityHats(params, eligibilityAdminHatId);
+
         // Transfer top hat to executor
         params.hats.transferHat(result.topHatId, address(this), params.executor);
 
@@ -299,6 +307,61 @@ contract HatsTreeSetup {
         IToggleModule(params.toggleModule).transferAdmin(params.executor);
 
         return result;
+    }
+
+    /*════════════════  CAPABILITY HATS + BUNDLES  ════════════════*/
+
+    /// @dev Creates each `CapabilityHatConfig` as a child of `eligibilityAdminHatId`, then
+    ///      hands off to `_registerCapabilityHats` for the batch registration/toggle/eligibility
+    ///      calls. Split into two functions to avoid stack-too-deep.
+    function _createCapabilityHats(SetupParams memory params, uint256 eligibilityAdminHatId)
+        internal
+        returns (uint256[] memory capabilityHatIds)
+    {
+        uint256 capLen = params.capabilityHats.length;
+        capabilityHatIds = new uint256[](capLen);
+        if (capLen == 0) return capabilityHatIds;
+
+        for (uint256 i; i < capLen; ++i) {
+            RoleConfigStructs.CapabilityHatConfig memory cap = params.capabilityHats[i];
+            uint32 maxSupply = cap.maxSupply == 0 ? type(uint32).max : cap.maxSupply;
+            capabilityHatIds[i] = params.hats
+                .createHat(
+                    eligibilityAdminHatId,
+                    _formatHatDetails(cap.name, cap.metadataCID),
+                    maxSupply,
+                    params.eligibilityModule,
+                    params.toggleModule,
+                    true, // mutable so admins can adjust metadata later
+                    cap.image
+                );
+        }
+
+        _registerCapabilityHats(params, eligibilityAdminHatId, capabilityHatIds);
+    }
+
+    /// @dev Batch-registers capability hats with the eligibility module + toggle, and seeds
+    ///      default-eligible/in-good-standing for every capability hat (the gate IS the hat).
+    function _registerCapabilityHats(
+        SetupParams memory params,
+        uint256 eligibilityAdminHatId,
+        uint256[] memory capabilityHatIds
+    ) internal {
+        uint256 capLen = capabilityHatIds.length;
+        uint256[] memory parents = new uint256[](capLen);
+        bool[] memory trues = new bool[](capLen);
+        string[] memory names = new string[](capLen);
+        bytes32[] memory cids = new bytes32[](capLen);
+        for (uint256 i; i < capLen; ++i) {
+            parents[i] = eligibilityAdminHatId;
+            trues[i] = true;
+            names[i] = params.capabilityHats[i].name;
+            cids[i] = params.capabilityHats[i].metadataCID;
+        }
+        IEligibilityModule(params.eligibilityModule)
+            .batchRegisterHatCreationWithMetadata(capabilityHatIds, parents, trues, trues, names, cids);
+        IToggleModule(params.toggleModule).batchSetHatStatus(capabilityHatIds, trues);
+        IEligibilityModule(params.eligibilityModule).batchSetDefaultEligibility(capabilityHatIds, trues, trues);
     }
 
     /*════════════════  INTERNAL HELPERS  ════════════════*/

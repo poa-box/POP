@@ -543,7 +543,7 @@ contract DeployOrg is Script {
                 quadratic: vClass.quadratic,
                 minBalance: vClass.minBalance,
                 asset: vClass.asset,
-                hatIds: vClass.hatIds
+                hatId: vClass.hatIds.length > 0 ? vClass.hatIds[0] : 0
             });
         }
 
@@ -594,8 +594,15 @@ contract DeployOrg is Script {
             return bootstrap; // Empty bootstrap
         }
 
-        // Build project configs
-        // Note: Role indices will be converted to hat IDs by OrgDeployer at deployment time
+        // Build project configs.
+        //
+        // Bootstrap JSON still encodes per-cap allowlists as role-index arrays (e.g. [0,1,2]).
+        // Under the capability-hat refactor each cap is a single hat, so we pick the first
+        // role index from each array. OrgDeployer._resolveBootstrapHatIndex then translates
+        // role index → hat ID at deploy time using the freshly-created roleHatIds.
+        //
+        // Sentinel `type(uint256).max` = "no project-level override" (TaskManager falls
+        // back to the global cap hat). An empty role array in JSON maps to that sentinel.
         bootstrap.projects = new ITaskManagerBootstrap.BootstrapProjectConfig[](bootstrapJson.projects.length);
         for (uint256 i = 0; i < bootstrapJson.projects.length; i++) {
             bootstrap.projects[i] = ITaskManagerBootstrap.BootstrapProjectConfig({
@@ -603,11 +610,18 @@ contract DeployOrg is Script {
                 metadataHash: bootstrapJson.projects[i].metadataHash,
                 cap: bootstrapJson.projects[i].cap,
                 managers: bootstrapJson.projects[i].managers,
-                // Note: These are role indices, OrgDeployer will resolve to hat IDs
-                createHats: bootstrapJson.projects[i].createRoles,
-                claimHats: bootstrapJson.projects[i].claimRoles,
-                reviewHats: bootstrapJson.projects[i].reviewRoles,
-                assignHats: bootstrapJson.projects[i].assignRoles,
+                createHat: bootstrapJson.projects[i].createRoles.length > 0
+                    ? bootstrapJson.projects[i].createRoles[0]
+                    : type(uint256).max,
+                claimHat: bootstrapJson.projects[i].claimRoles.length > 0
+                    ? bootstrapJson.projects[i].claimRoles[0]
+                    : type(uint256).max,
+                reviewHat: bootstrapJson.projects[i].reviewRoles.length > 0
+                    ? bootstrapJson.projects[i].reviewRoles[0]
+                    : type(uint256).max,
+                assignHat: bootstrapJson.projects[i].assignRoles.length > 0
+                    ? bootstrapJson.projects[i].assignRoles[0]
+                    : type(uint256).max,
                 bountyTokens: new address[](0),
                 bountyCaps: new uint256[](0)
             });

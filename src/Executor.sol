@@ -33,6 +33,10 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     error TargetSelf();
     error ZeroAddress();
     error TimelockNotExpired();
+    error ConfigureVouchingFailed();
+    error BatchConfigureVouchingFailed();
+    error SetDefaultEligibilityFailed();
+    error SetAuthorizedRevokerFailed();
 
     /* ─────────── Constants ─────────── */
     uint8 public constant MAX_CALLS_PER_BATCH = 20;
@@ -217,7 +221,7 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
                 "configureVouching(uint256,uint32,uint256,bool)", hatId, quorum, membershipHatId, combineWithHierarchy
             )
         );
-        require(success, "configureVouching failed");
+        if (!success) revert ConfigureVouchingFailed();
     }
 
     /**
@@ -246,7 +250,7 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
                 combineWithHierarchyFlags
             )
         );
-        require(success, "batchConfigureVouching failed");
+        if (!success) revert BatchConfigureVouchingFailed();
     }
 
     /**
@@ -265,7 +269,24 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         (bool success,) = eligibilityModule.call(
             abi.encodeWithSignature("setDefaultEligibility(uint256,bool,bool)", hatId, eligible, standing)
         );
-        require(success, "setDefaultEligibility failed");
+        if (!success) revert SetDefaultEligibilityFailed();
+    }
+
+    /**
+     * @notice Authorize an external contract (e.g., RoleBundleHatter) to act as a revoker on
+     *         the EligibilityModule. Used during setup to wire the cascade-revoke path.
+     * @dev Only callable by owner before renouncing ownership. After renouncement, the
+     *      Executor itself (governance) is the EligibilityModule's superAdmin and can call
+     *      `setAuthorizedRevoker` directly through `execute`.
+     */
+    function setEligibilityAuthorizedRevoker(address eligibilityModule, address revoker, bool authorized)
+        external
+        onlyOwner
+    {
+        if (eligibilityModule == address(0) || revoker == address(0)) revert ZeroAddress();
+        (bool success,) =
+            eligibilityModule.call(abi.encodeWithSignature("setAuthorizedRevoker(address,bool)", revoker, authorized));
+        if (!success) revert SetAuthorizedRevokerFailed();
     }
 
     /* ─────────── View Helpers ─────────── */

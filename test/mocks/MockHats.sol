@@ -7,6 +7,12 @@ contract MockHats is IHats {
     mapping(address => mapping(uint256 => bool)) public wearers;
     mapping(address => mapping(uint256 => bool)) public eligibles;
     mapping(uint256 => bool) public activeHats;
+    // Per (wearer, hatId) ineligibility flag — defaults false (= eligible). Production
+    // Hats Protocol gates `mintHat` on `isEligible`, so we mirror that here: setting
+    // a wearer's eligibility to (false, _) via `setHatWearerStatus` flips this flag,
+    // and subsequent `mintHat` calls revert just like real Hats would. Restoring
+    // eligibility to (true, true) clears the flag.
+    mapping(address => mapping(uint256 => bool)) public ineligible;
 
     // IHatsIdUtilities implementations
     function buildHatId(uint256 _admin, uint16 _newHat) external pure returns (uint256 id) {
@@ -99,6 +105,11 @@ contract MockHats is IHats {
     }
 
     function mintHat(uint256 _hatId, address _wearer) external returns (bool success) {
+        // Production parity: Hats.mintHat reverts with NotEligible at Hats.sol:250 when
+        // the eligibility module says the wearer is ineligible. This was the source of
+        // the re-mint-after-revoke bug — tests passed because the old mock skipped this
+        // check; production would have reverted.
+        if (ineligible[_wearer][_hatId]) revert NotEligible();
         wearers[_wearer][_hatId] = true;
         if (!activeHats[_hatId]) {
             activeHats[_hatId] = true;
@@ -123,7 +134,17 @@ contract MockHats is IHats {
         external
         returns (bool updated)
     {
-        wearers[_wearer][_hatId] = _eligible && _standing;
+        // Mirror what an EligibilityModule call would do in production:
+        //   - (false, _) or (_, false) → wearer becomes ineligible AND loses the hat
+        //     (Hats.checkHatWearerStatus would burn the balance on next read)
+        //   - (true, true) → wearer is eligible again; hat is NOT auto-granted, a
+        //     subsequent `mintHat` call is still required (matches real Hats semantics)
+        if (!_eligible || !_standing) {
+            wearers[_wearer][_hatId] = false;
+            ineligible[_wearer][_hatId] = true;
+        } else {
+            ineligible[_wearer][_hatId] = false;
+        }
         return true;
     }
 

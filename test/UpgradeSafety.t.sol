@@ -48,30 +48,26 @@ contract UpgradeSafetyTest is Test {
 
     function testParticipationTokenImplCannotBeInitialized() public {
         ParticipationToken impl = new ParticipationToken();
-        uint256[] memory hats = new uint256[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, "Token", "TKN", HATS, hats, hats);
+        impl.initialize(OWNER, "Token", "TKN", HATS, 1, 2);
     }
 
     function testTaskManagerImplCannotBeInitialized() public {
         TaskManager impl = new TaskManager();
-        uint256[] memory hats = new uint256[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, HATS, hats, OWNER, OWNER);
+        impl.initialize(OWNER, HATS, 1, OWNER, OWNER);
     }
 
     function testQuickJoinImplCannotBeInitialized() public {
         QuickJoin impl = new QuickJoin();
-        uint256[] memory hats = new uint256[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, HATS, OWNER, OWNER, hats);
+        impl.initialize(OWNER, HATS, OWNER, OWNER, 1, OWNER);
     }
 
     function testEducationHubImplCannotBeInitialized() public {
         EducationHub impl = new EducationHub();
-        uint256[] memory hats = new uint256[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, HATS, OWNER, hats, hats);
+        impl.initialize(OWNER, HATS, OWNER, 1, 2);
     }
 
     function testPaymentManagerImplCannotBeInitialized() public {
@@ -94,19 +90,17 @@ contract UpgradeSafetyTest is Test {
 
     function testHybridVotingImplCannotBeInitialized() public {
         HybridVoting impl = new HybridVoting();
-        uint256[] memory hats = new uint256[](0);
         address[] memory targets = new address[](0);
         HybridVoting.ClassConfig[] memory classes = new HybridVoting.ClassConfig[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(HATS, OWNER, hats, targets, 51, classes);
+        impl.initialize(HATS, OWNER, 1, targets, 51, classes);
     }
 
     function testDirectDemocracyVotingImplCannotBeInitialized() public {
         DirectDemocracyVoting impl = new DirectDemocracyVoting();
-        uint256[] memory hats = new uint256[](0);
         address[] memory targets = new address[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(HATS, OWNER, hats, hats, targets, 51);
+        impl.initialize(HATS, OWNER, 1, 2, targets, 51);
     }
 
     function testOrgRegistryImplCannotBeInitialized() public {
@@ -255,10 +249,8 @@ contract UpgradeSafetyTest is Test {
         BeaconProxy proxy = new BeaconProxy(address(beacon), "");
         TaskManager tm = TaskManager(address(proxy));
 
-        uint256[] memory creators = new uint256[](1);
-        creators[0] = creatorHat;
         vm.prank(creator);
-        tm.initialize(token, address(hats), creators, exec, address(0));
+        tm.initialize(token, address(hats), creatorHat, exec, address(0));
 
         // Pre-upgrade state: an organizer hat allowance + a project + a folders root.
         vm.prank(exec);
@@ -271,10 +263,10 @@ contract UpgradeSafetyTest is Test {
                 metadataHash: bytes32(0),
                 cap: 5 ether,
                 managers: new address[](0),
-                createHats: creators,
-                claimHats: new uint256[](0),
-                reviewHats: new uint256[](0),
-                assignHats: new uint256[](0),
+                createHat: creatorHat,
+                claimHat: 0,
+                reviewHat: 0,
+                assignHat: 0,
                 bountyTokens: new address[](0),
                 bountyCaps: new uint256[](0)
             })

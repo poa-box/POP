@@ -57,4 +57,23 @@ library RoleConfigStructs {
         RoleDistributionConfig distribution; // Initial hat distribution
         HatConfig hatConfig; // Hats Protocol configuration
     }
+
+    /// @notice Configuration for a single capability hat
+    /// @dev Capability hats are atomic permission units; one per gated action in any contract.
+    ///      Created as children of ELIGIBILITY_ADMIN during org deployment.
+    struct CapabilityHatConfig {
+        string name; // Capability name (e.g., "task.create", "vote.executive")
+        string image; // IPFS hash or URI for capability hat image
+        bytes32 metadataCID; // IPFS CID for extended metadata
+        uint32 maxSupply; // Maximum wearers (0 = unlimited, default: type(uint32).max)
+    }
+
+    /// @notice Configuration for a role → capability bundle
+    /// @dev When the role hat at `roleIndex` is granted via RoleBundleHatter.mintRole,
+    ///      every capability hat at the indices listed in `capabilityHatIndices` is also minted.
+    ///      "Permission sets" in the UI map 1:1 to these bundles.
+    struct RoleBundleConfig {
+        uint256 roleIndex; // Index into the roles[] array
+        uint256[] capabilityHatIndices; // Indices into the capabilityHats[] array
+    }
 }

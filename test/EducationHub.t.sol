@@ -68,11 +68,7 @@ contract MockPT is Test, IParticipationToken {
             EducationHub _hubImpl = new EducationHub();
             UpgradeableBeacon _hubBeacon = new UpgradeableBeacon(address(_hubImpl), address(this));
             hub = EducationHub(address(new BeaconProxy(address(_hubBeacon), "")));
-            uint256[] memory creatorHats = new uint256[](1);
-            creatorHats[0] = CREATOR_HAT;
-            uint256[] memory memberHats = new uint256[](1);
-            memberHats[0] = MEMBER_HAT;
-            hub.initialize(address(token), address(hats), executor, creatorHats, memberHats);
+            hub.initialize(address(token), address(hats), executor, CREATOR_HAT, MEMBER_HAT);
         }
 
         /*////////////////////////////////////////////////////////////
@@ -82,6 +78,9 @@ contract MockPT is Test, IParticipationToken {
             assertEq(address(hub.token()), address(token));
             assertEq(address(hub.hats()), address(hats));
             assertEq(hub.executor(), executor);
+            assertEq(hub.creatorHat(), CREATOR_HAT);
+            assertEq(hub.memberHat(), MEMBER_HAT);
+            // Backwards-compat array getters return single-element arrays
             uint256[] memory creatorHats = hub.creatorHatIds();
             assertEq(creatorHats.length, 1);
             assertEq(creatorHats[0], CREATOR_HAT);
@@ -94,10 +93,8 @@ contract MockPT is Test, IParticipationToken {
             EducationHub _tmpImpl = new EducationHub();
             UpgradeableBeacon _tmpBeacon = new UpgradeableBeacon(address(_tmpImpl), address(this));
             EducationHub tmp = EducationHub(address(new BeaconProxy(address(_tmpBeacon), "")));
-            uint256[] memory creatorHats = new uint256[](0);
-            uint256[] memory memberHats = new uint256[](0);
             vm.expectRevert(EducationHub.ZeroAddress.selector);
-            tmp.initialize(address(0), address(hats), executor, creatorHats, memberHats);
+            tmp.initialize(address(0), address(hats), executor, CREATOR_HAT, MEMBER_HAT);
         }
 
         /*////////////////////////////////////////////////////////////
@@ -115,78 +112,63 @@ contract MockPT is Test, IParticipationToken {
             hub.setExecutor(address(0xAB));
         }
 
-        function testSetCreatorHatAllowed() public {
+        function testSetCreatorHat() public {
             uint256 newHat = 99;
             address newCreator = address(0xbeef);
 
             // Mint the new hat to the new creator
             hats.mintHat(newHat, newCreator);
 
-            // Add the new hat as a creator hat
+            // Swap creator capability hat to the new one
             vm.prank(executor);
-            hub.setCreatorHatAllowed(newHat, true);
+            hub.setCreatorHat(newHat);
 
-            // Verify the hat was added
+            assertEq(hub.creatorHat(), newHat);
             uint256[] memory creatorHats = hub.creatorHatIds();
-            assertEq(creatorHats.length, 2);
-            bool found = false;
-            for (uint256 i = 0; i < creatorHats.length; i++) {
-                if (creatorHats[i] == newHat) {
-                    found = true;
-                    break;
-                }
-            }
-            assertTrue(found, "New creator hat should be in the array");
+            assertEq(creatorHats.length, 1);
+            assertEq(creatorHats[0], newHat);
 
-            // New creator should be able to create modules
+            // New creator now passes the gate
             vm.prank(newCreator);
             hub.createModule(bytes("test"), bytes32(0), 5, 1);
 
-            // Remove the hat
-            vm.prank(executor);
-            hub.setCreatorHatAllowed(newHat, false);
-
-            // Verify the hat was removed
-            creatorHats = hub.creatorHatIds();
-            assertEq(creatorHats.length, 1);
-
-            // New creator should no longer be able to create modules
-            vm.prank(newCreator);
+            // Old creator (only wears CREATOR_HAT) no longer passes
+            vm.prank(creator);
             vm.expectRevert(EducationHub.NotCreator.selector);
             hub.createModule(bytes("test2"), bytes32(0), 5, 1);
         }
 
-        function testSetMemberHatAllowed() public {
+        function testSetCreatorHatUnauthorized() public {
+            vm.expectRevert(EducationHub.NotExecutor.selector);
+            hub.setCreatorHat(99);
+        }
+
+        function testSetMemberHat() public {
             uint256 newHat = 88;
             address newMember = address(0xcafe);
 
             // Mint the new hat to the new member
             hats.mintHat(newHat, newMember);
 
-            // Add the new hat as a member hat
+            // Swap member capability hat
             vm.prank(executor);
-            hub.setMemberHatAllowed(newHat, true);
+            hub.setMemberHat(newHat);
 
-            // Verify the hat was added
-            uint256[] memory memberHats = hub.memberHatIds();
-            assertEq(memberHats.length, 2);
-            bool found = false;
-            for (uint256 i = 0; i < memberHats.length; i++) {
-                if (memberHats[i] == newHat) {
-                    found = true;
-                    break;
-                }
-            }
-            assertTrue(found, "New member hat should be in the array");
+            assertEq(hub.memberHat(), newHat);
 
             // First create a module for testing
             vm.prank(creator);
             hub.createModule(bytes("data"), bytes32(0), 5, 2);
 
-            // New member should be able to complete modules
+            // New member should pass the gate
             vm.prank(newMember);
             hub.completeModule(0, 2);
             assertEq(token.balanceOf(newMember), 5);
+        }
+
+        function testSetMemberHatUnauthorized() public {
+            vm.expectRevert(EducationHub.NotExecutor.selector);
+            hub.setMemberHat(99);
         }
 
         /*////////////////////////////////////////////////////////////

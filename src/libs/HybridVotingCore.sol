@@ -124,21 +124,17 @@ library HybridVotingCore {
         view
         returns (uint256)
     {
-        // Check hat gating for this class
-        bool hasClassHat = (voter == address(l.executor)) || (cls.hatIds.length == 0);
-
-        // Check if voter has any of the class hats
-        if (!hasClassHat && cls.hatIds.length > 0) {
-            for (uint256 i; i < cls.hatIds.length;) {
-                if (l.hats.isWearerOfHat(voter, cls.hatIds[i])) {
-                    hasClassHat = true;
-                    break;
-                }
-                unchecked {
-                    ++i;
-                }
-            }
-        }
+        // Hats-native: each class has a single capability hat.
+        // Semantic NOTE: `cls.hatId == 0` means "unrestricted" — any voter passes the hat
+        // check and accrues power according to the class's strategy (e.g., token-balance).
+        // This is INTENTIONALLY DIFFERENT from every other capability-hat gate in the protocol
+        // (TaskManager / EducationHub / DDV / QuickJoin / ParticipationToken), where 0 means
+        // "disabled / no one passes". The asymmetry exists because HybridVoting classes
+        // legitimately model token-only voting tiers (e.g., a quadratic ERC20-balance class
+        // with no hat prerequisite). Production deployments should treat 0 as a sentinel for
+        // "token/strategy-only" classes; if a class is meant to be disabled, remove it via
+        // `setClasses` rather than setting its hatId to 0.
+        bool hasClassHat = (voter == address(l.executor)) || (cls.hatId == 0) || l.hats.isWearerOfHat(voter, cls.hatId);
 
         if (!hasClassHat) return 0;
 

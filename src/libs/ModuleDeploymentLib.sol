@@ -23,13 +23,13 @@ interface IHybridVotingInit {
         bool quadratic;
         uint256 minBalance;
         address asset;
-        uint256[] hatIds;
+        uint256 hatId;
     }
 
     function initialize(
         address hats_,
         address executor_,
-        uint256[] calldata initialCreatorHats,
+        uint256 proposalCreatorHat,
         address[] calldata targets,
         uint8 thresholdPct,
         ClassConfig[] calldata initialClasses
@@ -47,8 +47,14 @@ interface IExecutorInit {
 }
 
 interface IQuickJoinInit {
-    function initialize(address executor, address hats, address registry, address master, uint256[] calldata memberHats)
-        external;
+    function initialize(
+        address executor,
+        address hats,
+        address registry,
+        address master,
+        uint256 memberHat,
+        address roleBundleHatter
+    ) external;
 }
 
 interface IParticipationTokenInit {
@@ -57,24 +63,18 @@ interface IParticipationTokenInit {
         string calldata name,
         string calldata symbol,
         address hats,
-        uint256[] calldata memberHats,
-        uint256[] calldata approverHats
+        uint256 memberHat,
+        uint256 approverHat
     ) external;
 }
 
 interface ITaskManagerInit {
-    function initialize(address token, address hats, uint256[] calldata creatorHats, address executor, address deployer)
+    function initialize(address token, address hats, uint256 projectCreatorHat, address executor, address deployer)
         external;
 }
 
 interface IEducationHubInit {
-    function initialize(
-        address token,
-        address hats,
-        address executor,
-        uint256[] calldata creatorHats,
-        uint256[] calldata memberHats
-    ) external;
+    function initialize(address token, address hats, address executor, uint256 creatorHat, uint256 memberHat) external;
 }
 
 interface IEligibilityModuleInit {
@@ -83,6 +83,10 @@ interface IEligibilityModuleInit {
 
 interface IToggleModuleInit {
     function initialize(address admin) external;
+}
+
+interface IRoleBundleHatterInit {
+    function initialize(address hats, address executor, address deployer) external;
 }
 
 interface IPaymentManagerInit {
@@ -156,16 +160,32 @@ library ModuleDeploymentLib {
         execProxy = deployCore(config, ModuleTypes.EXECUTOR_ID, init, beacon);
     }
 
+    function deployRoleBundleHatter(DeployConfig memory config, address executorAddr, address deployer, address beacon)
+        internal
+        returns (address rbhProxy)
+    {
+        bytes memory init =
+            abi.encodeWithSelector(IRoleBundleHatterInit.initialize.selector, config.hats, executorAddr, deployer);
+        rbhProxy = deployCore(config, ModuleTypes.ROLE_BUNDLE_HATTER_ID, init, beacon);
+    }
+
     function deployQuickJoin(
         DeployConfig memory config,
         address executorAddr,
         address registry,
         address masterDeploy,
-        uint256[] memory memberHats,
+        uint256 memberHat,
+        address roleBundleHatter,
         address beacon
     ) internal returns (address qjProxy) {
         bytes memory init = abi.encodeWithSelector(
-            IQuickJoinInit.initialize.selector, executorAddr, config.hats, registry, masterDeploy, memberHats
+            IQuickJoinInit.initialize.selector,
+            executorAddr,
+            config.hats,
+            registry,
+            masterDeploy,
+            memberHat,
+            roleBundleHatter
         );
         qjProxy = deployCore(config, ModuleTypes.QUICK_JOIN_ID, init, beacon);
     }
@@ -175,18 +195,12 @@ library ModuleDeploymentLib {
         address executorAddr,
         string memory name,
         string memory symbol,
-        uint256[] memory memberHats,
-        uint256[] memory approverHats,
+        uint256 memberHat,
+        uint256 approverHat,
         address beacon
     ) internal returns (address ptProxy) {
         bytes memory init = abi.encodeWithSelector(
-            IParticipationTokenInit.initialize.selector,
-            executorAddr,
-            name,
-            symbol,
-            config.hats,
-            memberHats,
-            approverHats
+            IParticipationTokenInit.initialize.selector, executorAddr, name, symbol, config.hats, memberHat, approverHat
         );
         ptProxy = deployCore(config, ModuleTypes.PARTICIPATION_TOKEN_ID, init, beacon);
     }
@@ -195,12 +209,12 @@ library ModuleDeploymentLib {
         DeployConfig memory config,
         address executorAddr,
         address token,
-        uint256[] memory creatorHats,
+        uint256 projectCreatorHat,
         address beacon,
         address deployer
     ) internal returns (address tmProxy) {
         bytes memory init = abi.encodeWithSelector(
-            ITaskManagerInit.initialize.selector, token, config.hats, creatorHats, executorAddr, deployer
+            ITaskManagerInit.initialize.selector, token, config.hats, projectCreatorHat, executorAddr, deployer
         );
         tmProxy = deployCore(config, ModuleTypes.TASK_MANAGER_ID, init, beacon);
     }
@@ -209,12 +223,12 @@ library ModuleDeploymentLib {
         DeployConfig memory config,
         address executorAddr,
         address token,
-        uint256[] memory creatorHats,
-        uint256[] memory memberHats,
+        uint256 creatorHat,
+        uint256 memberHat,
         address beacon
     ) internal returns (address ehProxy) {
         bytes memory init = abi.encodeWithSelector(
-            IEducationHubInit.initialize.selector, token, config.hats, executorAddr, creatorHats, memberHats
+            IEducationHubInit.initialize.selector, token, config.hats, executorAddr, creatorHat, memberHat
         );
         ehProxy = deployCore(config, ModuleTypes.EDUCATION_HUB_ID, init, beacon);
     }
@@ -241,7 +255,7 @@ library ModuleDeploymentLib {
     function deployHybridVoting(
         DeployConfig memory config,
         address executorAddr,
-        uint256[] memory creatorHats,
+        uint256 proposalCreatorHat,
         uint8 thresholdPct,
         IHybridVotingInit.ClassConfig[] memory classes,
         address beacon
@@ -254,7 +268,7 @@ library ModuleDeploymentLib {
             IHybridVotingInit.initialize.selector,
             config.hats,
             executorAddr,
-            creatorHats,
+            proposalCreatorHat,
             targets,
             thresholdPct,
             classes
@@ -273,18 +287,18 @@ library ModuleDeploymentLib {
     function deployDirectDemocracyVoting(
         DeployConfig memory config,
         address executorAddr,
-        uint256[] memory votingHats,
-        uint256[] memory creatorHats,
+        uint256 votingHat,
+        uint256 proposalCreatorHat,
         address[] memory initialTargets,
         uint8 thresholdPct,
         address beacon
     ) internal returns (address ddProxy) {
         bytes memory init = abi.encodeWithSignature(
-            "initialize(address,address,uint256[],uint256[],address[],uint8)",
+            "initialize(address,address,uint256,uint256,address[],uint8)",
             config.hats,
             executorAddr,
-            votingHats,
-            creatorHats,
+            votingHat,
+            proposalCreatorHat,
             initialTargets,
             thresholdPct
         );

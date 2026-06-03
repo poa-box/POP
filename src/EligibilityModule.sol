@@ -101,6 +101,11 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         mapping(uint256 => mapping(address => mapping(address => uint256))) voucherRecordEpoch; // hatId => wearer => voucher => epoch
         // Configurable daily vouch limit (0 = use DEFAULT_MAX_DAILY_VOUCHES)
         uint32 maxDailyVouches;
+        // Authorized revokers: contracts that may call setWearerEligibility without being a
+        // hat admin or the superAdmin. Used to grant RoleBundleHatter authority to cascade-revoke
+        // capability hats when a role is revoked. Strictly an additive authorization — does NOT
+        // remove any existing checks.
+        mapping(address => bool) authorizedRevokers;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.eligibilitymodule.storage");
@@ -190,11 +195,25 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     event RoleApplicationSubmitted(uint256 indexed hatId, address indexed applicant, bytes32 applicationHash);
     event RoleApplicationWithdrawn(uint256 indexed hatId, address indexed applicant);
     event MaxDailyVouchesSet(uint32 maxDailyVouches);
+    event AuthorizedRevokerSet(address indexed revoker, bool authorized);
 
     /*═════════════════════════════════════════ MODIFIERS ═════════════════════════════════════════*/
 
     modifier onlySuperAdmin() {
         if (msg.sender != _layout().superAdmin) revert NotSuperAdmin();
+        _;
+    }
+
+    /// @dev Allows the superAdmin OR an explicitly-authorized revoker to pass. This is the
+    ///      ONE narrow exception to the superAdmin-only write lockdown (PR #167): it exists
+    ///      so the per-org RoleBundleHatter can cascade-revoke / reset capability-hat
+    ///      eligibility during role grant/revoke. `authorizedRevokers` is a superAdmin-managed
+    ///      allowlist, so the superAdmin stays in full control of who may write — this does
+    ///      NOT reintroduce the removed Hats-hierarchy admin path. Used ONLY by
+    ///      `setWearerEligibility`; every other write path stays strictly `onlySuperAdmin`.
+    modifier onlySuperAdminOrRevoker() {
+        Layout storage l = _layout();
+        if (msg.sender != l.superAdmin && !l.authorizedRevokers[msg.sender]) revert NotSuperAdmin();
         _;
     }
 
@@ -236,7 +255,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     function setWearerEligibility(address wearer, uint256 hatId, bool _eligible, bool _standing)
         external
-        onlySuperAdmin
+        onlySuperAdminOrRevoker
         whenNotPaused
     {
         if (wearer == address(0)) revert ZeroAddress();
@@ -602,6 +621,23 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     function setUserJoinTimeNow(address user) external onlySuperAdmin {
         _layout().userJoinTime[user] = block.timestamp;
         emit UserJoinTimeSet(user, block.timestamp);
+    }
+
+    /// @notice Authorize a contract (typically the per-org RoleBundleHatter) to call
+    ///         `setWearerEligibility` for the purpose of cascading capability-hat revocations.
+    ///         Strictly additive — does not remove the existing hat-admin or superAdmin checks.
+    /// @dev Authorization is narrowly scoped: revokers can ONLY call `setWearerEligibility`
+    ///      (via the `onlySuperAdminOrRevoker` modifier). They cannot create hats, set defaults,
+    ///      update metadata, or call any other admin-gated function. Only the superAdmin
+    ///      (executor in production) can change the revoker list.
+    function setAuthorizedRevoker(address revoker, bool authorized) external onlySuperAdmin {
+        if (revoker == address(0)) revert ZeroAddress();
+        _layout().authorizedRevokers[revoker] = authorized;
+        emit AuthorizedRevokerSet(revoker, authorized);
+    }
+
+    function isAuthorizedRevoker(address revoker) external view returns (bool) {
+        return _layout().authorizedRevokers[revoker];
     }
 
     /// @notice Set the maximum number of vouches a user can give per day

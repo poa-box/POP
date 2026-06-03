@@ -17,6 +17,7 @@ import {PaymentManager} from "../../src/PaymentManager.sol";
 import {UniversalAccountRegistry} from "../../src/UniversalAccountRegistry.sol";
 import {EligibilityModule} from "../../src/EligibilityModule.sol";
 import {ToggleModule} from "../../src/ToggleModule.sol";
+import {RoleBundleHatter} from "../../src/RoleBundleHatter.sol";
 import {PasskeyAccount} from "../../src/PasskeyAccount.sol";
 import {PasskeyAccountFactory} from "../../src/PasskeyAccountFactory.sol";
 
@@ -113,6 +114,7 @@ contract DeployInfrastructure is Script {
         address accountRegImpl = address(new UniversalAccountRegistry());
         address eligibilityImpl = address(new EligibilityModule());
         address toggleImpl = address(new ToggleModule());
+        address roleBundleHatterImpl = address(new RoleBundleHatter());
         address passkeyAccountImpl = address(new PasskeyAccount());
         address passkeyAccountFactoryImpl = address(new PasskeyAccountFactory());
         address implRegImpl = address(new ImplementationRegistry());
@@ -213,6 +215,7 @@ contract DeployInfrastructure is Script {
         pm.addContractType("UniversalAccountRegistry", accountRegImpl);
         pm.addContractType("EligibilityModule", eligibilityImpl);
         pm.addContractType("ToggleModule", toggleImpl);
+        pm.addContractType("RoleBundleHatter", roleBundleHatterImpl);
         pm.addContractType("PasskeyAccount", passkeyAccountImpl);
         pm.addContractType("PasskeyAccountFactory", passkeyAccountFactoryImpl);
 

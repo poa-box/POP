@@ -65,8 +65,11 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         address executor;
         uint256 requestCounter;
         mapping(uint256 => Request) requests;
-        uint256[] memberHatIds; // enumeration array for member hats
-        uint256[] approverHatIds; // enumeration array for approver hats
+        uint256[] memberHatIds; // DEPRECATED: dead state, kept for ERC-7201 append-only rules
+        uint256[] approverHatIds; // DEPRECATED: dead state, kept for ERC-7201 append-only rules
+        // ─── Hats-native capability hats (one per gate) ───
+        uint256 memberHat; // capability hat for requestTokens (member-only)
+        uint256 approverHat; // capability hat for approveRequest (approver-only)
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.participationtoken.storage");
@@ -95,13 +98,19 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     }
 
     /*─────────── Initialiser ──────*/
+    /// @param executor_ Org's Executor (governance)
+    /// @param name_ ERC20 token name
+    /// @param symbol_ ERC20 token symbol
+    /// @param hatsAddr Hats Protocol address
+    /// @param memberHat_ Capability hat gating `requestTokens` (member-only)
+    /// @param approverHat_ Capability hat gating `approveRequest` (approver-only)
     function initialize(
         address executor_,
         string calldata name_,
         string calldata symbol_,
         address hatsAddr,
-        uint256[] calldata initialMemberHats,
-        uint256[] calldata initialApproverHats
+        uint256 memberHat_,
+        uint256 approverHat_
     ) external initializer {
         if (hatsAddr == address(0) || executor_ == address(0)) {
             revert InvalidAddress();
@@ -114,24 +123,11 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         Layout storage l = _layout();
         l.hats = IHats(hatsAddr);
         l.executor = executor_;
+        l.memberHat = memberHat_;
+        l.approverHat = approverHat_;
 
-        // Set initial member hats using HatManager
-        for (uint256 i; i < initialMemberHats.length;) {
-            HatManager.setHatInArray(l.memberHatIds, initialMemberHats[i], true);
-            emit MemberHatSet(initialMemberHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
-
-        // Set initial approver hats using HatManager
-        for (uint256 i; i < initialApproverHats.length;) {
-            HatManager.setHatInArray(l.approverHatIds, initialApproverHats[i], true);
-            emit ApproverHatSet(initialApproverHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
+        emit MemberHatSet(memberHat_, true);
+        emit ApproverHatSet(approverHat_, true);
     }
 
     /*────────── Modifiers ─────────*/
@@ -210,16 +206,14 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         }
     }
 
-    function setMemberHatAllowed(uint256 h, bool ok) external onlyExecutor {
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.memberHatIds, h, ok);
-        emit MemberHatSet(h, ok);
+    function setMemberHat(uint256 h) external onlyExecutor {
+        _layout().memberHat = h;
+        emit MemberHatSet(h, true);
     }
 
-    function setApproverHatAllowed(uint256 h, bool ok) external onlyExecutor {
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.approverHatIds, h, ok);
-        emit ApproverHatSet(h, ok);
+    function setApproverHat(uint256 h) external onlyExecutor {
+        _layout().approverHat = h;
+        emit ApproverHatSet(h, true);
     }
 
     /// @notice Update the ERC20 token name. Executor-only — typically called via
@@ -387,11 +381,11 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     }
 
     /*───────── Internal Helper Functions ─────────*/
-    /// @dev Returns true if `user` wears *any* hat of the requested type.
+    /// @dev Returns true if `user` wears the capability hat for the given type.
     function _hasHat(address user, HatType hatType) internal view returns (bool) {
         Layout storage l = _layout();
-        uint256[] storage ids = hatType == HatType.MEMBER ? l.memberHatIds : l.approverHatIds;
-        return HatManager.hasAnyHat(l.hats, ids, user);
+        uint256 hatId = hatType == HatType.MEMBER ? l.memberHat : l.approverHat;
+        return l.hats.isWearerOfHat(user, hatId);
     }
 
     /*───────── View helpers ─────────*/
@@ -425,28 +419,42 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         return _layout().requestCounter;
     }
 
-    function memberHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().memberHatIds);
+    /// @notice Backwards-compat array getter; returns single-element array with the
+    ///         current capability hat.
+    function memberHatIds() external view returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = _layout().memberHat;
     }
 
-    function approverHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().approverHatIds);
+    /// @notice Backwards-compat array getter; returns single-element array with the
+    ///         current capability hat.
+    function approverHatIds() external view returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = _layout().approverHat;
+    }
+
+    function memberHat() external view returns (uint256) {
+        return _layout().memberHat;
+    }
+
+    function approverHat() external view returns (uint256) {
+        return _layout().approverHat;
     }
 
     /*───────── Hat Management View Functions ─────────*/
     function memberHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().memberHatIds);
+        return 1;
     }
 
     function approverHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().approverHatIds);
+        return 1;
     }
 
     function isMemberHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().memberHatIds, hatId);
+        return hatId != 0 && hatId == _layout().memberHat;
     }
 
     function isApproverHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().approverHatIds, hatId);
+        return hatId != 0 && hatId == _layout().approverHat;
     }
 }

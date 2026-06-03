@@ -30,4 +30,5 @@ library ModuleTypes {
     bytes32 constant DIRECT_DEMOCRACY_VOTING_ID = keccak256("DirectDemocracyVoting");
     bytes32 constant PASSKEY_ACCOUNT_ID = keccak256("PasskeyAccount");
     bytes32 constant PASSKEY_ACCOUNT_FACTORY_ID = keccak256("PasskeyAccountFactory");
+    bytes32 constant ROLE_BUNDLE_HATTER_ID = keccak256("RoleBundleHatter");
 }

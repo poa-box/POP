@@ -133,11 +133,9 @@ contract SimulateVotingUpgrade is Script {
 
         HybridVoting.ClassConfig[] memory classes = hv.getClasses();
         for (uint256 i = 0; i < classes.length; i++) {
-            for (uint256 j = 0; j < classes[i].hatIds.length; j++) {
+            if (classes[i].hatId != 0) {
                 vm.mockCall(
-                    HATS,
-                    abi.encodeWithSelector(IHats.isWearerOfHat.selector, who, classes[i].hatIds[j]),
-                    abi.encode(true)
+                    HATS, abi.encodeWithSelector(IHats.isWearerOfHat.selector, who, classes[i].hatId), abi.encode(true)
                 );
             }
         }

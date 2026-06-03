@@ -150,7 +150,7 @@ contract GovernanceCrossChainUpgradeTest is Test {
             quadratic: false,
             minBalance: 0,
             asset: address(0),
-            hatIds: memberHats
+            hatId: memberHats.length > 0 ? memberHats[0] : 0
         });
 
         HybridVoting hvImpl = new HybridVoting();
@@ -161,7 +161,7 @@ contract GovernanceCrossChainUpgradeTest is Test {
                         address(hvBeacon),
                         abi.encodeCall(
                             HybridVoting.initialize,
-                            (address(hats), address(executor), creatorHats, targets, uint8(50), classes)
+                            (address(hats), address(executor), CREATOR_HAT, targets, uint8(50), classes)
                         )
                     )
                 ))

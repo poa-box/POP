@@ -166,10 +166,10 @@ contract Sim_HatWearerIntegration is Script {
             metadataHash: bytes32(0),
             cap: 5 ether,
             managers: new address[](0),
-            createHats: new uint256[](0),
-            claimHats: new uint256[](0),
-            reviewHats: new uint256[](0),
-            assignHats: new uint256[](0),
+            createHat: 0,
+            claimHat: 0,
+            reviewHat: 0,
+            assignHat: 0,
             bountyTokens: new address[](0),
             bountyCaps: new uint256[](0)
         });

@@ -104,8 +104,12 @@ contract ModulesFactory {
                 customImpl: address(0)
             });
 
+            // TEMPORARY SHIM (Task #5): TaskManager now takes a single project-creator capability hat.
+            // Pick the first resolved role hat until capability-hat config indexing lands.
+            uint256 tmCreatorHat = creatorHats.length > 0 ? creatorHats[0] : 0;
+
             result.taskManager = ModuleDeploymentLib.deployTaskManager(
-                config, params.executor, params.participationToken, creatorHats, taskManagerBeacon, params.deployer
+                config, params.executor, params.participationToken, tmCreatorHat, taskManagerBeacon, params.deployer
             );
         }
 
@@ -134,8 +138,19 @@ contract ModulesFactory {
                 customImpl: address(0)
             });
 
+            // TEMPORARY SHIM (Task #5): factory still receives role-bitmap arrays, but EducationHub
+            // now takes single capability hats. Picks the first resolved hat from each bitmap.
+            // Full migration to capability-hat config indexes lands with the factory threading work.
+            uint256 educationCreatorHat = creatorHats.length > 0 ? creatorHats[0] : 0;
+            uint256 educationMemberHat = memberHats.length > 0 ? memberHats[0] : 0;
+
             result.educationHub = ModuleDeploymentLib.deployEducationHub(
-                config, params.executor, params.participationToken, creatorHats, memberHats, educationHubBeacon
+                config,
+                params.executor,
+                params.participationToken,
+                educationCreatorHat,
+                educationMemberHat,
+                educationHubBeacon
             );
         }
 

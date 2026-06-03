@@ -56,13 +56,16 @@ contract DirectDemocracyVoting is Initializable {
         IHats hats;
         IExecutor executor;
         mapping(address => bool) allowedTarget; // execution allow‑list
-        uint256[] votingHatIds; // Array of voting hat IDs
-        uint256[] creatorHatIds; // Array of creator hat IDs
+        uint256[] votingHatIds; // DEPRECATED: dead state, kept for ERC-7201 append-only rules
+        uint256[] creatorHatIds; // DEPRECATED: dead state, kept for ERC-7201 append-only rules
         uint8 thresholdPct; // 1‑100  (min % of support for winning option)
         Proposal[] _proposals;
         bool _paused; // Inline pausable state
         uint256 _lock; // Inline reentrancy guard state
         uint32 quorum; // minimum number of voters required (0 = disabled)
+        // ─── Hats-native capability hats (one per gate) ───
+        uint256 votingHat; // capability hat for vote()
+        uint256 proposalCreatorHat; // capability hat for createProposal
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.directdemocracy.storage");
@@ -135,11 +138,17 @@ contract DirectDemocracyVoting is Initializable {
         _disableInitializers();
     }
 
+    /// @param hats_ Hats Protocol address
+    /// @param executor_ Org's Executor address
+    /// @param votingHat_ Capability hat gating `vote` (org-wide voter eligibility)
+    /// @param proposalCreatorHat_ Capability hat gating `createProposal`
+    /// @param initialTargets Execution allow-list targets
+    /// @param thresholdPct_ Threshold percentage (1-100)
     function initialize(
         address hats_,
         address executor_,
-        uint256[] calldata initialHats,
-        uint256[] calldata initialCreatorHats,
+        uint256 votingHat_,
+        uint256 proposalCreatorHat_,
         address[] calldata initialTargets,
         uint8 thresholdPct_
     ) external initializer {
@@ -152,25 +161,15 @@ contract DirectDemocracyVoting is Initializable {
         l.hats = IHats(hats_);
         l.executor = IExecutor(executor_);
         l.thresholdPct = thresholdPct_;
-        l._paused = false; // Initialize paused state
-        l._lock = 0; // Initialize reentrancy guard state
+        l._paused = false;
+        l._lock = 0;
+        l.votingHat = votingHat_;
+        l.proposalCreatorHat = proposalCreatorHat_;
         emit ThresholdPctSet(thresholdPct_);
+        emit HatSet(HatType.VOTING, votingHat_, true);
+        emit CreatorHatSet(proposalCreatorHat_, true);
 
-        uint256 len = initialHats.length;
-        for (uint256 i; i < len;) {
-            HatManager.setHatInArray(l.votingHatIds, initialHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
-        len = initialCreatorHats.length;
-        for (uint256 i; i < len;) {
-            HatManager.setHatInArray(l.creatorHatIds, initialCreatorHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
-        len = initialTargets.length;
+        uint256 len = initialTargets.length;
         for (uint256 i; i < len;) {
             l.allowedTarget[initialTargets[i]] = true;
             emit TargetAllowed(initialTargets[i], true);
@@ -211,13 +210,14 @@ contract DirectDemocracyVoting is Initializable {
             l.allowedTarget[target] = allowed;
             emit TargetAllowed(target, allowed);
         } else if (key == ConfigKey.HAT_ALLOWED) {
-            (HatType hatType, uint256 hat, bool allowed) = abi.decode(value, (HatType, uint256, bool));
+            // Single capability hat per gate. `allowed` ignored — pass hat=0 to clear.
+            (HatType hatType, uint256 hat,) = abi.decode(value, (HatType, uint256, bool));
             if (hatType == HatType.VOTING) {
-                HatManager.setHatInArray(l.votingHatIds, hat, allowed);
+                l.votingHat = hat;
             } else if (hatType == HatType.CREATOR) {
-                HatManager.setHatInArray(l.creatorHatIds, hat, allowed);
+                l.proposalCreatorHat = hat;
             }
-            emit HatSet(hatType, hat, allowed);
+            emit HatSet(hatType, hat, true);
         } else if (key == ConfigKey.QUORUM) {
             uint32 q = abi.decode(value, (uint32));
             l.quorum = q;
@@ -229,8 +229,7 @@ contract DirectDemocracyVoting is Initializable {
     modifier onlyCreator() {
         Layout storage l = _layout();
         if (_msgSender() != address(l.executor)) {
-            bool canCreate = HatManager.hasAnyHat(l.hats, l.creatorHatIds, _msgSender());
-            if (!canCreate) revert VotingErrors.Unauthorized();
+            if (!l.hats.isWearerOfHat(_msgSender(), l.proposalCreatorHat)) revert VotingErrors.Unauthorized();
         }
         _;
     }
@@ -371,8 +370,7 @@ contract DirectDemocracyVoting is Initializable {
         if (idxs.length != weights.length) revert VotingErrors.LengthMismatch();
         Layout storage l = _layout();
         if (_msgSender() != address(l.executor)) {
-            bool canVote = HatManager.hasAnyHat(l.hats, l.votingHatIds, _msgSender());
-            if (!canVote) revert VotingErrors.Unauthorized();
+            if (!l.hats.isWearerOfHat(_msgSender(), l.votingHat)) revert VotingErrors.Unauthorized();
         }
         Proposal storage p = l._proposals[id];
         if (p.restricted) {
@@ -497,20 +495,32 @@ contract DirectDemocracyVoting is Initializable {
         return address(_layout().hats);
     }
 
-    function votingHats() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().votingHatIds);
+    /// @notice Backwards-compat: returns single-element array with the voting capability hat.
+    function votingHats() external view returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = _layout().votingHat;
     }
 
-    function creatorHats() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().creatorHatIds);
+    /// @notice Backwards-compat: returns single-element array with the proposal-creator capability hat.
+    function creatorHats() external view returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = _layout().proposalCreatorHat;
+    }
+
+    function votingHat() external view returns (uint256) {
+        return _layout().votingHat;
+    }
+
+    function proposalCreatorHat() external view returns (uint256) {
+        return _layout().proposalCreatorHat;
     }
 
     function votingHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().votingHatIds);
+        return 1;
     }
 
     function creatorHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().creatorHatIds);
+        return 1;
     }
 
     function pollRestricted(uint256 id) external view exists(id) returns (bool) {

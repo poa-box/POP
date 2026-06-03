@@ -52,8 +52,11 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         address executor; // 20 bytes + 6 bytes = 26 bytes (fits in one slot)
         IHats hats;
         IParticipationToken token;
-        uint256[] creatorHatIds; // enumeration array for creator hats
-        uint256[] memberHatIds; // enumeration array for member hats
+        uint256[] creatorHatIds; // DEPRECATED: dead state, kept for ERC-7201 append-only rules
+        uint256[] memberHatIds; // DEPRECATED: dead state, kept for ERC-7201 append-only rules
+        // ─── Hats-native capability hats (one per gate) ───
+        uint256 creatorHat; // capability hat for createModule/updateModule/removeModule
+        uint256 memberHat; // capability hat for completeModule
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.educationhub.storage");
@@ -83,14 +86,21 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     }
 
     /*────────── Initialiser ────────*/
+    /// @param tokenAddr ParticipationToken address
+    /// @param hatsAddr Hats Protocol address
+    /// @param executorAddr Executor (governance) address
+    /// @param creatorHat_ Capability hat ID gating createModule/updateModule/removeModule
+    /// @param memberHat_ Capability hat ID gating completeModule
     function initialize(
         address tokenAddr,
         address hatsAddr,
         address executorAddr,
-        uint256[] calldata creatorHatIds,
-        uint256[] calldata memberHatIds
+        uint256 creatorHat_,
+        uint256 memberHat_
     ) external initializer {
-        if (tokenAddr == address(0) || hatsAddr == address(0) || executorAddr == address(0)) revert ZeroAddress();
+        if (tokenAddr == address(0) || hatsAddr == address(0) || executorAddr == address(0)) {
+            revert ZeroAddress();
+        }
 
         __Context_init();
         __ReentrancyGuard_init();
@@ -100,41 +110,25 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         l.token = IParticipationToken(tokenAddr);
         l.hats = IHats(hatsAddr);
         l.executor = executorAddr;
+        l.creatorHat = creatorHat_;
+        l.memberHat = memberHat_;
 
         emit TokenSet(tokenAddr);
         emit HatsSet(hatsAddr);
         emit ExecutorSet(executorAddr);
-
-        // Initialize creator hats using HatManager
-        for (uint256 i; i < creatorHatIds.length;) {
-            HatManager.setHatInArray(l.creatorHatIds, creatorHatIds[i], true);
-            emit CreatorHatSet(creatorHatIds[i], true);
-            unchecked {
-                ++i;
-            }
-        }
-
-        // Initialize member hats using HatManager
-        for (uint256 i; i < memberHatIds.length;) {
-            HatManager.setHatInArray(l.memberHatIds, memberHatIds[i], true);
-            emit MemberHatSet(memberHatIds[i], true);
-            unchecked {
-                ++i;
-            }
-        }
+        emit CreatorHatSet(creatorHat_, true);
+        emit MemberHatSet(memberHat_, true);
     }
 
     /*────────── Hat Management ─────*/
-    function setCreatorHatAllowed(uint256 h, bool ok) external onlyExecutor {
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.creatorHatIds, h, ok);
-        emit CreatorHatSet(h, ok);
+    function setCreatorHat(uint256 h) external onlyExecutor {
+        _layout().creatorHat = h;
+        emit CreatorHatSet(h, true);
     }
 
-    function setMemberHatAllowed(uint256 h, bool ok) external onlyExecutor {
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.memberHatIds, h, ok);
-        emit MemberHatSet(h, ok);
+    function setMemberHat(uint256 h) external onlyExecutor {
+        _layout().memberHat = h;
+        emit MemberHatSet(h, true);
     }
 
     /*────────── Modifiers ─────────*/
@@ -275,16 +269,16 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     }
 
     /*────────── Internal Helper Functions ─────────── */
-    /// @dev Returns true if `user` wears *any* creator hat.
+    /// @dev Returns true if `user` wears the creator capability hat.
     function _hasCreatorHat(address user) internal view returns (bool) {
         Layout storage l = _layout();
-        return HatManager.hasAnyHat(l.hats, l.creatorHatIds, user);
+        return l.hats.isWearerOfHat(user, l.creatorHat);
     }
 
-    /// @dev Returns true if `user` wears *any* member hat.
+    /// @dev Returns true if `user` wears the member capability hat.
     function _hasMemberHat(address user) internal view returns (bool) {
         Layout storage l = _layout();
-        return HatManager.hasAnyHat(l.hats, l.memberHatIds, user);
+        return l.hats.isWearerOfHat(user, l.memberHat);
     }
 
     /*────────── Public getters for storage variables ─────────*/
@@ -292,12 +286,26 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         return _layout().nextModuleId;
     }
 
-    function creatorHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().creatorHatIds);
+    /// @notice Capability hat IDs gating module creation. Returns a single-element array
+    ///         for backwards compatibility with lens contracts and subgraph integrations.
+    function creatorHatIds() external view returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = _layout().creatorHat;
     }
 
-    function memberHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().memberHatIds);
+    /// @notice Capability hat IDs gating module completion. Returns a single-element array
+    ///         for backwards compatibility with lens contracts and subgraph integrations.
+    function memberHatIds() external view returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = _layout().memberHat;
+    }
+
+    function creatorHat() external view returns (uint256) {
+        return _layout().creatorHat;
+    }
+
+    function memberHat() external view returns (uint256) {
+        return _layout().memberHat;
     }
 
     function token() external view returns (IParticipationToken) {
@@ -314,18 +322,18 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
 
     /*────────── Hat Management View Functions ─────────── */
     function creatorHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().creatorHatIds);
+        return 1;
     }
 
     function memberHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().memberHatIds);
+        return 1;
     }
 
     function isCreatorHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().creatorHatIds, hatId);
+        return hatId != 0 && hatId == _layout().creatorHat;
     }
 
     function isMemberHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().memberHatIds, hatId);
+        return hatId != 0 && hatId == _layout().memberHat;
     }
 }

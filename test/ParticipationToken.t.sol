@@ -29,14 +29,8 @@ contract ParticipationTokenTest is Test {
         hats.mintHat(APPROVER_HAT_ID, approver);
 
         ParticipationToken impl = new ParticipationToken();
-        uint256[] memory initialMemberHats = new uint256[](1);
-        initialMemberHats[0] = MEMBER_HAT_ID;
-        uint256[] memory initialApproverHats = new uint256[](1);
-        initialApproverHats[0] = APPROVER_HAT_ID;
-
         bytes memory data = abi.encodeCall(
-            ParticipationToken.initialize,
-            (executor, "PToken", "PTK", address(hats), initialMemberHats, initialApproverHats)
+            ParticipationToken.initialize, (executor, "PToken", "PTK", address(hats), MEMBER_HAT_ID, APPROVER_HAT_ID)
         );
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
         token = ParticipationToken(address(proxy));
@@ -45,6 +39,9 @@ contract ParticipationTokenTest is Test {
     function testInitializeStores() public {
         assertEq(token.executor(), executor);
         assertEq(address(token.hats()), address(hats));
+        assertEq(token.memberHat(), MEMBER_HAT_ID);
+        assertEq(token.approverHat(), APPROVER_HAT_ID);
+        // Backwards-compat array getters return single-element arrays
         assertEq(token.memberHatIds()[0], MEMBER_HAT_ID);
         assertEq(token.approverHatIds()[0], APPROVER_HAT_ID);
     }
@@ -113,7 +110,7 @@ contract ParticipationTokenTest is Test {
         token.approveRequest(1);
     }
 
-    function testSetMemberHatAllowed() public {
+    function testSetMemberHat() public {
         uint256 newHatId = 123;
         address newMember = address(0xbeef);
 
@@ -126,25 +123,21 @@ contract ParticipationTokenTest is Test {
         vm.expectRevert(ParticipationToken.NotMember.selector);
         token.requestTokens(1 ether, "ipfs://req");
 
-        // Enable new hat as member hat
+        // Swap to new member capability hat
         vm.prank(executor);
-        token.setMemberHatAllowed(newHatId, true);
+        token.setMemberHat(newHatId);
 
-        // Should now succeed
+        // newMember now passes the member gate
         vm.prank(newMember);
         token.requestTokens(1 ether, "ipfs://req");
 
-        // Disable new hat
-        vm.prank(executor);
-        token.setMemberHatAllowed(newHatId, false);
-
-        // Should now fail again
-        vm.prank(newMember);
+        // Old member (only wears MEMBER_HAT_ID) no longer passes
+        vm.prank(member);
         vm.expectRevert(ParticipationToken.NotMember.selector);
         token.requestTokens(1 ether, "ipfs://req2");
     }
 
-    function testSetApproverHatAllowed() public {
+    function testSetApproverHat() public {
         uint256 newHatId = 456;
         address newApprover = address(0xcafe);
 
@@ -161,9 +154,9 @@ contract ParticipationTokenTest is Test {
         vm.expectRevert(ParticipationToken.NotApprover.selector);
         token.approveRequest(1);
 
-        // Enable new hat as approver hat
+        // Swap to new approver capability hat
         vm.prank(executor);
-        token.setApproverHatAllowed(newHatId, true);
+        token.setApproverHat(newHatId);
 
         // Should now succeed
         vm.prank(newApprover);

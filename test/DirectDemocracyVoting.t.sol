@@ -46,13 +46,9 @@ contract DDVotingTest is Test {
         hats.mintHat(CREATOR_HAT_ID, creator);
 
         DirectDemocracyVoting impl = new DirectDemocracyVoting();
-        uint256[] memory initialHats = new uint256[](1);
-        initialHats[0] = HAT_ID;
-        uint256[] memory initialCreatorHats = new uint256[](1);
-        initialCreatorHats[0] = CREATOR_HAT_ID;
         bytes memory data = abi.encodeCall(
             DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), initialHats, initialCreatorHats, new address[](0), 50)
+            (address(hats), address(exec), HAT_ID, CREATOR_HAT_ID, new address[](0), 50)
         );
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
         dd = DirectDemocracyVoting(address(proxy));
@@ -76,12 +72,9 @@ contract DDVotingTest is Test {
 
     function testInitializeZeroAddress() public {
         DirectDemocracyVoting impl = new DirectDemocracyVoting();
-        uint256[] memory h = new uint256[](1);
-        h[0] = HAT_ID;
-        uint256[] memory ch = new uint256[](1);
-        ch[0] = CREATOR_HAT_ID;
-        bytes memory data =
-            abi.encodeCall(DirectDemocracyVoting.initialize, (address(0), address(exec), h, ch, new address[](0), 50));
+        bytes memory data = abi.encodeCall(
+            DirectDemocracyVoting.initialize, (address(0), address(exec), HAT_ID, CREATOR_HAT_ID, new address[](0), 50)
+        );
         vm.expectRevert(VotingErrors.ZeroAddress.selector);
         new ERC1967Proxy(address(impl), data);
     }
@@ -90,7 +83,7 @@ contract DDVotingTest is Test {
         DirectDemocracyVoting impl = new DirectDemocracyVoting();
         bytes memory data = abi.encodeCall(
             DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), new uint256[](0), new uint256[](0), new address[](0), 0)
+            (address(hats), address(exec), HAT_ID, CREATOR_HAT_ID, new address[](0), 0)
         );
         vm.expectRevert(VotingMath.InvalidThreshold.selector);
         new ERC1967Proxy(address(impl), data);
@@ -128,19 +121,20 @@ contract DDVotingTest is Test {
         dd.setConfig(DirectDemocracyVoting.ConfigKey.EXECUTOR, abi.encode(address(0)));
     }
 
-    function testSetHatAllowed() public {
+    function testClearVotingHatStopsVoting() public {
+        // Clear the voting hat (set to 0)
         vm.prank(address(exec));
         dd.setConfig(
-            DirectDemocracyVoting.ConfigKey.HAT_ALLOWED, abi.encode(DirectDemocracyVoting.HatType.VOTING, HAT_ID, false)
+            DirectDemocracyVoting.ConfigKey.HAT_ALLOWED, abi.encode(DirectDemocracyVoting.HatType.VOTING, 0, true)
         );
         IExecutor.Call[][] memory b = new IExecutor.Call[][](1);
         b[0] = new IExecutor.Call[](0);
-        // Creator should still be able to create (different permission)
+        // Creator hat is unchanged, so createProposal still works
         vm.prank(creator);
         dd.createProposal(bytes("Test"), bytes32(0), 10, 1, b, new uint256[](0));
         assertEq(dd.proposalsCount(), 1);
 
-        // But voting should fail
+        // Voting fails — votingHat is now 0, voter doesn't wear hat 0
         uint8[] memory idx = new uint8[](1);
         idx[0] = 0;
         uint8[] memory w = new uint8[](1);
@@ -149,7 +143,7 @@ contract DDVotingTest is Test {
         vm.expectRevert(VotingErrors.Unauthorized.selector);
         dd.vote(0, idx, w);
 
-        // Re-enable voting
+        // Re-enable by setting votingHat back to HAT_ID
         vm.prank(address(exec));
         dd.setConfig(
             DirectDemocracyVoting.ConfigKey.HAT_ALLOWED, abi.encode(DirectDemocracyVoting.HatType.VOTING, HAT_ID, true)
@@ -158,7 +152,7 @@ contract DDVotingTest is Test {
         dd.vote(0, idx, w); // Should work now
     }
 
-    function testSetCreatorHatAllowed() public {
+    function testSwapCreatorHat() public {
         uint256 newHatId = 123;
         address newCreator = address(0xbeef);
 
@@ -166,29 +160,24 @@ contract DDVotingTest is Test {
         hats.createHat(newHatId, "New Creator Hat", 1, address(0), address(0), true, "");
         hats.mintHat(newHatId, newCreator);
 
-        // Enable new hat as creator hat
+        // Swap creator capability hat
         vm.prank(address(exec));
         dd.setConfig(
             DirectDemocracyVoting.ConfigKey.HAT_ALLOWED,
             abi.encode(DirectDemocracyVoting.HatType.CREATOR, newHatId, true)
         );
 
-        // New creator should be able to create proposal
+        assertEq(dd.proposalCreatorHat(), newHatId);
+
+        // New creator now passes the gate
         IExecutor.Call[][] memory b = new IExecutor.Call[][](1);
         b[0] = new IExecutor.Call[](0);
         vm.prank(newCreator);
         dd.createProposal(bytes("Test"), bytes32(0), 10, 1, b, new uint256[](0));
         assertEq(dd.proposalsCount(), 1);
 
-        // Disable new hat
-        vm.prank(address(exec));
-        dd.setConfig(
-            DirectDemocracyVoting.ConfigKey.HAT_ALLOWED,
-            abi.encode(DirectDemocracyVoting.HatType.CREATOR, newHatId, false)
-        );
-
-        // Should now fail
-        vm.prank(newCreator);
+        // Old creator (only wears CREATOR_HAT_ID) no longer passes
+        vm.prank(creator);
         vm.expectRevert(VotingErrors.Unauthorized.selector);
         dd.createProposal(bytes("Test 2"), bytes32(0), 10, 1, b, new uint256[](0));
     }

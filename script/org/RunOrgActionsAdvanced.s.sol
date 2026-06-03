@@ -556,10 +556,10 @@ contract RunOrgActionsAdvanced is Script {
                 metadataHash: bytes32(0),
                 cap: 1000 ether,
                 managers: managers,
-                createHats: emptyHats,
-                claimHats: claimHats,
-                reviewHats: emptyHats,
-                assignHats: emptyHats,
+                createHat: 0,
+                claimHat: claimHats.length > 0 ? claimHats[0] : 0,
+                reviewHat: 0,
+                assignHat: 0,
                 bountyTokens: new address[](0),
                 bountyCaps: new uint256[](0)
             })
@@ -1077,7 +1077,7 @@ contract RunOrgActionsAdvanced is Script {
                 quadratic: vClass.quadratic,
                 minBalance: vClass.minBalance,
                 asset: vClass.asset,
-                hatIds: vClass.hatIds
+                hatId: vClass.hatIds.length > 0 ? vClass.hatIds[0] : 0
             });
         }
 
@@ -1124,8 +1124,10 @@ contract RunOrgActionsAdvanced is Script {
             return bootstrap; // Empty bootstrap
         }
 
-        // Build project configs
-        // Note: Role indices will be converted to hat IDs by OrgDeployer at deployment time
+        // Build project configs. Role-index arrays from JSON collapse to a single role
+        // index per cap (first element). Sentinel `type(uint256).max` = "no override,
+        // use global cap hat". OrgDeployer._resolveBootstrapHatIndex resolves the index
+        // to an actual hat ID at deploy time.
         bootstrap.projects = new ITaskManagerBootstrap.BootstrapProjectConfig[](bootstrapJson.projects.length);
         for (uint256 i = 0; i < bootstrapJson.projects.length; i++) {
             bootstrap.projects[i] = ITaskManagerBootstrap.BootstrapProjectConfig({
@@ -1133,11 +1135,18 @@ contract RunOrgActionsAdvanced is Script {
                 metadataHash: bootstrapJson.projects[i].metadataHash,
                 cap: bootstrapJson.projects[i].cap,
                 managers: bootstrapJson.projects[i].managers,
-                // Note: These are role indices, OrgDeployer will resolve to hat IDs
-                createHats: bootstrapJson.projects[i].createRoles,
-                claimHats: bootstrapJson.projects[i].claimRoles,
-                reviewHats: bootstrapJson.projects[i].reviewRoles,
-                assignHats: bootstrapJson.projects[i].assignRoles,
+                createHat: bootstrapJson.projects[i].createRoles.length > 0
+                    ? bootstrapJson.projects[i].createRoles[0]
+                    : type(uint256).max,
+                claimHat: bootstrapJson.projects[i].claimRoles.length > 0
+                    ? bootstrapJson.projects[i].claimRoles[0]
+                    : type(uint256).max,
+                reviewHat: bootstrapJson.projects[i].reviewRoles.length > 0
+                    ? bootstrapJson.projects[i].reviewRoles[0]
+                    : type(uint256).max,
+                assignHat: bootstrapJson.projects[i].assignRoles.length > 0
+                    ? bootstrapJson.projects[i].assignRoles[0]
+                    : type(uint256).max,
                 bountyTokens: new address[](0),
                 bountyCaps: new uint256[](0)
             });

@@ -10,8 +10,8 @@ import {
 
 /*───────────────────────── Interface minimal stubs ───────────────────────*/
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
-import {HatManager} from "./libs/HatManager.sol";
 import {WebAuthnLib} from "./libs/WebAuthnLib.sol";
+import {IRoleBundleHatter} from "./interfaces/IRoleBundleHatter.sol";
 
 interface IUniversalAccountRegistry {
     function getUsername(address account) external view returns (string memory);
@@ -64,8 +64,11 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         IUniversalAccountRegistry accountRegistry;
         address masterDeployAddress;
         address executor;
-        uint256[] memberHatIds; // hat IDs to mint when users join
+        uint256[] memberHatIds; // DEPRECATED: dead state, kept for ERC-7201 append-only rules
         IUniversalPasskeyAccountFactory universalFactory; // Universal factory for passkey accounts
+        // ─── Hats-native: single member role hat + RoleBundleHatter for bundle expansion ───
+        uint256 memberHat; // member role hat granted on join (bundle expands to capability hats)
+        IRoleBundleHatter roleBundleHatter; // routes mintRole through the hatter so bundles auto-mint
     }
 
     /* ───────── Passkey Enrollment Struct ──────── */
@@ -88,19 +91,24 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     /* ───────── Events ───────── */
     event AddressesUpdated(address hats, address registry, address master);
     event ExecutorUpdated(address newExecutor);
-    event MemberHatIdsUpdated(uint256[] hatIds);
-    event QuickJoined(address indexed user, uint256[] hatIds);
-    event QuickJoinedByMaster(address indexed master, address indexed user, uint256[] hatIds);
+    event MemberHatUpdated(uint256 memberHat);
+    event RoleBundleHatterUpdated(address indexed roleBundleHatter);
+    event QuickJoined(address indexed user, uint256 memberHat);
+    event QuickJoinedByMaster(address indexed master, address indexed user, uint256 memberHat);
     event UniversalFactoryUpdated(address indexed universalFactory);
     event QuickJoinedWithPasskeyByMaster(
-        address indexed master, address indexed account, bytes32 indexed credentialId, uint256[] hatIds
+        address indexed master, address indexed account, bytes32 indexed credentialId, uint256 memberHat
     );
-    event RegisterAndQuickJoined(address indexed user, string username, uint256[] hatIds);
+    event RegisterAndQuickJoined(address indexed user, string username, uint256 memberHat);
     event RegisterAndQuickJoinedWithPasskey(
-        address indexed account, bytes32 indexed credentialId, string username, uint256[] hatIds
+        address indexed account, bytes32 indexed credentialId, string username, uint256 memberHat
     );
     event RegisterAndQuickJoinedWithPasskeyByMaster(
-        address indexed master, address indexed account, bytes32 indexed credentialId, string username, uint256[] hatIds
+        address indexed master,
+        address indexed account,
+        bytes32 indexed credentialId,
+        string username,
+        uint256 memberHat
     );
     event HatsClaimed(address indexed user, uint256[] claimHatIds);
     event RegisterAndClaimedHats(address indexed user, string username, uint256[] claimHatIds);
@@ -114,17 +122,26 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     }
 
     /* ───────── Initialiser ───── */
+    /// @param executor_ Org's Executor (governance entry point)
+    /// @param hats_ Hats Protocol address
+    /// @param accountRegistry_ Universal account registry for username lookups
+    /// @param masterDeploy_ Address authorized to run master-deploy paths
+    /// @param memberHat_ Member role hat granted on join; RoleBundleHatter expands the bundle
+    /// @param roleBundleHatter_ Per-org RoleBundleHatter proxy
     function initialize(
         address executor_,
         address hats_,
         address accountRegistry_,
         address masterDeploy_,
-        uint256[] calldata memberHatIds_
+        uint256 memberHat_,
+        address roleBundleHatter_
     ) external initializer {
         if (
             executor_ == address(0) || hats_ == address(0) || accountRegistry_ == address(0)
                 || masterDeploy_ == address(0)
         ) revert InvalidAddress();
+        // roleBundleHatter may be address(0) during bootstrap; must be set via
+        // setRoleBundleHatter before any actual join flow uses memberHat.
 
         __Context_init();
         __ReentrancyGuard_init();
@@ -134,15 +151,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         l.hats = IHats(hats_);
         l.accountRegistry = IUniversalAccountRegistry(accountRegistry_);
         l.masterDeployAddress = masterDeploy_;
-
-        // Set member hat IDs using HatManager
-        for (uint256 i = 0; i < memberHatIds_.length; i++) {
-            HatManager.setHatInArray(l.memberHatIds, memberHatIds_[i], true);
-        }
+        l.memberHat = memberHat_;
+        l.roleBundleHatter = IRoleBundleHatter(roleBundleHatter_);
 
         emit AddressesUpdated(hats_, accountRegistry_, masterDeploy_);
         emit ExecutorUpdated(executor_);
-        emit MemberHatIdsUpdated(memberHatIds_);
+        emit MemberHatUpdated(memberHat_);
+        emit RoleBundleHatterUpdated(roleBundleHatter_);
     }
 
     /* ───────── Modifiers ─────── */
@@ -171,18 +186,15 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         emit AddressesUpdated(hats_, accountRegistry_, masterDeploy_);
     }
 
-    function updateMemberHatIds(uint256[] calldata memberHatIds_) external onlyExecutor {
-        Layout storage l = _layout();
+    function setMemberHat(uint256 memberHat_) external onlyExecutor {
+        _layout().memberHat = memberHat_;
+        emit MemberHatUpdated(memberHat_);
+    }
 
-        // Clear existing hat IDs using HatManager
-        HatManager.clearHatArray(l.memberHatIds);
-
-        // Set new hat IDs using HatManager
-        for (uint256 i = 0; i < memberHatIds_.length; i++) {
-            HatManager.setHatInArray(l.memberHatIds, memberHatIds_[i], true);
-        }
-
-        emit MemberHatIdsUpdated(memberHatIds_);
+    function setRoleBundleHatter(address roleBundleHatter_) external onlyExecutor {
+        if (roleBundleHatter_ == address(0)) revert InvalidAddress();
+        _layout().roleBundleHatter = IRoleBundleHatter(roleBundleHatter_);
+        emit RoleBundleHatterUpdated(roleBundleHatter_);
     }
 
     function setExecutor(address newExec) external onlyExecutor {
@@ -199,15 +211,18 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     /* ───────── Internal helper ─────── */
     function _quickJoin(address user) private nonReentrant {
         if (user == address(0)) revert ZeroUser();
+        _mintMemberRole(user);
+    }
 
+    /// @dev Routes member-role minting through RoleBundleHatter so the configured
+    ///      capability-hat bundle gets auto-minted in the same call.
+    function _mintMemberRole(address user) private {
         Layout storage l = _layout();
-
-        // Request executor to mint all configured member hats to the user
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(user, l.memberHatIds);
+        uint256 memberHat = l.memberHat;
+        if (memberHat != 0 && address(l.roleBundleHatter) != address(0)) {
+            l.roleBundleHatter.mintRole(memberHat, user);
         }
-
-        emit QuickJoined(user, l.memberHatIds);
+        emit QuickJoined(user, memberHat);
     }
 
     /* ───────── Public user paths ─────── */
@@ -218,12 +233,7 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         string memory existing = l.accountRegistry.getUsername(_msgSender());
         if (bytes(existing).length == 0) revert NoUsername();
 
-        // Request executor to mint all configured member hats to the user
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(_msgSender(), l.memberHatIds);
-        }
-
-        emit QuickJoined(_msgSender(), l.memberHatIds);
+        _mintMemberRole(_msgSender());
     }
 
     /* ───────── Passkey join paths ─────── */
@@ -244,12 +254,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
 
-        // 2. Mint member hats to the account
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(account, l.memberHatIds);
+        // 2. Mint member role hat + bundle to the account via RoleBundleHatter
+        uint256 memberHat = l.memberHat;
+        if (memberHat != 0 && address(l.roleBundleHatter) != address(0)) {
+            l.roleBundleHatter.mintRole(memberHat, account);
         }
 
-        emit QuickJoinedWithPasskeyByMaster(_msgSender(), account, passkey.credentialId, l.memberHatIds);
+        emit QuickJoinedWithPasskeyByMaster(_msgSender(), account, passkey.credentialId, memberHat);
     }
 
     /* ───────── Register + join paths ─────── */
@@ -275,12 +286,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         // 1. Register the username via signature (reverts if sig invalid)
         l.accountRegistry.registerAccountBySig(user, username, deadline, nonce, signature);
 
-        // 2. Mint member hats
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(user, l.memberHatIds);
+        // 2. Mint member role hat + bundle via RoleBundleHatter
+        uint256 memberHat = l.memberHat;
+        if (memberHat != 0 && address(l.roleBundleHatter) != address(0)) {
+            l.roleBundleHatter.mintRole(memberHat, user);
         }
 
-        emit RegisterAndQuickJoined(user, username, l.memberHatIds);
+        emit RegisterAndQuickJoined(user, username, memberHat);
     }
 
     /// @notice Create a passkey account, register a username, and join the org in one transaction.
@@ -319,12 +331,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
 
-        // 3. Mint member hats
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(account, l.memberHatIds);
+        // 3. Mint member role hat + bundle via RoleBundleHatter
+        uint256 memberHat = l.memberHat;
+        if (memberHat != 0 && address(l.roleBundleHatter) != address(0)) {
+            l.roleBundleHatter.mintRole(memberHat, account);
         }
 
-        emit RegisterAndQuickJoinedWithPasskey(account, passkey.credentialId, username, l.memberHatIds);
+        emit RegisterAndQuickJoinedWithPasskey(account, passkey.credentialId, username, memberHat);
     }
 
     /* ───────── Vouch-claim paths: mint caller-specified hats ─────── */
@@ -448,21 +461,20 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
 
-        // 3. Mint member hats
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(account, l.memberHatIds);
+        // 3. Mint member role hat + bundle via RoleBundleHatter
+        uint256 memberHat = l.memberHat;
+        if (memberHat != 0 && address(l.roleBundleHatter) != address(0)) {
+            l.roleBundleHatter.mintRole(memberHat, account);
         }
 
-        emit RegisterAndQuickJoinedWithPasskeyByMaster(
-            _msgSender(), account, passkey.credentialId, username, l.memberHatIds
-        );
+        emit RegisterAndQuickJoinedWithPasskeyByMaster(_msgSender(), account, passkey.credentialId, username, memberHat);
     }
 
     /* ───────── Master-deploy helper paths ─────── */
 
     function quickJoinNoUserMasterDeploy(address newUser) external onlyMasterDeploy {
         _quickJoin(newUser);
-        emit QuickJoinedByMaster(_msgSender(), newUser, _layout().memberHatIds);
+        emit QuickJoinedByMaster(_msgSender(), newUser, _layout().memberHat);
     }
 
     function quickJoinWithUserMasterDeploy(address newUser) external onlyMasterDeploy nonReentrant {
@@ -471,17 +483,29 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         string memory existing = l.accountRegistry.getUsername(newUser);
         if (bytes(existing).length == 0) revert NoUsername();
 
-        // Request executor to mint all configured member hats to the user
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(newUser, l.memberHatIds);
+        // Mint member role hat + bundle via RoleBundleHatter
+        uint256 memberHat = l.memberHat;
+        if (memberHat != 0 && address(l.roleBundleHatter) != address(0)) {
+            l.roleBundleHatter.mintRole(memberHat, newUser);
         }
 
-        emit QuickJoinedByMaster(_msgSender(), newUser, l.memberHatIds);
+        emit QuickJoinedByMaster(_msgSender(), newUser, memberHat);
     }
 
     /* ───────── Misc view helpers ─────── */
-    function memberHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().memberHatIds);
+    /// @notice Backwards-compat array getter; returns single-element array with the
+    ///         current member capability hat.
+    function memberHatIds() external view returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = _layout().memberHat;
+    }
+
+    function memberHat() external view returns (uint256) {
+        return _layout().memberHat;
+    }
+
+    function roleBundleHatter() external view returns (address) {
+        return address(_layout().roleBundleHatter);
     }
 
     function hats() external view returns (IHats) {
@@ -502,11 +526,11 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
 
     /* ───────── Hat Management View Functions ─────────── */
     function memberHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().memberHatIds);
+        return 1;
     }
 
     function isMemberHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().memberHatIds, hatId);
+        return hatId != 0 && hatId == _layout().memberHat;
     }
 
     function universalFactory() external view returns (IUniversalPasskeyAccountFactory) {

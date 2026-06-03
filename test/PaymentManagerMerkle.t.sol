@@ -56,12 +56,9 @@ contract PaymentManagerMerkleTest is Test {
         UpgradeableBeacon _ptBeacon = new UpgradeableBeacon(address(_ptImpl), address(this));
         participationToken = ParticipationToken(address(new BeaconProxy(address(_ptBeacon), "")));
 
-        uint256[] memory memberHats = new uint256[](1);
-        memberHats[0] = memberHatId;
-        uint256[] memory approverHats = new uint256[](1);
-        approverHats[0] = approverHatId;
-
-        participationToken.initialize(executor, "Participation Token", "PART", address(hats), memberHats, approverHats);
+        participationToken.initialize(
+            executor, "Participation Token", "PART", address(hats), memberHatId, approverHatId
+        );
 
         // Deploy payment manager
         PaymentManager _pmImpl = new PaymentManager();

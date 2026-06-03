@@ -35,7 +35,7 @@ contract HybridVoting is Initializable {
         bool quadratic; // only for token strategies
         uint256 minBalance; // sybil floor for token strategies
         address asset; // ERC20 token (if required)
-        uint256[] hatIds; // voter must wear ≥1 (union)
+        uint256 hatId; // capability hat for this class (0 = unrestricted)
     }
 
     struct PollOption {
@@ -63,7 +63,7 @@ contract HybridVoting is Initializable {
         IHats hats;
         IExecutor executor;
         mapping(address => bool) allowedTarget; // deprecated: kept for storage layout compatibility
-        uint256[] creatorHatIds; // enumeration array for creator hats
+        uint256[] creatorHatIds; // DEPRECATED: dead state, kept for ERC-7201 append-only rules
         uint8 thresholdPct; // 1‑100  (min % of support for winning option)
         ClassConfig[] classes; // global N-class configuration
         /* Vote Bookkeeping */
@@ -72,6 +72,8 @@ contract HybridVoting is Initializable {
         bool _paused; // Inline pausable state
         uint256 _lock; // Inline reentrancy guard state
         uint32 quorum; // minimum number of voters required (0 = disabled)
+        /* Hats-native capability hat */
+        uint256 proposalCreatorHat; // capability hat gating createProposal
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.hybridvoting.v2.storage");
@@ -124,10 +126,17 @@ contract HybridVoting is Initializable {
         _disableInitializers();
     }
 
+    /// @param hats_ Hats Protocol address
+    /// @param executor_ Org's Executor address
+    /// @param proposalCreatorHat_ Capability hat gating createProposal
+    /// @param initialTargets DEPRECATED: kept for ABI compatibility; HybridVoting passes batches
+    ///        directly to Executor without target restrictions.
+    /// @param thresholdPct_ Threshold percentage (1-100)
+    /// @param initialClasses Initial N-class config (each class has a single capability hat)
     function initialize(
         address hats_,
         address executor_,
-        uint256[] calldata initialCreatorHats,
+        uint256 proposalCreatorHat_,
         address[] calldata initialTargets,
         uint8 thresholdPct_,
         ClassConfig[] calldata initialClasses
@@ -145,25 +154,15 @@ contract HybridVoting is Initializable {
         l._lock = 0; // Initialize reentrancy guard state
 
         l.thresholdPct = thresholdPct_;
+        l.proposalCreatorHat = proposalCreatorHat_;
         emit ThresholdPctSet(thresholdPct_);
+        emit HatSet(HatType.CREATOR, proposalCreatorHat_, true);
 
-        _initializeCreatorHats(initialCreatorHats);
         // initialTargets parameter kept for ABI compatibility but not used;
         // HybridVoting passes batches directly to Executor without target restrictions.
 
         // Use library for class initialization
         HybridVotingConfig.validateAndInitClasses(initialClasses);
-    }
-
-    function _initializeCreatorHats(uint256[] calldata creatorHats) internal {
-        Layout storage l = _layout();
-        uint256 len = creatorHats.length;
-        for (uint256 i; i < len;) {
-            HatManager.setHatInArray(l.creatorHatIds, creatorHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
     }
 
     /* ─────── Governance setters (executor‑gated) ─────── */
@@ -185,10 +184,9 @@ contract HybridVoting is Initializable {
     }
 
     /* ─────── Hat Management ─────── */
-    function setCreatorHatAllowed(uint256 h, bool ok) external onlyExecutor {
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.creatorHatIds, h, ok);
-        emit HatSet(HatType.CREATOR, h, ok);
+    function setProposalCreatorHat(uint256 h) external onlyExecutor {
+        _layout().proposalCreatorHat = h;
+        emit HatSet(HatType.CREATOR, h, true);
     }
 
     enum HatType {
@@ -255,8 +253,7 @@ contract HybridVoting is Initializable {
     function _checkCreator() private view {
         Layout storage l = _layout();
         if (_msgSender() != address(l.executor)) {
-            bool canCreate = HatManager.hasAnyHat(l.hats, l.creatorHatIds, _msgSender());
-            if (!canCreate) revert VotingErrors.Unauthorized();
+            if (!l.hats.isWearerOfHat(_msgSender(), l.proposalCreatorHat)) revert VotingErrors.Unauthorized();
         }
     }
 
@@ -309,8 +306,14 @@ contract HybridVoting is Initializable {
         return _layout().quorum;
     }
 
-    function creatorHats() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().creatorHatIds);
+    /// @notice Backwards-compat: returns single-element array with proposalCreatorHat.
+    function creatorHats() external view returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = _layout().proposalCreatorHat;
+    }
+
+    function proposalCreatorHat() external view returns (uint256) {
+        return _layout().proposalCreatorHat;
     }
 
     function pollRestricted(uint256 id) external view exists(id) returns (bool) {

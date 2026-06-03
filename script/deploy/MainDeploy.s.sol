@@ -386,7 +386,7 @@ contract DeployHomeChain is DeployHelper {
             quadratic: false,
             minBalance: 0,
             asset: address(0),
-            hatIds: emptyHatIds
+            hatId: 0
         });
 
         // Class 1: ERC20_BAL token-weighted (40%, quadratic)
@@ -396,7 +396,7 @@ contract DeployHomeChain is DeployHelper {
             quadratic: true,
             minBalance: 0,
             asset: address(0),
-            hatIds: emptyHatIds
+            hatId: 0
         });
 
         // --- Role Assignments ---
