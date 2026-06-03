@@ -5700,6 +5700,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)")));
         assertTrue(rule.allowed, "TaskManager setFolders should be whitelisted (v4 bootstrap)");
 
+        // Check TaskManager v5 post-claim edit functions are whitelisted
+        rule = paymasterHub.getRule(
+            orgId, result.taskManager, bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)"))
+        );
+        assertTrue(rule.allowed, "TaskManager updateTask should be whitelisted (v5 edit)");
+        rule = paymasterHub.getRule(
+            orgId, result.taskManager, bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)"))
+        );
+        assertTrue(rule.allowed, "TaskManager updateTaskMetadata should be whitelisted (v5 edit)");
+
         // Check HybridVoting vote is whitelisted
         bytes4 voteSel = bytes4(keccak256("vote(uint256,uint8[],uint8[])"));
         rule = paymasterHub.getRule(orgId, result.hybridVoting, voteSel);
@@ -6099,7 +6109,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "registerAndQuickJoinWithPasskey selector mismatch"
         );
 
-        // ── TaskManager (10) ──
+        // ── TaskManager (12) ──
         assertEq(
             bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool)")),
             TaskManager.createTask.selector,
@@ -6143,6 +6153,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         );
         assertEq(
             bytes4(keccak256("cancelTask(uint256)")), TaskManager.cancelTask.selector, "cancelTask selector mismatch"
+        );
+        assertEq(
+            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)")),
+            TaskManager.updateTask.selector,
+            "updateTask selector mismatch"
+        );
+        assertEq(
+            bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)")),
+            TaskManager.updateTaskMetadata.selector,
+            "updateTaskMetadata selector mismatch"
         );
 
         // ── HybridVoting (3) ──

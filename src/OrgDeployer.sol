@@ -904,8 +904,8 @@ contract OrgDeployer is Initializable {
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
     {
-        // Count: QuickJoin(6) + TaskManager(14) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4)
-        uint256 count = 41;
+        // Count: QuickJoin(6) + TaskManager(16) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4)
+        uint256 count = 43;
         if (educationEnabled) count += 4;
 
         targets = new address[](count);
@@ -1026,6 +1026,14 @@ contract OrgDeployer is Initializable {
         // whitelist for gasless 4337/passkey calls by organizer-hat holders.
         targets[i] = tm;
         selectors[i] = bytes4(keccak256("setFolders(bytes32,bytes32)"));
+        i++;
+        // TaskManager v5: post-claim edit functions, gated on EDIT_META / EDIT_FULL perms.
+        // Whitelist for gasless 4337/passkey calls by edit-permitted hat holders.
+        targets[i] = tm;
+        selectors[i] = bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)"));
+        i++;
+        targets[i] = tm;
+        selectors[i] = bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)"));
         i++;
         return i;
     }
