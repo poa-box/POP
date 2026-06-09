@@ -296,7 +296,7 @@ contract DryRun_GnosisUpgrade is Script {
 
         address assignee = makeAddr("dryrun-claimer");
         vm.prank(executor);
-        tm.createTask(2 ether, bytes("orig-title"), bytes32(0), pid, address(0), 0, false);
+        tm.createTask(2 ether, bytes("orig-title"), bytes32(0), pid, address(0), 0, false, 0, 0);
         vm.prank(executor);
         tm.assignTask(candidateId, assignee);
 
@@ -308,7 +308,7 @@ contract DryRun_GnosisUpgrade is Script {
 
         // 5d. Executor edits payout on the CLAIMED task.
         vm.prank(executor);
-        tm.updateTask(candidateId, 5 ether, bytes("edited-title"), bytes32(0), address(0), 0);
+        tm.updateTask(candidateId, 5 ether, bytes("edited-title"), bytes32(0), address(0), 0, 0, 0);
         (uint96 payoutAfter,,,,, TaskManager.Status statusAfter,) = _readTask(tm, candidateId);
         require(payoutAfter == 5 ether, "DryRun: post-edit payout wrong");
         require(statusAfter == TaskManager.Status.CLAIMED, "DryRun: post-edit status changed");
@@ -325,7 +325,9 @@ contract DryRun_GnosisUpgrade is Script {
         address outsider = makeAddr("dryrun-outsider");
         vm.prank(outsider);
         (bool okOut,) = proxy.call(
-            abi.encodeCall(TaskManager.updateTask, (candidateId, 1 ether, bytes("nope"), bytes32(0), address(0), 0))
+            abi.encodeCall(
+                TaskManager.updateTask, (candidateId, 1 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0)
+            )
         );
         require(!okOut, "DryRun: outsider updateTask must revert");
         console.log("Outsider updateTask -> Unauthorized OK");
@@ -345,7 +347,7 @@ contract DryRun_GnosisUpgrade is Script {
 
         vm.prank(executor);
         (bool okComplete,) = proxy.call(
-            abi.encodeCall(TaskManager.updateTask, (candidateId, 9 ether, bytes("x"), bytes32(0), address(0), 0))
+            abi.encodeCall(TaskManager.updateTask, (candidateId, 9 ether, bytes("x"), bytes32(0), address(0), 0, 0, 0))
         );
         require(!okComplete, "DryRun: COMPLETED updateTask must revert");
         vm.prank(executor);
@@ -357,13 +359,13 @@ contract DryRun_GnosisUpgrade is Script {
         // 5i. CANCELLED edits also blocked.
         uint256 cancelId = _nextAvailableTaskId(proxy);
         vm.prank(executor);
-        tm.createTask(1 ether, bytes("to-cancel"), bytes32(0), pid, address(0), 0, false);
+        tm.createTask(1 ether, bytes("to-cancel"), bytes32(0), pid, address(0), 0, false, 0, 0);
         vm.prank(executor);
         tm.cancelTask(cancelId);
 
         vm.prank(executor);
         (bool okCancel,) = proxy.call(
-            abi.encodeCall(TaskManager.updateTask, (cancelId, 2 ether, bytes("x"), bytes32(0), address(0), 0))
+            abi.encodeCall(TaskManager.updateTask, (cancelId, 2 ether, bytes("x"), bytes32(0), address(0), 0, 0, 0))
         );
         require(!okCancel, "DryRun: CANCELLED updateTask must revert");
         console.log("CANCELLED edits blocked OK");
