@@ -252,9 +252,10 @@ contract DeployHomeChain is DeployHelper {
             .adminCall(
                 infra.paymasterHub,
                 abi.encodeWithSignature(
-                    "setOnboardingConfig(uint128,uint128,bool,address)",
+                    "setOnboardingConfig(uint128,uint128,uint8,bool,address)",
                     uint128(0.01 ether),
                     uint128(1000),
+                    uint8(3),
                     true,
                     infra.globalAccountRegistry
                 )
@@ -667,9 +668,10 @@ contract DeploySatellite is DeployHelper {
         pm.adminCall(
             infra.paymasterHub,
             abi.encodeWithSignature(
-                "setOnboardingConfig(uint128,uint128,bool,address)",
+                "setOnboardingConfig(uint128,uint128,uint8,bool,address)",
                 uint128(0.01 ether),
                 uint128(1000),
+                uint8(3),
                 true,
                 infra.globalAccountRegistry
             )

@@ -1125,14 +1125,6 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         }
     }
 
-    function _isEligible(uint8 flags) internal pure returns (bool) {
-        return (flags & ELIGIBLE_FLAG) != 0;
-    }
-
-    function _hasGoodStanding(uint8 flags) internal pure returns (bool) {
-        return (flags & STANDING_FLAG) != 0;
-    }
-
     function _isVouchingEnabled(uint8 flags) internal pure returns (bool) {
         return (flags & ENABLED_FLAG) != 0;
     }

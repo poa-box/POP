@@ -13,14 +13,12 @@ library VotingErrors {
     error TooManyOptions();
     error TooManyCalls();
     error ZeroAddress();
-    error InvalidMetadata();
     error RoleNotAllowed();
     error WeightSumNot100(uint256 sum);
     error InvalidWeight();
     error DuplicateIndex();
     error TargetNotAllowed();
     error TargetSelf();
-    error InvalidTarget();
     error EmptyBatch();
     error InvalidThreshold();
     error InvalidQuorum();
@@ -29,6 +27,5 @@ library VotingErrors {
     error InvalidClassCount();
     error InvalidSliceSum();
     error TooManyClasses();
-    error InvalidStrategy();
     error AlreadyExecuted();
 }

@@ -316,9 +316,7 @@ contract DryRun_GnosisUpgrade is Script {
 
         vm.prank(KUBI_EXECUTOR);
         (bool okExecOn,) = KUBI_ELIG_MODULE.call(
-            abi.encodeWithSignature(
-                "setWearerEligibility(address,uint256,bool,bool)", probe, MEMBER_HAT, true, true
-            )
+            abi.encodeWithSignature("setWearerEligibility(address,uint256,bool,bool)", probe, MEMBER_HAT, true, true)
         );
         require(okExecOn, "DryRun: superAdmin setWearerEligibility(true,true) reverted");
         {
@@ -328,9 +326,7 @@ contract DryRun_GnosisUpgrade is Script {
 
         vm.prank(KUBI_EXECUTOR);
         (bool okExecOff,) = KUBI_ELIG_MODULE.call(
-            abi.encodeWithSignature(
-                "setWearerEligibility(address,uint256,bool,bool)", probe, MEMBER_HAT, false, false
-            )
+            abi.encodeWithSignature("setWearerEligibility(address,uint256,bool,bool)", probe, MEMBER_HAT, false, false)
         );
         require(okExecOff, "DryRun: superAdmin setWearerEligibility(false,false) reverted");
         {

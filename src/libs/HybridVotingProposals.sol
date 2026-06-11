@@ -4,10 +4,8 @@ pragma solidity ^0.8.30;
 import "../HybridVoting.sol";
 import "./VotingErrors.sol";
 import "./VotingMath.sol";
-import "./HatManager.sol";
 import "./ValidationLib.sol";
 import {IExecutor} from "../Executor.sol";
-import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 
 library HybridVotingProposals {
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.hybridvoting.v2.storage");

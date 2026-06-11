@@ -3,7 +3,6 @@ pragma solidity ^0.8.30;
 
 /*  OpenZeppelin v5.3 Upgradeables  */
 import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {IExecutor} from "./Executor.sol";
 import {HatManager} from "./libs/HatManager.sol";
