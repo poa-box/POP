@@ -42,9 +42,6 @@ library PaymasterHubErrors {
     /// @notice Rule ID is not a recognized rule type
     error InvalidRuleId();
 
-    /// @notice ETH transfer to recipient failed
-    error PaymentFailed();
-
     /// @notice Subject type byte is not a recognized type (0x00, 0x01, 0x03, 0x04)
     error InvalidSubjectType();
 
@@ -111,6 +108,9 @@ library PaymasterHubErrors {
     /// @notice Onboarding sponsorship feature is disabled
     error OnboardingDisabled();
 
+    /// @notice Account has reached its lifetime onboarding sponsorship limit
+    error OnboardingLimitExceeded();
+
     /// @notice Global daily onboarding creation limit has been reached
     error OnboardingDailyLimitExceeded();
 
@@ -166,16 +166,10 @@ library PaymasterHubErrors {
     /// @notice Emitted when ETH is deposited to the EntryPoint
     event DepositIncrease(uint256 amount, uint256 newDeposit);
 
-    /// @notice Emitted when ETH is withdrawn from the EntryPoint deposit
-    event DepositWithdraw(address indexed to, uint256 amount);
-
     /// @notice Emitted when a subject's budget usage increases
     event UsageIncreased(
         bytes32 indexed orgId, bytes32 subjectKey, uint256 delta, uint128 usedInEpoch, uint32 epochStart
     );
-
-    /// @notice Emitted on emergency withdrawal by PoaManager
-    event EmergencyWithdraw(address indexed to, uint256 amount);
 
     /// @notice Emitted when ETH is deposited for a specific org
     event OrgDepositReceived(bytes32 indexed orgId, address indexed from, uint256 amount);
@@ -199,7 +193,11 @@ library PaymasterHubErrors {
 
     /// @notice Emitted when onboarding configuration is updated
     event OnboardingConfigUpdated(
-        uint128 maxGasPerCreation, uint128 dailyCreationLimit, bool enabled, address accountRegistry
+        uint128 maxGasPerCreation,
+        uint128 dailyCreationLimit,
+        uint8 maxOnboardingsPerAccount,
+        bool enabled,
+        address accountRegistry
     );
 
     /// @notice Emitted when a new account is created via onboarding sponsorship

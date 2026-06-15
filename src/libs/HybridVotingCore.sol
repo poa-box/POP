@@ -5,7 +5,6 @@ import "../HybridVoting.sol";
 import "./VotingErrors.sol";
 import "./VotingMath.sol";
 import {IExecutor} from "../Executor.sol";
-import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 library HybridVotingCore {

@@ -471,6 +471,18 @@ Hats enables dynamic, attestation-based roles without redeploying contracts.
 | Whale dominance | Quadratic voting dampens large holders |
 | Empty proposal spam | Creator hat requirement |
 | Mid-vote manipulation | Class configuration snapshots |
+| Zero-weight Sybils | A voter with no power in any class is rejected (`Unauthorized`) — cannot pad turnout/quorum |
+
+### ERC20_BAL weight is read **live** — safe-configuration requirements
+
+⚠️ **Important nuance.** "Snapshot Isolation" above freezes the *class configuration* (strategy, slice, asset, hat gating) at proposal creation — it does **not** snapshot token *balances*. An `ERC20_BAL` class reads `IERC20(asset).balanceOf(voter)` at the moment `vote()` is called, not a `getPastVotes` checkpoint. This is intentional and safe **only when the org is configured as follows**:
+
+1. **Use the soulbound ParticipationToken as the `ERC20_BAL` asset.** PT's `transfer`/`transferFrom`/`approve`/`delegate` all revert, so the classic *transfer-and-revote* / flash-loan inflation is structurally impossible — the same tokens cannot be moved between addresses to be counted twice within one proposal.
+2. **Keep PT mint authority narrow.** Because weight is live, anyone who can mint PT mid-proposal can raise their own vote weight. Mint is gated to the TaskManager / EducationHub / approvers, and an approver **cannot self-approve** their own token request. Do **not** grant broad project `SELF_REVIEW` (which lets a contributor self-complete tasks and mint themselves PT) to members you would not trust to inflate a vote. Use designated project leads and fixed project budgets.
+
+🚫 **Do not** configure an `ERC20_BAL` class over a freely **transferable** ERC20 unless that token is checkpoint-based and you have added an explicit `getPastVotes` snapshot — with a plain transferable token, live `balanceOf` allows transfer-and-revote across colluding hat-wearers.
+
+These boundaries are proven by `test/HybridVotingSafeConfig.t.sol`: soulbound transfers revert, unprivileged actors cannot self-mint, a decided outcome cannot be flipped without mint authority, and a 128k-call fuzzing invariant shows unprivileged voting/transfer/mint activity never changes PT supply or voter balances. The same file's `test_Boundary_MintAuthorityIsTheLever` demonstrates, executably, the inflation that an *unsafe* config (broad mint authority) would expose.
 
 ---
 

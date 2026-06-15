@@ -9,15 +9,11 @@ pragma solidity ^0.8.20;
 library VotingMath {
     /* ─────────── Errors ─────────── */
     error InvalidThreshold();
-    error InvalidSplit();
-    error InvalidMinBalance();
-    error MinBalanceNotMet(uint256 required);
     error RoleNotAllowed();
     error DuplicateIndex();
     error InvalidIndex();
     error InvalidWeight();
     error WeightSumNot100(uint256 sum);
-    error Overflow();
     error TargetSelf();
     error TargetNotAllowed();
     error LengthMismatch();
@@ -48,31 +44,6 @@ library VotingMath {
      */
     function validateThreshold(uint8 threshold) internal pure {
         if (threshold == 0 || threshold > 100) revert InvalidThreshold();
-    }
-
-    /**
-     * @notice Validate split percentage
-     * @param split Split percentage (0-100)
-     */
-    function validateSplit(uint8 split) internal pure {
-        if (split > 100) revert InvalidSplit();
-    }
-
-    /**
-     * @notice Validate minimum balance
-     * @param minBalance Minimum balance required
-     */
-    function validateMinBalance(uint256 minBalance) internal pure {
-        if (minBalance == 0) revert InvalidMinBalance();
-    }
-
-    /**
-     * @notice Check if balance meets minimum requirement
-     * @param balance Current balance
-     * @param minBalance Minimum required balance
-     */
-    function checkMinBalance(uint256 balance, uint256 minBalance) internal pure {
-        if (balance < minBalance) revert MinBalanceNotMet(minBalance);
     }
 
     /* ─────────── Weight Validation (New Struct Version) ─────────── */
@@ -140,17 +111,6 @@ library VotingMath {
     /* ─────────── Power Calculation Functions ─────────── */
 
     /**
-     * @notice Calculate voting power based on balance and quadratic setting (legacy)
-     * @param balance Token balance
-     * @param quadratic Whether to use quadratic voting
-     * @return power The calculated voting power
-     */
-    function calculateVotingPower(uint256 balance, bool quadratic) internal pure returns (uint256 power) {
-        if (balance == 0) return 0;
-        return quadratic ? sqrt(balance) : balance;
-    }
-
-    /**
      * @notice Calculate voting power for participation token holders
      * @param bal Token balance
      * @param minBal Minimum balance required
@@ -181,32 +141,6 @@ library VotingMath {
 
         uint256 p = powerPT(bal, minBal, quadratic);
         if (p > 0) ptRaw = p * 100; // match existing scaling
-    }
-
-    /**
-     * @notice Calculate raw voting power for a voter (legacy)
-     * @param hasDemocracyHat Whether voter has democracy hat
-     * @param tokenBalance Token balance
-     * @param minBalance Minimum required balance
-     * @param quadratic Whether to use quadratic voting
-     * @return ddRaw Direct democracy raw power
-     * @return ptRaw Participation token raw power
-     */
-    function calculateRawPowers(bool hasDemocracyHat, uint256 tokenBalance, uint256 minBalance, bool quadratic)
-        internal
-        pure
-        returns (uint256 ddRaw, uint256 ptRaw)
-    {
-        // Direct democracy power (only if has democracy hat)
-        ddRaw = hasDemocracyHat ? 100 : 0;
-
-        // Participation token power
-        if (tokenBalance < minBalance) {
-            ptRaw = 0;
-        } else {
-            uint256 power = calculateVotingPower(tokenBalance, quadratic);
-            ptRaw = power * 100; // raw numerator
-        }
     }
 
     /* ─────────── Accumulation Helpers ─────────── */
@@ -436,20 +370,6 @@ library VotingMath {
         ok = thresholdMet && meetsMargin;
     }
 
-    /**
-     * @notice Validate class slices sum to 100
-     * @param slices Array of slice percentages
-     */
-    function validateClassSlices(uint8[] memory slices) internal pure {
-        if (slices.length == 0) revert InvalidSplit();
-        uint256 sum;
-        for (uint256 i; i < slices.length; ++i) {
-            if (slices[i] == 0 || slices[i] > 100) revert InvalidSplit();
-            sum += slices[i];
-        }
-        if (sum != 100) revert InvalidSplit();
-    }
-
     /* ─────────── Math Utilities ─────────── */
 
     /**
@@ -471,14 +391,6 @@ library VotingMath {
                 z = (x / z + z) / 2;
             }
         }
-    }
-
-    /**
-     * @notice Check for overflow in uint128
-     * @param value Value to check
-     */
-    function checkOverflow(uint256 value) internal pure {
-        if (value > type(uint128).max) revert Overflow();
     }
 
     /**

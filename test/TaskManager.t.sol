@@ -251,7 +251,7 @@ contract MockToken is Test, IERC20 {
 
                 // creator2 creates a task (should succeed, cap == 0)
                 vm.prank(creator2);
-                tm.createTask(1 ether, bytes("ipfs://meta"), bytes32(0), UNLIM_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("ipfs://meta"), bytes32(0), UNLIM_ID, address(0), 0, false, 0, 0);
                 bytes memory result = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(0));
                 (
                     uint256 payout,
@@ -284,15 +284,15 @@ contract MockToken is Test, IERC20 {
 
                 // pm1 can create tasks until cap reached
                 vm.prank(pm1);
-                tm.createTask(1 ether, bytes("a"), bytes32(0), CAPPED_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("a"), bytes32(0), CAPPED_ID, address(0), 0, false, 0, 0);
 
                 vm.prank(pm1);
-                tm.createTask(2 ether, bytes("b"), bytes32(0), CAPPED_ID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("b"), bytes32(0), CAPPED_ID, address(0), 0, false, 0, 0);
 
                 // next task (1 wei over budget) reverts
                 vm.prank(pm1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.createTask(1, bytes("c"), bytes32(0), CAPPED_ID, address(0), 0, false);
+                tm.createTask(1, bytes("c"), bytes32(0), CAPPED_ID, address(0), 0, false, 0, 0);
             }
 
             function test_ProjectSpecificRolePermissions() public {
@@ -323,7 +323,7 @@ contract MockToken is Test, IERC20 {
 
                 // Custom creator should be able to create tasks
                 vm.prank(customCreator);
-                tm.createTask(1 ether, bytes("custom_task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("custom_task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // But not review tasks
                 vm.prank(member1);
@@ -371,7 +371,7 @@ contract MockToken is Test, IERC20 {
 
                 // Global user should be able to create (global permission)
                 vm.prank(globalUser);
-                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // But not review (project override)
                 vm.prank(member1);
@@ -391,7 +391,7 @@ contract MockToken is Test, IERC20 {
                 BUD_ID = _createDefaultProject("BUD", 2 ether);
 
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("foo"), bytes32(0), BUD_ID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("foo"), bytes32(0), BUD_ID, address(0), 0, false, 0, 0);
 
                 // try lowering cap below spent
                 vm.prank(executor);
@@ -409,7 +409,7 @@ contract MockToken is Test, IERC20 {
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(FLOW_ID, pm1, true));
 
                 vm.prank(pm1);
-                tm.createTask(1 ether, bytes("hash"), bytes32(0), FLOW_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("hash"), bytes32(0), FLOW_ID, address(0), 0, false, 0, 0);
                 return 0;
             }
 
@@ -442,11 +442,11 @@ contract MockToken is Test, IERC20 {
                 UPD_ID = _createDefaultProject("UPD", 3 ether);
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("foo"), bytes32(0), UPD_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("foo"), bytes32(0), UPD_ID, address(0), 0, false, 0, 0);
 
                 // raise payout by 1 ether
                 vm.prank(creator1);
-                tm.updateTask(0, 2 ether, bytes("bar"), bytes32(0), address(0), 0);
+                tm.updateTask(0, 2 ether, bytes("bar"), bytes32(0), address(0), 0, 0, 0);
 
                 // spent should now be 2 ether
                 bytes memory result = lens.getStorage(
@@ -469,7 +469,7 @@ contract MockToken is Test, IERC20 {
                 // paths are covered in TaskManagerEditPermsTest.)
                 vm.prank(outsider);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(id, 5 ether, bytes("newhash"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 5 ether, bytes("newhash"), bytes32(0), address(0), 0, 0, 0);
             }
 
             function test_CancelTaskSpentUnderflowProtection() public {
@@ -477,7 +477,7 @@ contract MockToken is Test, IERC20 {
                 bytes32 projectId = _createDefaultProject("UNDERFLOW_TEST", 2 ether);
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task1"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task1"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // Artificially manipulate project spent to be less than task payout
                 // This simulates a potential storage corruption or logic bug scenario
@@ -486,7 +486,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create and complete another task to increase spent
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task2"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task2"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 vm.prank(creator1);
                 tm.assignTask(1, member1);
@@ -517,7 +517,7 @@ contract MockToken is Test, IERC20 {
                 CAN_ID = _createDefaultProject("CAN", 2 ether);
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("foo"), bytes32(0), CAN_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("foo"), bytes32(0), CAN_ID, address(0), 0, false, 0, 0);
 
                 bytes memory result = lens.getStorage(
                     address(tm), TaskManagerLens.StorageKey.PROJECT_INFO, abi.encode(CAN_ID)
@@ -541,7 +541,7 @@ contract MockToken is Test, IERC20 {
                 // outsider has no role and no permissions
                 vm.prank(outsider);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.createTask(1, bytes("x"), bytes32(0), ACC_ID, address(0), 0, false);
+                tm.createTask(1, bytes("x"), bytes32(0), ACC_ID, address(0), 0, false, 0, 0);
             }
 
             function test_OnlyAuthorizedCanAssignTask() public {
@@ -595,7 +595,7 @@ contract MockToken is Test, IERC20 {
 
                 // Custom user should be able to create tasks
                 vm.prank(customUser);
-                tm.createTask(1 ether, bytes("custom_task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("custom_task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // But not assign tasks (no ASSIGN permission)
                 vm.prank(customUser);
@@ -649,7 +649,7 @@ contract MockToken is Test, IERC20 {
 
                 // User should only have CREATE permission in this project
                 vm.prank(globalUser);
-                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // But not REVIEW (project override removed it)
                 vm.prank(member1);
@@ -724,13 +724,13 @@ contract MockToken is Test, IERC20 {
 
                 // Create multiple tasks across projects
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task1_A"), bytes32(0), PROJECT_A_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task1_A"), bytes32(0), PROJECT_A_ID, address(0), 0, false, 0, 0);
 
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("task1_B"), bytes32(0), PROJECT_B_ID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("task1_B"), bytes32(0), PROJECT_B_ID, address(0), 0, false, 0, 0);
 
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("task1_C"), bytes32(0), PROJECT_C_ID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("task1_C"), bytes32(0), PROJECT_C_ID, address(0), 0, false, 0, 0);
 
                 // Member claims tasks from different projects
                 vm.startPrank(member1);
@@ -752,7 +752,7 @@ contract MockToken is Test, IERC20 {
                 // Test trying to exceed PROJECT_B budget
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.createTask(1 ether + 1, bytes("task2_B"), bytes32(0), PROJECT_B_ID, address(0), 0, false); // Would exceed cap
+                tm.createTask(1 ether + 1, bytes("task2_B"), bytes32(0), PROJECT_B_ID, address(0), 0, false, 0, 0); // Would exceed cap
 
                 // Complete task from PROJECT_C
                 vm.prank(member1);
@@ -821,7 +821,7 @@ contract MockToken is Test, IERC20 {
 
                 // Verify new project exists by creating a task
                 vm.prank(newCreator);
-                tm.createTask(0.5 ether, bytes("new_task"), bytes32(0), NEW_PROJECT_ID, address(0), 0, false);
+                tm.createTask(0.5 ether, bytes("new_task"), bytes32(0), NEW_PROJECT_ID, address(0), 0, false, 0, 0);
 
                 // Disable the hat using the executor
                 vm.prank(executor);
@@ -882,10 +882,10 @@ contract MockToken is Test, IERC20 {
 
                 // Both PMs should be able to create tasks (as project managers)
                 vm.prank(pm1);
-                tm.createTask(2 ether, bytes("pm1_task"), bytes32(0), MULTI_PM_ID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("pm1_task"), bytes32(0), MULTI_PM_ID, address(0), 0, false, 0, 0);
 
                 vm.prank(pm2);
-                tm.createTask(3 ether, bytes("pm2_task"), bytes32(0), MULTI_PM_ID, address(0), 0, false);
+                tm.createTask(3 ether, bytes("pm2_task"), bytes32(0), MULTI_PM_ID, address(0), 0, false, 0, 0);
 
                 // PM1 can complete PM2's task (as project manager)
                 vm.prank(member1);
@@ -904,18 +904,18 @@ contract MockToken is Test, IERC20 {
                 // PM2 can no longer create tasks (no longer a project manager and no role)
                 vm.prank(pm2);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.createTask(1 ether, bytes("should_fail"), bytes32(0), MULTI_PM_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("should_fail"), bytes32(0), MULTI_PM_ID, address(0), 0, false, 0, 0);
 
                 // But PM1 still can (still a project manager)
                 vm.prank(pm1);
-                tm.createTask(1 ether, bytes("still_works"), bytes32(0), MULTI_PM_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("still_works"), bytes32(0), MULTI_PM_ID, address(0), 0, false, 0, 0);
 
                 // Now give PM2 the PM_HAT
                 setHat(pm2, PM_HAT);
 
                 // PM2 should now be able to create tasks again (has PM_HAT with CREATE permission)
                 vm.prank(pm2);
-                tm.createTask(1 ether, bytes("pm2_with_hat"), bytes32(0), MULTI_PM_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("pm2_with_hat"), bytes32(0), MULTI_PM_ID, address(0), 0, false, 0, 0);
 
                 // Verify overall budget tracking
                 bytes memory result =
@@ -953,7 +953,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create and immediately cancel a task
                 vm.startPrank(creator1);
-                tm.createTask(1 ether, bytes("to_cancel"), bytes32(0), EDGE_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("to_cancel"), bytes32(0), EDGE_ID, address(0), 0, false, 0, 0);
                 tm.cancelTask(0);
                 vm.stopPrank();
 
@@ -965,7 +965,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a task, assign it, then try operations that should fail
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("edge_task"), bytes32(0), EDGE_ID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("edge_task"), bytes32(0), EDGE_ID, address(0), 0, false, 0, 0);
 
                 vm.prank(creator1);
                 tm.assignTask(1, member1);
@@ -1066,7 +1066,7 @@ contract MockToken is Test, IERC20 {
 
                     vm.prank(creator);
                     bytes memory taskMetadata = abi.encodePacked("task", i);
-                    tm.createTask(payout, taskMetadata, bytes32(0), MEGA_ID, address(0), 0, false);
+                    tm.createTask(payout, taskMetadata, bytes32(0), MEGA_ID, address(0), 0, false, 0, 0);
 
                     // Assign tasks to different members
                     address assignee = members[i % members.length];
@@ -1137,7 +1137,7 @@ contract MockToken is Test, IERC20 {
 
                     vm.prank(pms[0]);
                     bytes memory taskMetadata = abi.encodePacked("capped_task", cappedTaskCount);
-                    tm.createTask(payout, taskMetadata, bytes32(0), CAPPED_BIG_ID, address(0), 0, false);
+                    tm.createTask(payout, taskMetadata, bytes32(0), CAPPED_BIG_ID, address(0), 0, false, 0, 0);
 
                     cappedTaskCount++;
                     cappedSpent += payout;
@@ -1146,7 +1146,7 @@ contract MockToken is Test, IERC20 {
                 // Verify we can't exceed cap
                 vm.prank(pms[0]);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.createTask(1 ether, bytes("exceeds_cap"), bytes32(0), CAPPED_BIG_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("exceeds_cap"), bytes32(0), CAPPED_BIG_ID, address(0), 0, false, 0, 0);
 
                 // Verify task counts and budget usage
                 result = lens.getStorage(
@@ -1195,7 +1195,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a task, complete it, then verify project can be deleted
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task1"), bytes32(0), TO_DELETE_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task1"), bytes32(0), TO_DELETE_ID, address(0), 0, false, 0, 0);
 
                 vm.prank(creator1);
                 tm.assignTask(0, member1);
@@ -1208,7 +1208,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create another task and cancel it
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("task2"), bytes32(0), TO_DELETE_ID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("task2"), bytes32(0), TO_DELETE_ID, address(0), 0, false, 0, 0);
 
                 vm.prank(creator1);
                 tm.cancelTask(1);
@@ -1247,7 +1247,7 @@ contract MockToken is Test, IERC20 {
 
                 // Add tasks, verify we can still delete with non-zero spent
                 vm.prank(creator1);
-                tm.createTask(3 ether, bytes("unlimited_task"), bytes32(0), ZERO_CAP_ID, address(0), 0, false);
+                tm.createTask(3 ether, bytes("unlimited_task"), bytes32(0), ZERO_CAP_ID, address(0), 0, false, 0, 0);
 
                 // Delete should succeed with zero cap, non-zero spent
                 vm.prank(creator1);
@@ -1362,7 +1362,9 @@ contract MockToken is Test, IERC20 {
                 // Executor should be able to create tasks even without member role
                 // (executor address has no role but should bypass the member check)
                 vm.prank(executor);
-                tm.createTask(1 ether, bytes("executor_task"), bytes32(0), EXECUTOR_BYPASS_ID, address(0), 0, false);
+                tm.createTask(
+                    1 ether, bytes("executor_task"), bytes32(0), EXECUTOR_BYPASS_ID, address(0), 0, false, 0, 0
+                );
 
                 // Executor should be able to claim tasks
                 vm.prank(executor);
@@ -1416,7 +1418,7 @@ contract MockToken is Test, IERC20 {
 
                 // User should be able to create tasks with CREATE permission
                 vm.prank(multiUser);
-                tm.createTask(1 ether, bytes("multi_task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("multi_task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // User should be able to claim tasks with CLAIM permission
                 vm.prank(multiUser);
@@ -1460,7 +1462,7 @@ contract MockToken is Test, IERC20 {
                 // User can't create tasks (no permissions)
                 vm.prank(dynamicUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.createTask(1 ether, bytes("should_fail"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("should_fail"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // Grant CREATE permission at project level
                 vm.prank(creator1);
@@ -1468,7 +1470,7 @@ contract MockToken is Test, IERC20 {
 
                 // Now user can create tasks
                 vm.prank(dynamicUser);
-                tm.createTask(1 ether, bytes("now_works"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("now_works"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // Another user claims and submits
                 vm.prank(member1);
@@ -1545,10 +1547,10 @@ contract MockToken is Test, IERC20 {
 
                 // User can create tasks in both projects
                 vm.prank(overrideUser);
-                tm.createTask(1 ether, bytes("task1"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task1"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 vm.prank(overrideUser);
-                tm.createTask(1 ether, bytes("task2"), bytes32(0), projectId2, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task2"), bytes32(0), projectId2, address(0), 0, false, 0, 0);
 
                 // In first project, user can't assign tasks (project override)
                 vm.prank(overrideUser);
@@ -1608,7 +1610,7 @@ contract MockToken is Test, IERC20 {
 
                 // User can create tasks
                 vm.prank(tempUser);
-                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // Revoke permission
                 vm.prank(executor);
@@ -1617,7 +1619,7 @@ contract MockToken is Test, IERC20 {
                 // User can't create tasks anymore
                 vm.prank(tempUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.createTask(1 ether, bytes("fail"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("fail"), bytes32(0), projectId, address(0), 0, false, 0, 0);
             }
 
             function test_IndividualPermissionFlags() public {
@@ -1665,7 +1667,7 @@ contract MockToken is Test, IERC20 {
 
                 // Test CREATE permission - should succeed
                 vm.prank(createUser);
-                tm.createTask(1 ether, bytes("create_task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("create_task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // createUser should not be able to claim or assign
                 vm.prank(createUser);
@@ -1683,12 +1685,12 @@ contract MockToken is Test, IERC20 {
                 // assignUser should not be able to create or review
                 vm.prank(assignUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.createTask(1 ether, bytes("assign_fail"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("assign_fail"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // Test CLAIM permission - indirectly tested by previous assign
                 // Create a new task for claiming
                 vm.prank(createUser);
-                tm.createTask(1 ether, bytes("for_claiming"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("for_claiming"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // claimUser should be able to claim
                 vm.prank(claimUser);
@@ -1709,7 +1711,7 @@ contract MockToken is Test, IERC20 {
                 // reviewUser should not be able to create or assign
                 vm.prank(reviewUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.createTask(1 ether, bytes("review_fail"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("review_fail"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 vm.prank(reviewUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
@@ -1747,9 +1749,8 @@ contract MockToken is Test, IERC20 {
 
                 // Test basic create and assign functionality
                 vm.prank(creator1);
-                uint256 taskId =
-                    tm.createAndAssignTask(
-                    1 ether, bytes("test_task"), bytes32(0), projectId, member1, address(0), 0, false
+                uint256 taskId = tm.createAndAssignTask(
+                    1 ether, bytes("test_task"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Verify task was created and assigned correctly
@@ -1812,7 +1813,7 @@ contract MockToken is Test, IERC20 {
                 vm.prank(createOnlyUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.createAndAssignTask(
-                    1 ether, bytes("should_fail"), bytes32(0), projectId, member1, address(0), 0, false
+                    1 ether, bytes("should_fail"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Test that user with only ASSIGN permission cannot use createAndAssignTask
@@ -1826,7 +1827,7 @@ contract MockToken is Test, IERC20 {
                 vm.prank(assignOnlyUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.createAndAssignTask(
-                    1 ether, bytes("should_fail"), bytes32(0), projectId, member1, address(0), 0, false
+                    1 ether, bytes("should_fail"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Test that user with both CREATE and ASSIGN permissions can use createAndAssignTask
@@ -1840,9 +1841,8 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(createAssignUser);
-                uint256 taskId =
-                    tm.createAndAssignTask(
-                    1 ether, bytes("should_work"), bytes32(0), projectId, member1, address(0), 0, false
+                uint256 taskId = tm.createAndAssignTask(
+                    1 ether, bytes("should_work"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Verify task was created successfully
@@ -1891,9 +1891,8 @@ contract MockToken is Test, IERC20 {
 
                 // Test that project manager can use createAndAssignTask
                 vm.prank(pm1);
-                uint256 taskId =
-                    tm.createAndAssignTask(
-                    1 ether, bytes("pm_task"), bytes32(0), projectId, member1, address(0), 0, false
+                uint256 taskId = tm.createAndAssignTask(
+                    1 ether, bytes("pm_task"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Verify task was created and assigned
@@ -1913,7 +1912,7 @@ contract MockToken is Test, IERC20 {
                 vm.prank(outsider);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.createAndAssignTask(
-                    1 ether, bytes("should_fail"), bytes32(0), projectId, member1, address(0), 0, false
+                    1 ether, bytes("should_fail"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
             }
 
@@ -1947,28 +1946,30 @@ contract MockToken is Test, IERC20 {
                 // Test zero address assignee
                 vm.prank(creator1);
                 vm.expectRevert(ValidationLib.ZeroAddress.selector);
-                tm.createAndAssignTask(1 ether, bytes("test"), bytes32(0), projectId, address(0), address(0), 0, false);
+                tm.createAndAssignTask(
+                    1 ether, bytes("test"), bytes32(0), projectId, address(0), address(0), 0, false, 0, 0
+                );
 
                 // Test zero payout
                 vm.prank(creator1);
                 vm.expectRevert(ValidationLib.InvalidPayout.selector);
-                tm.createAndAssignTask(0, bytes("test"), bytes32(0), projectId, member1, address(0), 0, false);
+                tm.createAndAssignTask(0, bytes("test"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0);
 
                 // Test excessive payout
                 vm.prank(creator1);
                 vm.expectRevert(ValidationLib.InvalidPayout.selector);
-                tm.createAndAssignTask(1e25, bytes("test"), bytes32(0), projectId, member1, address(0), 0, false); // Over MAX_PAYOUT
+                tm.createAndAssignTask(1e25, bytes("test"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0); // Over MAX_PAYOUT
 
                 // Test empty title
                 vm.prank(creator1);
                 vm.expectRevert(ValidationLib.EmptyTitle.selector);
-                tm.createAndAssignTask(1 ether, bytes(""), bytes32(0), projectId, member1, address(0), 0, false);
+                tm.createAndAssignTask(1 ether, bytes(""), bytes32(0), projectId, member1, address(0), 0, false, 0, 0);
 
                 // Test non-existent project - this will fail with NotCreator() because permission check happens first
                 vm.prank(creator1);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.createAndAssignTask(
-                    1 ether, bytes("test"), bytes32(0), bytes32(uint256(999)), member1, address(0), 0, false
+                    1 ether, bytes("test"), bytes32(0), bytes32(uint256(999)), member1, address(0), 0, false, 0, 0
                 );
             }
 
@@ -2003,20 +2004,22 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 uint256 taskId1 =
                     tm.createAndAssignTask(
-                    1 ether, bytes("task1"), bytes32(0), projectId, member1, address(0), 0, false
+                    1 ether, bytes("task1"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Create second task within budget
                 vm.prank(creator1);
                 uint256 taskId2 =
                     tm.createAndAssignTask(
-                    1 ether, bytes("task2"), bytes32(0), projectId, member1, address(0), 0, false
+                    1 ether, bytes("task2"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Try to create third task that would exceed budget
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.createAndAssignTask(1 ether, bytes("task3"), bytes32(0), projectId, member1, address(0), 0, false);
+                tm.createAndAssignTask(
+                    1 ether, bytes("task3"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
+                );
 
                 // Verify project budget tracking
                 bytes memory result =
@@ -2062,7 +2065,7 @@ contract MockToken is Test, IERC20 {
                 vm.expectEmit(true, true, true, true);
                 emit TaskManager.TaskAssigned(0, member1, creator1);
                 tm.createAndAssignTask(
-                    1 ether, bytes("event_test"), bytes32(0), projectId, member1, address(0), 0, false
+                    1 ether, bytes("event_test"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
             }
 
@@ -2096,7 +2099,7 @@ contract MockToken is Test, IERC20 {
                 // Create and assign task
                 vm.prank(creator1);
                 uint256 taskId = tm.createAndAssignTask(
-                    1 ether, bytes("lifecycle_test"), bytes32(0), projectId, member1, address(0), 0, false
+                    1 ether, bytes("lifecycle_test"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Verify task is in CLAIMED status
@@ -2156,9 +2159,8 @@ contract MockToken is Test, IERC20 {
                 // Measure gas for createAndAssignTask
                 vm.prank(creator1);
                 uint256 gasBefore = gasleft();
-                uint256 taskId =
-                    tm.createAndAssignTask(
-                    1 ether, bytes("gas_test"), bytes32(0), projectId, member1, address(0), 0, false
+                uint256 taskId = tm.createAndAssignTask(
+                    1 ether, bytes("gas_test"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
                 uint256 gasUsed = gasBefore - gasleft();
 
@@ -2174,7 +2176,7 @@ contract MockToken is Test, IERC20 {
                 // For comparison, measure gas for separate create + assign operations
                 vm.prank(creator1);
                 gasBefore = gasleft();
-                tm.createTask(1 ether, bytes("gas_test2"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("gas_test2"), bytes32(0), projectId, address(0), 0, false, 0, 0);
                 uint256 gasCreate = gasBefore - gasleft();
 
                 vm.prank(creator1);
@@ -2227,7 +2229,7 @@ contract MockToken is Test, IERC20 {
                 for (uint256 i = 0; i < users.length; i++) {
                     vm.prank(creator1);
                     uint256 taskId = tm.createAndAssignTask(
-                        1 ether, bytes("multi_user_task"), bytes32(0), projectId, users[i], address(0), 0, false
+                        1 ether, bytes("multi_user_task"), bytes32(0), projectId, users[i], address(0), 0, false, 0, 0
                     );
 
                     // Verify each task is assigned to the correct user
@@ -2276,7 +2278,7 @@ contract MockToken is Test, IERC20 {
                 // Test assigning to self
                 vm.prank(creator1);
                 uint256 taskId = tm.createAndAssignTask(
-                    1 ether, bytes("self_assign"), bytes32(0), projectId, creator1, address(0), 0, false
+                    1 ether, bytes("self_assign"), bytes32(0), projectId, creator1, address(0), 0, false, 0, 0
                 );
                 bytes memory ret = lens.getStorage(
                     address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(taskId)
@@ -2287,7 +2289,7 @@ contract MockToken is Test, IERC20 {
                 // Test assigning to executor
                 vm.prank(creator1);
                 taskId = tm.createAndAssignTask(
-                    1 ether, bytes("executor_assign"), bytes32(0), projectId, executor, address(0), 0, false
+                    1 ether, bytes("executor_assign"), bytes32(0), projectId, executor, address(0), 0, false, 0, 0
                 );
 
                 ret = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(taskId));
@@ -2312,9 +2314,8 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                taskId =
-                    tm.createAndAssignTask(
-                    1e24, bytes("max_payout"), bytes32(0), maxProjectId, member1, address(0), 0, false
+                taskId = tm.createAndAssignTask(
+                    1e24, bytes("max_payout"), bytes32(0), maxProjectId, member1, address(0), 0, false, 0, 0
                 ); // MAX_PAYOUT
 
                 ret = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(taskId));
@@ -2354,7 +2355,7 @@ contract MockToken is Test, IERC20 {
                 vm.prank(globalUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
                 tm.createAndAssignTask(
-                    1 ether, bytes("should_fail"), bytes32(0), projectId, member1, address(0), 0, false
+                    1 ether, bytes("should_fail"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Add ASSIGN permission at project level
@@ -2363,9 +2364,8 @@ contract MockToken is Test, IERC20 {
 
                 // Now user should be able to createAndAssignTask
                 vm.prank(globalUser);
-                uint256 taskId =
-                    tm.createAndAssignTask(
-                    1 ether, bytes("should_work"), bytes32(0), projectId, member1, address(0), 0, false
+                uint256 taskId = tm.createAndAssignTask(
+                    1 ether, bytes("should_work"), bytes32(0), projectId, member1, address(0), 0, false, 0, 0
                 );
 
                 // Verify task was created and assigned
@@ -2407,7 +2407,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a task that requires applications
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Member applies for task
                 bytes32 applicationHash = keccak256("application_content");
@@ -2472,7 +2472,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Test that only users with CLAIM permission can apply
                 vm.prank(outsider);
@@ -2525,7 +2525,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Test empty application hash
                 vm.prank(member1);
@@ -2574,7 +2574,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Member applies
                 vm.prank(member1);
@@ -2620,7 +2620,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 vm.prank(member1);
                 tm.applyForTask(0, keccak256("application"));
@@ -2671,7 +2671,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Test approving task without application
                 vm.prank(pm1);
@@ -2724,7 +2724,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 bytes32 applicationHash = keccak256("application_content");
 
@@ -2769,7 +2769,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // 1. Apply for task
                 vm.prank(member1);
@@ -2822,7 +2822,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Apply for task
                 vm.prank(member1);
@@ -2872,9 +2872,9 @@ contract MockToken is Test, IERC20 {
 
                 // Create multiple tasks
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task1"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("task1"), bytes32(0), projectId, address(0), 0, true, 0, 0);
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("task2"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(2 ether, bytes("task2"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Create multiple members
                 address member2 = makeAddr("member2");
@@ -2939,7 +2939,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Apply for task
                 vm.prank(member1);
@@ -2996,7 +2996,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create application-required task
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("app_required_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("app_required_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Verify task requires applications
                 bytes memory result = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(0));
@@ -3041,7 +3041,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create application-required task
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("app_required_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("app_required_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Test that direct claiming is prevented
                 vm.prank(member1);
@@ -3094,7 +3094,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create regular task (doesn't require applications)
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("regular_task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("regular_task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // Verify task doesn't require applications
                 bytes memory result = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(0));
@@ -3154,7 +3154,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Create multiple applicants
                 address member2 = makeAddr("member2");
@@ -3258,7 +3258,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Create multiple applicants
                 address member2 = makeAddr("member2");
@@ -3330,7 +3330,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Apply with specific application data
                 bytes32 applicationHash = keccak256("detailed_application_content");
@@ -3393,7 +3393,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // Create multiple applicants
                 address member2 = makeAddr("member2");
@@ -3477,7 +3477,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 // First application succeeds
                 vm.prank(member1);
@@ -3528,7 +3528,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true);
+                tm.createTask(1 ether, bytes("test_task"), bytes32(0), projectId, address(0), 0, true, 0, 0);
 
                 bytes32 applicationHash = keccak256("application_content");
 
@@ -3553,7 +3553,7 @@ contract MockToken is Test, IERC20 {
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(pid, pm1, true));
 
                 vm.prank(pm1);
-                tm.createTask(1 ether, bytes("reject_task"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1 ether, bytes("reject_task"), bytes32(0), pid, address(0), 0, false, 0, 0);
                 id = 0;
 
                 vm.prank(member1);
@@ -3663,7 +3663,7 @@ contract MockToken is Test, IERC20 {
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(pid, pm1, true));
 
                 vm.prank(pm1);
-                tm.createTask(1 ether, bytes("unclaimed"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1 ether, bytes("unclaimed"), bytes32(0), pid, address(0), 0, false, 0, 0);
 
                 vm.prank(pm1);
                 vm.expectRevert(TaskManager.BadStatus.selector);
@@ -3676,7 +3676,7 @@ contract MockToken is Test, IERC20 {
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(pid, pm1, true));
 
                 vm.prank(pm1);
-                tm.createTask(1 ether, bytes("claimed_only"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1 ether, bytes("claimed_only"), bytes32(0), pid, address(0), 0, false, 0, 0);
 
                 vm.prank(member1);
                 tm.claimTask(0);
@@ -3703,7 +3703,7 @@ contract MockToken is Test, IERC20 {
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(pid, pm1, true));
 
                 vm.prank(pm1);
-                tm.createTask(1 ether, bytes("to_cancel"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1 ether, bytes("to_cancel"), bytes32(0), pid, address(0), 0, false, 0, 0);
 
                 vm.prank(pm1);
                 tm.cancelTask(0);
@@ -3765,7 +3765,7 @@ contract MockToken is Test, IERC20 {
 
                 // member1 can create tasks (global perm, no project override)
                 vm.prank(member1);
-                tm.createTask(1, bytes("before-remove"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1, bytes("before-remove"), bytes32(0), pid, address(0), 0, false, 0, 0);
 
                 // Give MEMBER_HAT project-specific CREATE, then remove it
                 vm.prank(creator1);
@@ -3775,7 +3775,7 @@ contract MockToken is Test, IERC20 {
 
                 // member1 should STILL be able to create tasks via global perm
                 vm.prank(member1);
-                tm.createTask(1, bytes("after-remove"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1, bytes("after-remove"), bytes32(0), pid, address(0), 0, false, 0, 0);
             }
 
             function test_RemovingGlobalPermKeepsProjectPermission() public {
@@ -3811,7 +3811,7 @@ contract MockToken is Test, IERC20 {
 
                 // member1 should STILL be able to create tasks via project-specific perm
                 vm.prank(member1);
-                tm.createTask(1, bytes("project-only-perm"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1, bytes("project-only-perm"), bytes32(0), pid, address(0), 0, false, 0, 0);
             }
 
             function test_DeleteProjectCleansUpPermRefCounts() public {
@@ -3839,7 +3839,7 @@ contract MockToken is Test, IERC20 {
 
                 // member1 can create tasks via project perm
                 vm.prank(member1);
-                tm.createTask(1, bytes("before-delete"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1, bytes("before-delete"), bytes32(0), pid, address(0), 0, false, 0, 0);
 
                 // Delete the project
                 vm.prank(creator1);
@@ -3866,7 +3866,7 @@ contract MockToken is Test, IERC20 {
                 // so the hat was removed from permissionHatIds
                 vm.prank(member1);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.createTask(1, bytes("should-fail"), bytes32(0), pid2, address(0), 0, false);
+                tm.createTask(1, bytes("should-fail"), bytes32(0), pid2, address(0), 0, false, 0, 0);
             }
         }
 
@@ -3922,7 +3922,9 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.5 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Verify task has bounty info
@@ -3947,7 +3949,9 @@ contract MockToken is Test, IERC20 {
             function test_CreateTaskWithoutBounty() public {
                 // Create task without bounty (backward compatibility)
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("no_bounty_task"), bytes32(0), NO_BOUNTY_PROJECT_ID, address(0), 0, false);
+                tm.createTask(
+                    1 ether, bytes("no_bounty_task"), bytes32(0), NO_BOUNTY_PROJECT_ID, address(0), 0, false, 0, 0
+                );
 
                 // Verify task has no bounty info
                 bytes memory result = lens.getStorage(
@@ -3977,7 +3981,9 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.3 ether,
-                    true
+                    true,
+                    0,
+                    0
                 );
 
                 // Verify task has bounty info and requires application
@@ -4010,7 +4016,9 @@ contract MockToken is Test, IERC20 {
                     member1,
                     address(bountyToken1),
                     0.4 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Verify task is assigned and has bounty info
@@ -4042,7 +4050,9 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.5 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Assign and complete task
@@ -4073,7 +4083,15 @@ contract MockToken is Test, IERC20 {
                 // Create task without bounty
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("complete_no_bounty_task"), bytes32(0), NO_BOUNTY_PROJECT_ID, address(0), 0, false
+                    1 ether,
+                    bytes("complete_no_bounty_task"),
+                    bytes32(0),
+                    NO_BOUNTY_PROJECT_ID,
+                    address(0),
+                    0,
+                    false,
+                    0,
+                    0
                 );
 
                 // Assign and complete task
@@ -4105,12 +4123,14 @@ contract MockToken is Test, IERC20 {
                     DUAL_BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.3 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Update bounty before claim (switch to bountyToken2)
                 vm.prank(creator1);
-                tm.updateTask(0, 1 ether, bytes("updated_metadata"), bytes32(0), address(bountyToken2), 0.6 ether);
+                tm.updateTask(0, 1 ether, bytes("updated_metadata"), bytes32(0), address(bountyToken2), 0.6 ether, 0, 0);
 
                 // Verify bounty was updated
                 bytes memory result = lens.getStorage(
@@ -4139,7 +4159,9 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.3 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Assign task
@@ -4151,7 +4173,7 @@ contract MockToken is Test, IERC20 {
                 // dedicated positive-path tests.)
                 vm.prank(outsider);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(0, 1 ether, bytes("updated_metadata"), bytes32(0), address(bountyToken2), 0.6 ether);
+                tm.updateTask(0, 1 ether, bytes("updated_metadata"), bytes32(0), address(bountyToken2), 0.6 ether, 0, 0);
             }
 
             function test_UpdateTaskRemoveBounty() public {
@@ -4164,12 +4186,14 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.3 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Remove bounty
                 vm.prank(creator1);
-                tm.updateTask(0, 1 ether, bytes("updated_metadata"), bytes32(0), address(0), 0);
+                tm.updateTask(0, 1 ether, bytes("updated_metadata"), bytes32(0), address(0), 0, 0, 0);
 
                 // Verify bounty was removed
                 bytes memory result = lens.getStorage(
@@ -4198,7 +4222,9 @@ contract MockToken is Test, IERC20 {
                     DUAL_BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.3 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 vm.prank(creator1);
@@ -4209,7 +4235,9 @@ contract MockToken is Test, IERC20 {
                     DUAL_BOUNTY_PROJECT_ID,
                     address(bountyToken2),
                     0.4 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Complete both tasks
@@ -4245,7 +4273,15 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 vm.expectRevert(ValidationLib.InvalidPayout.selector);
                 tm.createTask(
-                    1 ether, bytes("invalid_bounty"), bytes32(0), BOUNTY_PROJECT_ID, address(bountyToken1), 0, false
+                    1 ether,
+                    bytes("invalid_bounty"),
+                    bytes32(0),
+                    BOUNTY_PROJECT_ID,
+                    address(bountyToken1),
+                    0,
+                    false,
+                    0,
+                    0
                 );
 
                 // Test excessive bounty payout
@@ -4258,14 +4294,24 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     1e25,
-                    false
+                    false,
+                    0,
+                    0
                 ); // Over MAX_PAYOUT
 
                 // Test that zero bounty token with non-zero payout is not allowed
                 vm.prank(creator1);
                 vm.expectRevert(ValidationLib.ZeroAddress.selector);
                 tm.createTask(
-                    1 ether, bytes("invalid_zero_token"), bytes32(0), BOUNTY_PROJECT_ID, address(0), 0.5 ether, false
+                    1 ether,
+                    bytes("invalid_zero_token"),
+                    bytes32(0),
+                    BOUNTY_PROJECT_ID,
+                    address(0),
+                    0.5 ether,
+                    false,
+                    0,
+                    0
                 );
             }
 
@@ -4279,7 +4325,9 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.3 ether,
-                    true
+                    true,
+                    0,
+                    0
                 );
 
                 // Apply for task
@@ -4321,7 +4369,9 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.3 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Cancel task
@@ -4350,7 +4400,15 @@ contract MockToken is Test, IERC20 {
                 // Create task with bounty
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("full_task"), bytes32(0), BOUNTY_PROJECT_ID, address(bountyToken1), 0.3 ether, false
+                    1 ether,
+                    bytes("full_task"),
+                    bytes32(0),
+                    BOUNTY_PROJECT_ID,
+                    address(bountyToken1),
+                    0.3 ether,
+                    false,
+                    0,
+                    0
                 );
 
                 // Test getTaskFull function
@@ -4415,7 +4473,9 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(bountyToken1),
                     0.3 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Complete task and verify events
@@ -4435,12 +4495,28 @@ contract MockToken is Test, IERC20 {
                 // Create multiple tasks with different bounty tokens (use dual project)
                 vm.startPrank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), DUAL_BOUNTY_PROJECT_ID, address(bountyToken1), 0.2 ether, false
+                    1 ether,
+                    bytes("task1"),
+                    bytes32(0),
+                    DUAL_BOUNTY_PROJECT_ID,
+                    address(bountyToken1),
+                    0.2 ether,
+                    false,
+                    0,
+                    0
                 );
                 tm.createTask(
-                    1 ether, bytes("task2"), bytes32(0), DUAL_BOUNTY_PROJECT_ID, address(bountyToken2), 0.3 ether, false
+                    1 ether,
+                    bytes("task2"),
+                    bytes32(0),
+                    DUAL_BOUNTY_PROJECT_ID,
+                    address(bountyToken2),
+                    0.3 ether,
+                    false,
+                    0,
+                    0
                 );
-                tm.createTask(1 ether, bytes("task3"), bytes32(0), DUAL_BOUNTY_PROJECT_ID, address(0), 0, false); // No bounty
+                tm.createTask(1 ether, bytes("task3"), bytes32(0), DUAL_BOUNTY_PROJECT_ID, address(0), 0, false, 0, 0); // No bounty
                 vm.stopPrank();
 
                 // Complete all tasks
@@ -4497,7 +4573,9 @@ contract MockToken is Test, IERC20 {
                     BOUNTY_PROJECT_ID,
                     address(failingToken),
                     0.3 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Assign and submit task
@@ -4722,7 +4800,7 @@ contract MockToken is Test, IERC20 {
 
                 // Consume 2 ether of PT on BUDGET_PROJECT_ID (cap = 10 ether).
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("burn"), bytes32(0), BUDGET_PROJECT_ID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("burn"), bytes32(0), BUDGET_PROJECT_ID, address(0), 0, false, 0, 0);
 
                 // Hat-holder cannot lower cap below committed spend.
                 vm.prank(budgetEditor);
@@ -4830,7 +4908,15 @@ contract MockToken is Test, IERC20 {
                 // Create task within budget
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 1.5 ether, false
+                    1 ether,
+                    bytes("task1"),
+                    bytes32(0),
+                    BUDGET_PROJECT_ID,
+                    address(bountyToken1),
+                    1.5 ether,
+                    false,
+                    0,
+                    0
                 );
 
                 // Verify budget tracking
@@ -4846,7 +4932,15 @@ contract MockToken is Test, IERC20 {
                 // Create another task within budget
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task2"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 1.5 ether, false
+                    1 ether,
+                    bytes("task2"),
+                    bytes32(0),
+                    BUDGET_PROJECT_ID,
+                    address(bountyToken1),
+                    1.5 ether,
+                    false,
+                    0,
+                    0
                 );
 
                 // Verify budget tracking
@@ -4862,7 +4956,15 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
                 tm.createTask(
-                    1 ether, bytes("task3"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 0.1 ether, false
+                    1 ether,
+                    bytes("task3"),
+                    bytes32(0),
+                    BUDGET_PROJECT_ID,
+                    address(bountyToken1),
+                    0.1 ether,
+                    false,
+                    0,
+                    0
                 );
             }
 
@@ -4871,7 +4973,15 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), DISABLED_PROJECT_ID, address(bountyToken1), 5 ether, false
+                    1 ether,
+                    bytes("task1"),
+                    bytes32(0),
+                    DISABLED_PROJECT_ID,
+                    address(bountyToken1),
+                    5 ether,
+                    false,
+                    0,
+                    0
                 );
             }
 
@@ -4879,7 +4989,7 @@ contract MockToken is Test, IERC20 {
                 // BUDGET_PROJECT_ID has unlimited bountyToken1 budget (cap = type(uint128).max)
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 5 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 5 ether, false, 0, 0
                 );
 
                 // Verify budget tracking
@@ -4895,7 +5005,7 @@ contract MockToken is Test, IERC20 {
                 // Create another large task (should work since budget is unlimited)
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task2"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 10 ether, false
+                    1 ether, bytes("task2"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 10 ether, false, 0, 0
                 );
 
                 result = lens.getStorage(
@@ -4921,13 +5031,37 @@ contract MockToken is Test, IERC20 {
                 // Create tasks with different tokens
                 vm.startPrank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), MULTI_TOKEN_PROJECT_ID, address(bountyToken1), 1 ether, false
+                    1 ether,
+                    bytes("task1"),
+                    bytes32(0),
+                    MULTI_TOKEN_PROJECT_ID,
+                    address(bountyToken1),
+                    1 ether,
+                    false,
+                    0,
+                    0
                 );
                 tm.createTask(
-                    1 ether, bytes("task2"), bytes32(0), MULTI_TOKEN_PROJECT_ID, address(bountyToken2), 2 ether, false
+                    1 ether,
+                    bytes("task2"),
+                    bytes32(0),
+                    MULTI_TOKEN_PROJECT_ID,
+                    address(bountyToken2),
+                    2 ether,
+                    false,
+                    0,
+                    0
                 );
                 tm.createTask(
-                    1 ether, bytes("task3"), bytes32(0), MULTI_TOKEN_PROJECT_ID, address(bountyToken1), 1 ether, false
+                    1 ether,
+                    bytes("task3"),
+                    bytes32(0),
+                    MULTI_TOKEN_PROJECT_ID,
+                    address(bountyToken1),
+                    1 ether,
+                    false,
+                    0,
+                    0
                 );
                 vm.stopPrank();
 
@@ -4954,13 +5088,29 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
                 tm.createTask(
-                    1 ether, bytes("task4"), bytes32(0), MULTI_TOKEN_PROJECT_ID, address(bountyToken1), 0.1 ether, false
+                    1 ether,
+                    bytes("task4"),
+                    bytes32(0),
+                    MULTI_TOKEN_PROJECT_ID,
+                    address(bountyToken1),
+                    0.1 ether,
+                    false,
+                    0,
+                    0
                 );
 
                 // But token2 should still work
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task5"), bytes32(0), MULTI_TOKEN_PROJECT_ID, address(bountyToken2), 1 ether, false
+                    1 ether,
+                    bytes("task5"),
+                    bytes32(0),
+                    MULTI_TOKEN_PROJECT_ID,
+                    address(bountyToken2),
+                    1 ether,
+                    false,
+                    0,
+                    0
                 );
 
                 result = lens.getStorage(
@@ -4982,7 +5132,7 @@ contract MockToken is Test, IERC20 {
                 // Create task
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false, 0, 0
                 );
 
                 // Verify initial budget
@@ -4996,7 +5146,7 @@ contract MockToken is Test, IERC20 {
 
                 // Update task to higher bounty (within budget)
                 vm.prank(creator1);
-                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken1), 3 ether);
+                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken1), 3 ether, 0, 0);
 
                 // Verify budget updated
                 result = lens.getStorage(
@@ -5010,7 +5160,7 @@ contract MockToken is Test, IERC20 {
                 // Try to update to exceed budget
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.updateTask(0, 1 ether, bytes("updated2"), bytes32(0), address(bountyToken1), 5.1 ether);
+                tm.updateTask(0, 1 ether, bytes("updated2"), bytes32(0), address(bountyToken1), 5.1 ether, 0, 0);
             }
 
             function test_UpdateTaskChangeBountyToken() public {
@@ -5027,7 +5177,7 @@ contract MockToken is Test, IERC20 {
                 // Create task with token1
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false, 0, 0
                 );
 
                 // Verify initial budgets
@@ -5048,7 +5198,7 @@ contract MockToken is Test, IERC20 {
 
                 // Update task to use token2
                 vm.prank(creator1);
-                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken2), 3 ether);
+                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken2), 3 ether, 0, 0);
 
                 // Verify budgets updated correctly
                 result = lens.getStorage(
@@ -5077,7 +5227,7 @@ contract MockToken is Test, IERC20 {
                 // Create task with bounty
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 3 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 3 ether, false, 0, 0
                 );
 
                 // Verify budget
@@ -5091,7 +5241,7 @@ contract MockToken is Test, IERC20 {
 
                 // Remove bounty from task
                 vm.prank(creator1);
-                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(0), 0);
+                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(0), 0, 0, 0);
 
                 // Verify budget rolled back
                 result = lens.getStorage(
@@ -5113,7 +5263,7 @@ contract MockToken is Test, IERC20 {
                 // Create task
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false, 0, 0
                 );
 
                 // Verify budget
@@ -5156,7 +5306,9 @@ contract MockToken is Test, IERC20 {
                     member1,
                     address(bountyToken1),
                     3 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 // Verify budget tracking
@@ -5179,7 +5331,9 @@ contract MockToken is Test, IERC20 {
                     member1,
                     address(bountyToken1),
                     2.1 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
             }
 
@@ -5193,7 +5347,15 @@ contract MockToken is Test, IERC20 {
                 // Create application task
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("app_task"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 4 ether, true
+                    1 ether,
+                    bytes("app_task"),
+                    bytes32(0),
+                    BUDGET_PROJECT_ID,
+                    address(bountyToken1),
+                    4 ether,
+                    true,
+                    0,
+                    0
                 );
 
                 // Verify budget tracking
@@ -5209,7 +5371,15 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
                 tm.createTask(
-                    1 ether, bytes("app_task2"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 1.1 ether, true
+                    1 ether,
+                    bytes("app_task2"),
+                    bytes32(0),
+                    BUDGET_PROJECT_ID,
+                    address(bountyToken1),
+                    1.1 ether,
+                    true,
+                    0,
+                    0
                 );
             }
 
@@ -5217,7 +5387,7 @@ contract MockToken is Test, IERC20 {
                 // Create task first
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 3 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 3 ether, false, 0, 0
                 );
 
                 // Verify spent
@@ -5294,7 +5464,15 @@ contract MockToken is Test, IERC20 {
                 // Create task that uses both budgets
                 vm.prank(creator1);
                 tm.createTask(
-                    1.5 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false
+                    1.5 ether,
+                    bytes("task1"),
+                    bytes32(0),
+                    BUDGET_PROJECT_ID,
+                    address(bountyToken1),
+                    2 ether,
+                    false,
+                    0,
+                    0
                 );
 
                 // Verify both budgets are tracked independently
@@ -5316,14 +5494,30 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
                 tm.createTask(
-                    0.6 ether, bytes("task2"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 0.5 ether, false
+                    0.6 ether,
+                    bytes("task2"),
+                    bytes32(0),
+                    BUDGET_PROJECT_ID,
+                    address(bountyToken1),
+                    0.5 ether,
+                    false,
+                    0,
+                    0
                 );
 
                 // Create task that only exceeds bounty budget
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
                 tm.createTask(
-                    0.5 ether, bytes("task3"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 1.1 ether, false
+                    0.5 ether,
+                    bytes("task3"),
+                    bytes32(0),
+                    BUDGET_PROJECT_ID,
+                    address(bountyToken1),
+                    1.1 ether,
+                    false,
+                    0,
+                    0
                 );
             }
 
@@ -5337,7 +5531,7 @@ contract MockToken is Test, IERC20 {
                 // Create and complete task
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 3 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 3 ether, false, 0, 0
                 );
 
                 vm.prank(creator1);
@@ -5386,7 +5580,7 @@ contract MockToken is Test, IERC20 {
                 // Create and claim task
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false, 0, 0
                 );
 
                 vm.prank(creator1);
@@ -5395,7 +5589,7 @@ contract MockToken is Test, IERC20 {
                 // outsider has no EDIT_FULL grant and is not a PM — post-claim updates revert Unauthorized.
                 vm.prank(outsider);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken2), 3 ether);
+                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken2), 3 ether, 0, 0);
             }
 
             function test_ZeroBountyCapMeansDisabled() public {
@@ -5403,12 +5597,20 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), DISABLED_PROJECT_ID, address(bountyToken1), 1 ether, false
+                    1 ether,
+                    bytes("task1"),
+                    bytes32(0),
+                    DISABLED_PROJECT_ID,
+                    address(bountyToken1),
+                    1 ether,
+                    false,
+                    0,
+                    0
                 );
 
                 // Non-bounty tasks still work on disabled project
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task2"), bytes32(0), DISABLED_PROJECT_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task2"), bytes32(0), DISABLED_PROJECT_ID, address(0), 0, false, 0, 0);
             }
 
             function test_GetBountyBudgetUnusedToken() public {
@@ -5463,7 +5665,9 @@ contract MockToken is Test, IERC20 {
                         MULTI_TOKEN_PROJECT_ID,
                         token,
                         bountyAmount,
-                        false
+                        false,
+                        0,
+                        0
                     );
                 }
 
@@ -5501,7 +5705,9 @@ contract MockToken is Test, IERC20 {
                     MULTI_TOKEN_PROJECT_ID,
                     address(bountyToken1),
                     7.6 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 vm.prank(creator1);
@@ -5513,7 +5719,9 @@ contract MockToken is Test, IERC20 {
                     MULTI_TOKEN_PROJECT_ID,
                     address(bountyToken2),
                     11.1 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
 
                 vm.prank(creator1);
@@ -5525,7 +5733,9 @@ contract MockToken is Test, IERC20 {
                     MULTI_TOKEN_PROJECT_ID,
                     address(bountyToken3),
                     14.1 ether,
-                    false
+                    false,
+                    0,
+                    0
                 );
             }
 
@@ -5533,7 +5743,7 @@ contract MockToken is Test, IERC20 {
                 // Create task with bounty
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false, 0, 0
                 );
 
                 // Artificially corrupt the bounty budget to simulate underflow scenario
@@ -5545,7 +5755,7 @@ contract MockToken is Test, IERC20 {
                 // Create another task to test the protection
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task2"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 1 ether, false
+                    1 ether, bytes("task2"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 1 ether, false, 0, 0
                 );
 
                 // Verify budget is correct
@@ -5573,7 +5783,7 @@ contract MockToken is Test, IERC20 {
                 // Create task with bounty
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false, 0, 0
                 );
 
                 // Verify budget
@@ -5587,7 +5797,7 @@ contract MockToken is Test, IERC20 {
 
                 // Normal update should work (rolling back and applying new bounty)
                 vm.prank(creator1);
-                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken1), 1.5 ether);
+                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken1), 1.5 ether, 0, 0);
                 result = lens.getStorage(
                     address(tm),
                     TaskManagerLens.StorageKey.BOUNTY_BUDGET,
@@ -5602,14 +5812,14 @@ contract MockToken is Test, IERC20 {
 
                 vm.prank(outsider);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(0, 1 ether, bytes("updated2"), bytes32(0), address(bountyToken1), 1 ether);
+                tm.updateTask(0, 1 ether, bytes("updated2"), bytes32(0), address(bountyToken1), 1 ether, 0, 0);
             }
 
             function test_BountyBudgetUnderflowProtectionEdgeCase() public {
                 // Test edge case where bounty payout equals spent
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 3 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 3 ether, false, 0, 0
                 );
 
                 bytes memory result = lens.getStorage(
@@ -5647,12 +5857,12 @@ contract MockToken is Test, IERC20 {
                 // Create task with token1
                 vm.prank(creator1);
                 tm.createTask(
-                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false
+                    1 ether, bytes("task1"), bytes32(0), BUDGET_PROJECT_ID, address(bountyToken1), 2 ether, false, 0, 0
                 );
 
                 // Update to token2 (should roll back token1 and apply token2)
                 vm.prank(creator1);
-                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken2), 3 ether);
+                tm.updateTask(0, 1 ether, bytes("updated"), bytes32(0), address(bountyToken2), 3 ether, 0, 0);
 
                 // Verify budgets
                 bytes memory result = lens.getStorage(
@@ -5705,13 +5915,13 @@ contract MockToken is Test, IERC20 {
             /// @dev Helper: creates an application-required task and returns its ID
             function _createAppTask(uint256 payout) internal returns (uint256 id) {
                 vm.prank(creator1);
-                tm.createTask(payout, bytes("app_task"), bytes32(0), APP_PROJECT_ID, address(0), 0, true);
+                tm.createTask(payout, bytes("app_task"), bytes32(0), APP_PROJECT_ID, address(0), 0, true, 0, 0);
                 id = 0; // first task
             }
 
             function _createAppTaskN(uint256 payout, uint256 expectedId) internal returns (uint256 id) {
                 vm.prank(creator1);
-                tm.createTask(payout, bytes("app_task"), bytes32(0), APP_PROJECT_ID, address(0), 0, true);
+                tm.createTask(payout, bytes("app_task"), bytes32(0), APP_PROJECT_ID, address(0), 0, true, 0, 0);
                 id = expectedId;
             }
 
@@ -5965,7 +6175,7 @@ contract MockToken is Test, IERC20 {
             function test_ApplyForNonApplicationTaskReverts() public {
                 // Create a regular (non-application) task
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("regular_task"), bytes32(0), APP_PROJECT_ID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("regular_task"), bytes32(0), APP_PROJECT_ID, address(0), 0, false, 0, 0);
                 uint256 id = 0;
 
                 vm.prank(member1);
@@ -6584,7 +6794,7 @@ contract MockToken is Test, IERC20 {
 
             function test_SelfReviewBlockedWithoutPermission() public {
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 vm.prank(reviewer);
                 tm.claimTask(0);
@@ -6606,7 +6816,7 @@ contract MockToken is Test, IERC20 {
                 );
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 vm.prank(reviewer);
                 tm.claimTask(0);
@@ -6625,7 +6835,7 @@ contract MockToken is Test, IERC20 {
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_MANAGER, abi.encode(projectId, pm1, true));
 
                 vm.prank(pm1);
-                tm.createTask(1 ether, bytes("pm_task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("pm_task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // PM bypasses _checkPerm, so can claim even without CLAIM flag
                 vm.prank(pm1);
@@ -6643,7 +6853,7 @@ contract MockToken is Test, IERC20 {
 
             function test_DifferentReviewerCanAlwaysComplete() public {
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task"), bytes32(0), projectId, address(0), 0, false, 0, 0);
 
                 // reviewer claims and submits
                 vm.prank(reviewer);
@@ -6780,7 +6990,7 @@ contract MockToken is Test, IERC20 {
                 // Trying to create a bounty task should revert
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.createTask(1 ether, bytes("task"), bytes32(0), pid, address(bountyToken), 1 ether, false);
+                tm.createTask(1 ether, bytes("task"), bytes32(0), pid, address(bountyToken), 1 ether, false, 0, 0);
             }
 
             function test_DefaultCapZeroAllowsNonBountyTasks() public {
@@ -6789,7 +6999,7 @@ contract MockToken is Test, IERC20 {
 
                 // Non-bounty tasks should work fine
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(1 ether, bytes("task"), bytes32(0), pid, address(0), 0, false, 0, 0);
             }
 
             function test_DisableBountyBudgetViaSetConfig() public {
@@ -6803,7 +7013,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a task (should work)
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task1"), bytes32(0), pid, address(bountyToken), 2 ether, false);
+                tm.createTask(1 ether, bytes("task1"), bytes32(0), pid, address(bountyToken), 2 ether, false, 0, 0);
 
                 // Disable the budget by setting cap to 0
                 vm.prank(executor);
@@ -6812,7 +7022,7 @@ contract MockToken is Test, IERC20 {
                 // New bounty tasks should now be blocked
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.createTask(1 ether, bytes("task2"), bytes32(0), pid, address(bountyToken), 1 ether, false);
+                tm.createTask(1 ether, bytes("task2"), bytes32(0), pid, address(bountyToken), 1 ether, false, 0, 0);
             }
 
             function test_EnableBountyBudgetViaSetConfig() public {
@@ -6822,7 +7032,7 @@ contract MockToken is Test, IERC20 {
                 // Can't create bounty task yet
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.createTask(1 ether, bytes("task1"), bytes32(0), pid, address(bountyToken), 1 ether, false);
+                tm.createTask(1 ether, bytes("task1"), bytes32(0), pid, address(bountyToken), 1 ether, false, 0, 0);
 
                 // Enable budget via setConfig
                 vm.prank(executor);
@@ -6830,7 +7040,7 @@ contract MockToken is Test, IERC20 {
 
                 // Now it should work
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task1"), bytes32(0), pid, address(bountyToken), 2 ether, false);
+                tm.createTask(1 ether, bytes("task1"), bytes32(0), pid, address(bountyToken), 2 ether, false, 0, 0);
             }
 
             // -- unlimited sentinel --
@@ -6843,10 +7053,10 @@ contract MockToken is Test, IERC20 {
 
                 // Can create arbitrarily large bounty tasks
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task1"), bytes32(0), pid, address(bountyToken), 100 ether, false);
+                tm.createTask(1 ether, bytes("task1"), bytes32(0), pid, address(bountyToken), 100 ether, false, 0, 0);
 
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("task2"), bytes32(0), pid, address(bountyToken), 500 ether, false);
+                tm.createTask(1 ether, bytes("task2"), bytes32(0), pid, address(bountyToken), 500 ether, false, 0, 0);
 
                 bytes memory result = tm.getLensData(9, abi.encode(pid, address(bountyToken)));
                 (uint256 cap, uint256 spent) = abi.decode(result, (uint256, uint256));
@@ -6862,7 +7072,7 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
                 tm.createAndAssignTask(
-                    1 ether, bytes("task"), bytes32(0), pid, member1, address(bountyToken), 1 ether, false
+                    1 ether, bytes("task"), bytes32(0), pid, member1, address(bountyToken), 1 ether, false, 0, 0
                 );
             }
 
@@ -6876,7 +7086,7 @@ contract MockToken is Test, IERC20 {
 
                 vm.prank(creator1);
                 tm.createAndAssignTask(
-                    1 ether, bytes("task"), bytes32(0), pid, member1, address(bountyToken), 3 ether, false
+                    1 ether, bytes("task"), bytes32(0), pid, member1, address(bountyToken), 3 ether, false, 0, 0
                 );
 
                 bytes memory result = tm.getLensData(9, abi.encode(pid, address(bountyToken)));
@@ -6958,7 +7168,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(0),
                     bountyPayout: 0,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
             }
 
@@ -7007,7 +7219,7 @@ contract MockToken is Test, IERC20 {
                 // Bind expected ids to a prior task so any reordering bug surfaces
                 // (without the seed, ids and loop indices coincidentally match starting at 0).
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("seed"), bytes32(0), PID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("seed"), bytes32(0), PID, address(0), 0, false, 0, 0);
 
                 TaskManager.CreateTaskInput[] memory inputs = new TaskManager.CreateTaskInput[](3);
                 inputs[0] = _mkInput(1 ether, bytes("title-a"));
@@ -7037,7 +7249,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(0),
                     bountyPayout: 0,
-                    requiresApplication: true
+                    requiresApplication: true,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
                 inputs[1] = _mkInput(1 ether, bytes("claimable"));
                 inputs[2] = TaskManager.CreateTaskInput({
@@ -7046,7 +7260,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(0),
                     bountyPayout: 0,
-                    requiresApplication: true
+                    requiresApplication: true,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
 
                 vm.prank(creator1);
@@ -7078,7 +7294,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(bountyToken),
                     bountyPayout: 1 ether,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
                 inputs[1] = TaskManager.CreateTaskInput({
                     payout: 1 ether,
@@ -7086,7 +7304,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(bountyToken),
                     bountyPayout: 2 ether,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
 
                 vm.prank(creator1);
@@ -7104,7 +7324,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(bountyToken),
                     bountyPayout: 2 ether,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
                 inputs[1] = _mkInput(1 ether, bytes("plain"));
                 inputs[2] = TaskManager.CreateTaskInput({
@@ -7113,7 +7335,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(bountyToken),
                     bountyPayout: 1 ether,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
 
                 vm.prank(creator1);
@@ -7124,7 +7348,7 @@ contract MockToken is Test, IERC20 {
 
             function test_CreateTasksBatch_IdsContinueAfterPriorCreate() public {
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("first"), bytes32(0), PID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("first"), bytes32(0), PID, address(0), 0, false, 0, 0);
 
                 TaskManager.CreateTaskInput[] memory inputs = new TaskManager.CreateTaskInput[](3);
                 inputs[0] = _mkInput(1 ether, bytes("a"));
@@ -7255,7 +7479,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(bountyToken),
                     bountyPayout: 4 ether,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
                 inputs[1] = TaskManager.CreateTaskInput({
                     payout: 1 ether,
@@ -7263,7 +7489,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(bountyToken),
                     bountyPayout: 2 ether,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
 
                 vm.prank(creator1);
@@ -7282,7 +7510,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(0),
                     bountyPayout: 1 ether,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
 
                 vm.prank(creator1);
@@ -7298,7 +7528,9 @@ contract MockToken is Test, IERC20 {
                     metadataHash: bytes32(0),
                     bountyToken: address(bountyToken),
                     bountyPayout: 0,
-                    requiresApplication: false
+                    requiresApplication: false,
+                    absoluteDeadline: 0,
+                    completionWindow: 0
                 });
 
                 vm.prank(creator1);
@@ -7322,7 +7554,7 @@ contract MockToken is Test, IERC20 {
                 // nextTaskId atomicity: a fresh task after the failed batch must get id 0,
                 // proving the counter never advanced inside the reverted loop.
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("post-revert"), bytes32(0), PID, address(0), 0, false);
+                tm.createTask(1 ether, bytes("post-revert"), bytes32(0), PID, address(0), 0, false, 0, 0);
                 bytes memory result = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(0));
                 (,,, bytes32 projectId,) = abi.decode(result, (uint256, TaskManager.Status, address, bytes32, bool));
                 assertEq(projectId, PID, "id 0 must be the post-revert task: counter did not advance");
@@ -7591,7 +7823,7 @@ contract MockToken is Test, IERC20 {
             function _createAndClaim(uint256 payout) internal returns (uint256 id) {
                 id = _nextId++;
                 vm.prank(creator1);
-                tm.createTask(payout, bytes("orig"), bytes32(0), PID, address(0), 0, false);
+                tm.createTask(payout, bytes("orig"), bytes32(0), PID, address(0), 0, false, 0, 0);
                 vm.prank(member1);
                 tm.claimTask(id);
             }
@@ -7601,7 +7833,7 @@ contract MockToken is Test, IERC20 {
                 assertEq(_projectSpent(PID), 2 ether);
 
                 vm.prank(editorFull);
-                tm.updateTask(id, 5 ether, bytes("new-title"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 5 ether, bytes("new-title"), bytes32(0), address(0), 0, 0, 0);
 
                 (uint256 payout,,, TaskManager.Status status,) = _taskFields(id);
                 assertEq(payout, 5 ether, "payout should be updated");
@@ -7629,7 +7861,7 @@ contract MockToken is Test, IERC20 {
                 // EDIT_META alone is insufficient for the full updateTask post-claim.
                 vm.prank(editorMeta);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(id, 5 ether, bytes("new"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 5 ether, bytes("new"), bytes32(0), address(0), 0, 0, 0);
             }
 
             function test_EditFull_CanAlsoCallUpdateTaskMetadata() public {
@@ -7650,7 +7882,7 @@ contract MockToken is Test, IERC20 {
 
                 vm.prank(editorFull);
                 vm.expectRevert(TaskManager.BadStatus.selector);
-                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0, 0, 0);
 
                 vm.prank(editorFull);
                 vm.expectRevert(TaskManager.BadStatus.selector);
@@ -7660,13 +7892,13 @@ contract MockToken is Test, IERC20 {
             function test_EditFull_RevertsOnCancelledTask() public {
                 uint256 id = _nextId++;
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("c"), bytes32(0), PID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("c"), bytes32(0), PID, address(0), 0, false, 0, 0);
                 vm.prank(creator1);
                 tm.cancelTask(id);
 
                 vm.prank(editorFull);
                 vm.expectRevert(TaskManager.BadStatus.selector);
-                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0, 0, 0);
             }
 
             function test_Pm_ImplicitEditFullPostClaim() public {
@@ -7674,7 +7906,7 @@ contract MockToken is Test, IERC20 {
 
                 // creator1 is the project manager (auto-added on createProject). No EDIT_FULL grant.
                 vm.prank(creator1);
-                tm.updateTask(id, 7 ether, bytes("pm-edit"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 7 ether, bytes("pm-edit"), bytes32(0), address(0), 0, 0, 0);
 
                 (uint256 payout,,,,) = _taskFields(id);
                 assertEq(payout, 7 ether);
@@ -7685,7 +7917,7 @@ contract MockToken is Test, IERC20 {
                 uint256 id = _createAndClaim(2 ether);
 
                 vm.prank(executor);
-                tm.updateTask(id, 9 ether, bytes("exec-edit"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 9 ether, bytes("exec-edit"), bytes32(0), address(0), 0, 0, 0);
 
                 (uint256 payout,,,,) = _taskFields(id);
                 assertEq(payout, 9 ether);
@@ -7697,7 +7929,7 @@ contract MockToken is Test, IERC20 {
                 tm.submitTask(id, keccak256("done"));
 
                 vm.prank(editorFull);
-                tm.updateTask(id, 3 ether, bytes("late-bump"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 3 ether, bytes("late-bump"), bytes32(0), address(0), 0, 0, 0);
 
                 (uint256 payout,,, TaskManager.Status status,) = _taskFields(id);
                 assertEq(payout, 3 ether);
@@ -7715,7 +7947,7 @@ contract MockToken is Test, IERC20 {
             function test_EditMeta_CreatorHatWorksPreClaimOnly() public {
                 uint256 id = _nextId++;
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("c"), bytes32(0), PID, address(0), 0, false);
+                tm.createTask(2 ether, bytes("c"), bytes32(0), PID, address(0), 0, false, 0, 0);
 
                 // creator2 has CREATE perm via CREATOR_HAT but is NOT the PM of this project.
                 vm.prank(creator2);
@@ -7746,7 +7978,7 @@ contract MockToken is Test, IERC20 {
 
                 uint256 id = _nextId++;
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("b"), bytes32(0), bountyPid, address(tokenA), 2 ether, false);
+                tm.createTask(1 ether, bytes("b"), bytes32(0), bountyPid, address(tokenA), 2 ether, false, 0, 0);
                 vm.prank(creator1);
                 tm.assignTask(id, member1);
 
@@ -7754,7 +7986,7 @@ contract MockToken is Test, IERC20 {
                 _assertBountySpent(bountyPid, address(tokenB), 0);
 
                 vm.prank(editorFull);
-                tm.updateTask(id, 1 ether, bytes("b-swap"), bytes32(0), address(tokenB), 3 ether);
+                tm.updateTask(id, 1 ether, bytes("b-swap"), bytes32(0), address(tokenB), 3 ether, 0, 0);
 
                 _assertBountySpent(bountyPid, address(tokenA), 0);
                 _assertBountySpent(bountyPid, address(tokenB), 3 ether);
@@ -7773,14 +8005,14 @@ contract MockToken is Test, IERC20 {
 
                 uint256 id = _nextId++;
                 vm.prank(creator1);
-                tm.createTask(1 ether, bytes("b"), bytes32(0), bountyPid, address(tokenA), 2 ether, false);
+                tm.createTask(1 ether, bytes("b"), bytes32(0), bountyPid, address(tokenA), 2 ether, false, 0, 0);
                 vm.prank(creator1);
                 tm.assignTask(id, member1);
 
                 // tokenB has no budget on this project (cap = 0 = DISABLED) — swap reverts via BudgetLib.
                 vm.prank(editorFull);
                 vm.expectRevert(BudgetLib.BudgetExceeded.selector);
-                tm.updateTask(id, 1 ether, bytes("b-bad"), bytes32(0), address(tokenB), 1 ether);
+                tm.updateTask(id, 1 ether, bytes("b-bad"), bytes32(0), address(tokenB), 1 ether, 0, 0);
             }
 
             function test_ProjectOverrideRemovesEditFull() public {
@@ -7796,17 +8028,17 @@ contract MockToken is Test, IERC20 {
                 uint256 id = _createAndClaim(2 ether);
                 vm.prank(editorFull);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 3 ether, bytes("x"), bytes32(0), address(0), 0, 0, 0);
 
                 // On the other project (no override), the global EDIT_FULL still grants access.
                 uint256 otherId = _nextId++;
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("o"), bytes32(0), otherPid, address(0), 0, false);
+                tm.createTask(2 ether, bytes("o"), bytes32(0), otherPid, address(0), 0, false, 0, 0);
                 vm.prank(member1);
                 tm.claimTask(otherId);
 
                 vm.prank(editorFull);
-                tm.updateTask(otherId, 3 ether, bytes("ok"), bytes32(0), address(0), 0);
+                tm.updateTask(otherId, 3 ether, bytes("ok"), bytes32(0), address(0), 0, 0, 0);
             }
 
             function test_EditFull_OnCreateAndAssignTask() public {
@@ -7816,7 +8048,7 @@ contract MockToken is Test, IERC20 {
                 vm.prank(creator1); // creator1 is the PM (and has both CREATE and ASSIGN via creator hat? no — needs explicit)
                 // creator1 is a PM via auto-add on createProject. PMs satisfy the createAndAssignTask
                 // permission gate (hasCreateAndAssign || isPM).
-                tm.createAndAssignTask(2 ether, bytes("ca"), bytes32(0), PID, member1, address(0), 0, false);
+                tm.createAndAssignTask(2 ether, bytes("ca"), bytes32(0), PID, member1, address(0), 0, false, 0, 0);
 
                 (uint256 payoutBefore,,, TaskManager.Status statusBefore,) = _taskFields(id);
                 assertEq(uint256(statusBefore), uint256(TaskManager.Status.CLAIMED));
@@ -7824,7 +8056,7 @@ contract MockToken is Test, IERC20 {
 
                 // EDIT_FULL holder can edit the directly-claimed task.
                 vm.prank(editorFull);
-                tm.updateTask(id, 4 ether, bytes("ca-edited"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 4 ether, bytes("ca-edited"), bytes32(0), address(0), 0, 0, 0);
 
                 (uint256 payoutAfter,,,,) = _taskFields(id);
                 assertEq(payoutAfter, 4 ether);
@@ -7837,7 +8069,7 @@ contract MockToken is Test, IERC20 {
                 uint256 id = _createAndClaim(2 ether);
 
                 vm.prank(editorFull);
-                tm.updateTask(id, 7 ether, bytes("bumped"), bytes32(0), address(0), 0);
+                tm.updateTask(id, 7 ether, bytes("bumped"), bytes32(0), address(0), 0, 0, 0);
 
                 vm.prank(member1);
                 tm.submitTask(id, keccak256("done"));
@@ -8039,7 +8271,7 @@ contract MockToken is Test, IERC20 {
 
                 vm.prank(editorFull);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(0, 5 ether, bytes("nope"), bytes32(0), address(0), 0);
+                tm.updateTask(0, 5 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0);
 
                 // But metadata-only succeeds because EDIT_META was the last-written mask.
                 vm.prank(editorFull);
@@ -8112,7 +8344,7 @@ contract MockToken is Test, IERC20 {
 
                 // The bootstrap-granted hat wearer can immediately edit.
                 vm.prank(editorFull);
-                tm.updateTask(0, 5 ether, bytes("bumped"), bytes32(0), address(0), 0);
+                tm.updateTask(0, 5 ether, bytes("bumped"), bytes32(0), address(0), 0, 0, 0);
             }
 
             /* ---------- Edge case 10: multiple bits OR'd into one mask ---------- */
@@ -8181,7 +8413,7 @@ contract MockToken is Test, IERC20 {
 
                 // Editor hat (bootstrapped) can edit the now-CLAIMED task.
                 vm.prank(editorFull);
-                tm.updateTask(0, 2 ether, bytes("post"), bytes32(0), address(0), 0);
+                tm.updateTask(0, 2 ether, bytes("post"), bytes32(0), address(0), 0, 0, 0);
             }
 
             /* ---------- Edge case 12: per-project override still beats bootstrap-granted global ---------- */
@@ -8205,7 +8437,7 @@ contract MockToken is Test, IERC20 {
                 // Editor hat is denied on this project despite the global EDIT_FULL grant.
                 vm.prank(editorFull);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(0, 5 ether, bytes("nope"), bytes32(0), address(0), 0);
+                tm.updateTask(0, 5 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0);
             }
 
             /* ---------- Helpers ---------- */
@@ -8231,6 +8463,685 @@ contract MockToken is Test, IERC20 {
                     })
                 );
                 vm.prank(creator1);
-                tm.createTask(2 ether, bytes("t"), bytes32(0), pid, address(0), 0, false);
+                tm.createTask(2 ether, bytes("t"), bytes32(0), pid, address(0), 0, false, 0, 0);
+            }
+        }
+
+        /*────────────────── TaskManager v6: Deadlines & Takeover ──────────────────*/
+        contract TaskManagerDeadlineTest is TaskManagerTestBase {
+            bytes32 DL_ID;
+            address member2 = makeAddr("member2");
+
+            uint32 constant WINDOW = 7 days;
+            uint48 ABS; // T0 + 30 days
+            uint256 T0;
+
+            bytes32 constant TOPIC_DEADLINES_SET = keccak256("TaskDeadlinesSet(uint256,uint48,uint32)");
+            bytes32 constant TOPIC_CLAIM_DEADLINE_SET = keccak256("TaskClaimDeadlineSet(uint256,uint48)");
+            bytes32 constant TOPIC_CLAIM_EXPIRED = keccak256("TaskClaimExpired(uint256,address,address)");
+
+            function setUp() public {
+                vm.warp(1_700_000_000); // realistic base timestamp so `abs <= block.timestamp` checks bite
+                T0 = block.timestamp;
+                ABS = uint48(T0 + 30 days);
+                setUpBase();
+                setHat(member2, MEMBER_HAT);
+                DL_ID = _createDefaultProject("DEADLINES", 0);
+            }
+
+            /*──────── helpers ───────*/
+            // Mirrors the contract's sequential id assignment (fresh setUp ⇒ first task is id 0),
+            // same pattern as TaskManagerEditPermsTest.
+            uint256 _nextId;
+
+            function _mkTask(uint48 absoluteDeadline, uint32 completionWindow) internal returns (uint256 id) {
+                id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(
+                    1 ether, bytes("dl"), bytes32(0), DL_ID, address(0), 0, false, absoluteDeadline, completionWindow
+                );
+            }
+
+            function _mkAppTask(uint48 absoluteDeadline, uint32 completionWindow) internal returns (uint256 id) {
+                id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(
+                    1 ether, bytes("dl-app"), bytes32(0), DL_ID, address(0), 0, true, absoluteDeadline, completionWindow
+                );
+            }
+
+            function _deadlines(uint256 id) internal view returns (uint48 abs_, uint32 window_, uint48 cd_) {
+                bytes memory data = lens.getStorage(
+                    address(tm), TaskManagerLens.StorageKey.TASK_DEADLINES, abi.encode(id)
+                );
+                (abs_, window_, cd_) = abi.decode(data, (uint48, uint32, uint48));
+            }
+
+            function _status(uint256 id) internal view returns (TaskManager.Status st, address claimer) {
+                bytes memory data = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(id));
+                (, st, claimer,,) = abi.decode(data, (uint256, TaskManager.Status, address, bytes32, bool));
+            }
+
+            function _countTopic(Vm.Log[] memory logs, bytes32 topic) internal pure returns (uint256 n) {
+                for (uint256 i; i < logs.length; i++) {
+                    if (logs[i].topics[0] == topic) n++;
+                }
+            }
+
+            /*──────── creation & validation ───────*/
+
+            function test_CreateWithBothDeadlines() public {
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskDeadlinesSet(0, ABS, WINDOW);
+                uint256 id = _mkTask(ABS, WINDOW);
+
+                (uint48 abs_, uint32 window_, uint48 cd_) = _deadlines(id);
+                assertEq(abs_, ABS, "absoluteDeadline stored");
+                assertEq(window_, WINDOW, "completionWindow stored");
+                assertEq(cd_, 0, "claimDeadline unset until claim");
+            }
+
+            function test_CreateWithAbsoluteOnly() public {
+                uint256 id = _mkTask(ABS, 0);
+                (uint48 abs_, uint32 window_, uint48 cd_) = _deadlines(id);
+                assertEq(abs_, ABS);
+                assertEq(window_, 0);
+                assertEq(cd_, 0);
+            }
+
+            function test_CreateWithWindowOnly() public {
+                uint256 id = _mkTask(0, WINDOW);
+                (uint48 abs_, uint32 window_, uint48 cd_) = _deadlines(id);
+                assertEq(abs_, 0);
+                assertEq(window_, WINDOW);
+                assertEq(cd_, 0);
+            }
+
+            function test_CreateWithoutDeadlinesEmitsNoDeadlineEvent() public {
+                vm.recordLogs();
+                uint256 id = _mkTask(0, 0);
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+                assertEq(_countTopic(logs, TOPIC_DEADLINES_SET), 0, "no TaskDeadlinesSet for deadline-less create");
+                assertEq(
+                    _countTopic(logs, TOPIC_CLAIM_DEADLINE_SET), 0, "no TaskClaimDeadlineSet for deadline-less create"
+                );
+                (uint48 abs_, uint32 window_, uint48 cd_) = _deadlines(id);
+                assertEq(abs_, 0);
+                assertEq(window_, 0);
+                assertEq(cd_, 0);
+            }
+
+            function test_CreateBatchMixedDeadlines() public {
+                TaskManager.CreateTaskInput[] memory inputs = new TaskManager.CreateTaskInput[](4);
+                // (abs, window) combos: both / abs-only / window-only / neither
+                uint48[4] memory abss = [ABS, ABS, 0, 0];
+                uint32[4] memory windows = [WINDOW, 0, WINDOW, 0];
+                for (uint256 i; i < 4; i++) {
+                    inputs[i] = TaskManager.CreateTaskInput({
+                        payout: 1 ether,
+                        title: bytes("batch"),
+                        metadataHash: bytes32(0),
+                        bountyToken: address(0),
+                        bountyPayout: 0,
+                        requiresApplication: false,
+                        absoluteDeadline: abss[i],
+                        completionWindow: windows[i]
+                    });
+                }
+                vm.prank(creator1);
+                uint256[] memory ids = tm.createTasksBatch(DL_ID, inputs);
+                for (uint256 i; i < 4; i++) {
+                    (uint48 abs_, uint32 window_, uint48 cd_) = _deadlines(ids[i]);
+                    assertEq(abs_, abss[i], "batch abs");
+                    assertEq(window_, windows[i], "batch window");
+                    assertEq(cd_, 0, "batch cd unset");
+                }
+            }
+
+            function test_CreateBornExpiredReverts() public {
+                uint48 past = uint48(block.timestamp); // `<= now` is rejected
+                vm.prank(creator1);
+                vm.expectRevert(TaskManager.InvalidDeadline.selector);
+                tm.createTask(1 ether, bytes("x"), bytes32(0), DL_ID, address(0), 0, false, past, 0);
+
+                // batch path
+                TaskManager.CreateTaskInput[] memory inputs = new TaskManager.CreateTaskInput[](1);
+                inputs[0] = TaskManager.CreateTaskInput({
+                    payout: 1 ether,
+                    title: bytes("x"),
+                    metadataHash: bytes32(0),
+                    bountyToken: address(0),
+                    bountyPayout: 0,
+                    requiresApplication: false,
+                    absoluteDeadline: uint48(block.timestamp - 1),
+                    completionWindow: 0
+                });
+                vm.prank(creator1);
+                vm.expectRevert(TaskManager.InvalidDeadline.selector);
+                tm.createTasksBatch(DL_ID, inputs);
+
+                // create-and-assign path (executor: PM bypass — pm1's project mask shadows his global CREATE)
+                vm.prank(executor);
+                vm.expectRevert(TaskManager.InvalidDeadline.selector);
+                tm.createAndAssignTask(
+                    1 ether, bytes("x"), bytes32(0), DL_ID, member1, address(0), 0, false, past, WINDOW
+                );
+            }
+
+            function test_CreateAndAssignStartsWindow() public {
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskCreated(0, DL_ID, 1 ether, address(0), 0, false, bytes("caa"), bytes32(0));
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskAssigned(0, member1, executor);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskDeadlinesSet(0, ABS, WINDOW);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(0, uint48(block.timestamp) + WINDOW);
+                vm.prank(executor);
+                uint256 id = tm.createAndAssignTask(
+                    1 ether, bytes("caa"), bytes32(0), DL_ID, member1, address(0), 0, false, ABS, WINDOW
+                );
+
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW, "window starts at assignment");
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.CLAIMED));
+                assertEq(claimer, member1);
+            }
+
+            /*──────── claim-window lifecycle ───────*/
+
+            function test_ClaimSetsClaimDeadline() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(id, uint48(block.timestamp) + WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW);
+            }
+
+            function test_ClaimWindowlessLeavesDeadlineZero() public {
+                uint256 id = _mkTask(ABS, 0);
+                vm.recordLogs();
+                vm.prank(member1);
+                tm.claimTask(id);
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+                assertEq(_countTopic(logs, TOPIC_CLAIM_DEADLINE_SET), 0, "windowless claim emits no deadline event");
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, 0);
+            }
+
+            function test_AssignSetsClaimDeadline() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(pm1);
+                tm.assignTask(id, member1);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW);
+            }
+
+            function test_ApproveApplicationSetsClaimDeadline() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW);
+            }
+
+            function test_RejectResetsWindow() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                uint48 firstDeadline = uint48(block.timestamp) + WINDOW;
+
+                vm.warp(block.timestamp + 3 days);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("work"));
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(id, uint48(block.timestamp) + WINDOW);
+                vm.prank(pm1);
+                tm.rejectTask(id, keccak256("redo"));
+
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW, "fresh window for rework");
+                assertGt(cd_, firstDeadline);
+            }
+
+            function test_RejectWindowlessIsNoop() public {
+                uint256 id = _mkTask(0, 0);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("work"));
+                vm.recordLogs();
+                vm.prank(pm1);
+                tm.rejectTask(id, keccak256("redo"));
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+                assertEq(_countTopic(logs, TOPIC_CLAIM_DEADLINE_SET), 0);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, 0);
+            }
+
+            /*──────── lenient submission ───────*/
+
+            function test_LateSubmitAndCompleteAllowed() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.warp(block.timestamp + WINDOW + 30 days); // way past the claim deadline
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("late-but-fine"));
+
+                vm.prank(pm1);
+                tm.completeTask(id);
+                (TaskManager.Status st,) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.COMPLETED));
+                assertEq(token.balanceOf(member1), 1 ether, "late work still pays");
+            }
+
+            function test_LateSubmitPastAbsoluteAllowed() public {
+                uint256 id = _mkTask(ABS, 0);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.warp(uint256(ABS) + 1 days);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("late"));
+                vm.prank(pm1);
+                tm.completeTask(id);
+                (TaskManager.Status st,) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.COMPLETED));
+            }
+
+            /*──────── takeover ───────*/
+
+            function test_ClaimTakeoverAfterWindowExpiry() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                uint48 cd1 = uint48(block.timestamp) + WINDOW;
+
+                vm.warp(uint256(cd1) + 1);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimExpired(id, member1, member2);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimed(id, member2);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(id, uint48(block.timestamp) + WINDOW);
+                vm.prank(member2);
+                tm.claimTask(id);
+
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.CLAIMED));
+                assertEq(claimer, member2, "claimer switched");
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW, "fresh window for new claimer");
+
+                // ousted claimer can no longer submit
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.NotClaimer.selector);
+                tm.submitTask(id, keccak256("too-late"));
+            }
+
+            function test_ClaimTakeoverAfterAbsoluteExpiry() public {
+                uint256 id = _mkTask(ABS, 0);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.warp(uint256(ABS) + 1);
+                vm.prank(member2);
+                tm.claimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2);
+
+                // past the absolute cutoff every claim is born unprotected — chain another takeover
+                vm.prank(member1);
+                tm.claimTask(id);
+                (, claimer) = _status(id);
+                assertEq(claimer, member1);
+            }
+
+            function test_ClaimNotExpiredReverts() public {
+                uint256 id = _mkTask(ABS, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.warp(block.timestamp + WINDOW); // exactly the deadline second: still protected
+                vm.prank(member2);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.claimTask(id);
+            }
+
+            function test_SubmittedNeverTakeoverable() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + WINDOW + 1); // expire, then submit late (lenient)
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("work"));
+
+                vm.warp(block.timestamp + 365 days);
+                vm.prank(member2);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.claimTask(id);
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.assignTask(id, member2);
+            }
+
+            function test_AssignTakeoverAndSelfRefresh() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(pm1);
+                tm.assignTask(id, member1);
+                uint48 cd1 = uint48(block.timestamp) + WINDOW;
+
+                vm.warp(uint256(cd1) + 1);
+                // reassign to someone else
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimExpired(id, member1, member2);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskAssigned(id, member2, pm1);
+                vm.prank(pm1);
+                tm.assignTask(id, member2);
+
+                // expire again, re-assign to the SAME claimer = explicit window refresh
+                (,, uint48 cd2) = _deadlines(id);
+                vm.warp(uint256(cd2) + 1);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimExpired(id, member2, member2);
+                vm.prank(pm1);
+                tm.assignTask(id, member2);
+                (,, uint48 cd3) = _deadlines(id);
+                assertEq(cd3, uint48(block.timestamp) + WINDOW, "refreshed window");
+            }
+
+            function test_AssignTakeoverNeedsAssignPerm() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + WINDOW + 1);
+                vm.prank(member2); // MEMBER_HAT has CLAIM, not ASSIGN
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.assignTask(id, member2);
+            }
+
+            function test_RequiresApplicationDirectClaimTakeoverReverts() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+
+                vm.warp(block.timestamp + WINDOW + 1);
+                vm.prank(member2);
+                vm.expectRevert(TaskManager.RequiresApplication.selector);
+                tm.claimTask(id);
+            }
+
+            function test_ApplicationTakeoverFlow() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+
+                // not expired yet: new applications are rejected
+                vm.prank(member2);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.applyForTask(id, keccak256("app2"));
+
+                vm.warp(block.timestamp + WINDOW + 1);
+
+                // expired: a NEW applicant can apply while the task is still CLAIMED
+                vm.prank(member2);
+                tm.applyForTask(id, keccak256("app2"));
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimExpired(id, member1, member2);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskApplicationApproved(id, member2, pm1);
+                vm.prank(pm1);
+                tm.approveApplication(id, member2);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2);
+
+                // the ousted claimer's application hash persists — they are re-approvable after expiry
+                vm.warp(block.timestamp + WINDOW + 1);
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                (, claimer) = _status(id);
+                assertEq(claimer, member1);
+            }
+
+            function test_ApproveNonApplicantOnExpiredClaimReverts() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                vm.warp(block.timestamp + WINDOW + 1);
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.NotApplicant.selector);
+                tm.approveApplication(id, member2);
+            }
+
+            function test_ExpiredClaimerSelfReclaim() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + WINDOW + 1);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimExpired(id, member1, member1);
+                vm.prank(member1);
+                tm.claimTask(id);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW, "self-reclaim refreshes the window");
+            }
+
+            function test_ClaimUnclaimedPastAbsoluteAllowed() public {
+                uint256 id = _mkTask(ABS, 0);
+                vm.warp(uint256(ABS) + 1 days); // expires while UNCLAIMED
+                vm.prank(member1);
+                tm.claimTask(id); // lenient: claiming is allowed, the claim is just born unprotected
+                (, address claimer) = _status(id);
+                assertEq(claimer, member1);
+                vm.prank(member2);
+                tm.claimTask(id); // immediately takeover-able
+                (, claimer) = _status(id);
+                assertEq(claimer, member2);
+            }
+
+            /*──────── updateTask deadline arithmetic ───────*/
+
+            function test_UpdateDeadlinesUnclaimed() public {
+                uint256 id = _mkTask(0, 0);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskDeadlinesSet(id, ABS, WINDOW);
+                vm.prank(creator1);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, ABS, WINDOW);
+                (uint48 abs_, uint32 window_, uint48 cd_) = _deadlines(id);
+                assertEq(abs_, ABS);
+                assertEq(window_, WINDOW);
+                assertEq(cd_, 0, "no claim, no claim deadline");
+            }
+
+            function test_UpdateWindowWhileClaimedPreservesClaimStart() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                uint48 claimStart = uint48(block.timestamp);
+
+                vm.warp(block.timestamp + 2 days);
+                uint32 newWindow = 14 days;
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(id, claimStart + newWindow);
+                vm.prank(executor);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, 0, newWindow);
+
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, claimStart + newWindow, "claim start preserved across window edits");
+            }
+
+            function test_UpdateWindowFromZeroWhileClaimed() public {
+                uint256 id = _mkTask(0, 0);
+                vm.prank(member1);
+                tm.claimTask(id); // windowless claim, cd = 0
+                vm.warp(block.timestamp + 5 days);
+
+                vm.prank(executor);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, 0, WINDOW);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW, "window starts now when previously windowless");
+            }
+
+            function test_UpdateWindowToZeroClears() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(id, 0);
+                vm.prank(executor);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, 0, 0);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, 0, "cleared");
+            }
+
+            function test_UpdatePastAbsoluteUnsticksClaimedTask() public {
+                uint256 id = _mkTask(0, 0); // no deadlines: pre-v6-style task
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + 90 days); // claimer ghosted; task is stuck CLAIMED
+
+                vm.prank(member2);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.claimTask(id); // still protected — no deadlines configured
+
+                // executor sets the absolute deadline into the past → opens takeover
+                vm.prank(executor);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, uint48(block.timestamp - 1), 0);
+
+                vm.prank(member2);
+                tm.claimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2, "unstuck via past absolute deadline");
+            }
+
+            function test_UpdateSubmittedAdjustsClaimDeadline() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                uint48 claimStart = uint48(block.timestamp);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("work"));
+
+                uint32 newWindow = 21 days;
+                vm.prank(executor);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, 0, newWindow);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, claimStart + newWindow, "submitted tasks keep arithmetic consistent");
+
+                // a later rejection restarts the window from 'now'
+                vm.warp(block.timestamp + 10 days);
+                vm.prank(pm1);
+                tm.rejectTask(id, keccak256("redo"));
+                (,, cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + newWindow, "reject overrides with a fresh window");
+            }
+
+            function test_UpdateNoopEmitsNoDeadlineEvents() public {
+                uint256 id = _mkTask(ABS, WINDOW);
+                vm.recordLogs();
+                vm.prank(creator1);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, ABS, WINDOW);
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+                assertEq(_countTopic(logs, TOPIC_DEADLINES_SET), 0, "unchanged values emit nothing");
+                assertEq(_countTopic(logs, TOPIC_CLAIM_DEADLINE_SET), 0);
+            }
+
+            function test_UpdateDeadlinePermissionsMatchPayoutEdits() public {
+                uint256 id = _mkTask(0, 0);
+
+                // outsider: no perms at all
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, ABS, WINDOW);
+
+                // CREATE-perm holder can set deadlines while UNCLAIMED...
+                // (creator2: wears CREATOR_HAT but is NOT the project's auto-added manager)
+                vm.prank(creator2);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, ABS, WINDOW);
+
+                // ...but not post-claim (no EDIT_FULL)
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(creator2);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, 0, 0);
+            }
+
+            function test_TerminalTasksRejectDeadlineEdits() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("work"));
+                vm.prank(pm1);
+                tm.completeTask(id);
+
+                vm.prank(executor);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, ABS, WINDOW);
+            }
+
+            /*──────── fuzz ───────*/
+
+            function testFuzz_WindowEditPreservesClaimStart(uint32 w1, uint32 w2, uint32 warpBy) public {
+                w1 = uint32(bound(w1, 1, 365 days));
+                w2 = uint32(bound(w2, 1, 365 days));
+                warpBy = uint32(bound(warpBy, 0, 365 days));
+
+                uint256 id = _mkTask(0, w1);
+                vm.prank(member1);
+                tm.claimTask(id);
+                uint48 claimStart = uint48(block.timestamp);
+
+                vm.warp(block.timestamp + warpBy);
+                vm.prank(executor);
+                tm.updateTask(id, 1 ether, bytes("dl"), bytes32(0), address(0), 0, 0, w2);
+
+                (,, uint48 cd_) = _deadlines(id);
+                if (w1 == w2) {
+                    assertEq(cd_, claimStart + w1, "no-op edit keeps deadline");
+                } else {
+                    assertEq(cd_, claimStart + w2, "claim start preserved");
+                }
+            }
+
+            function testFuzz_ExpiryBoundary(uint32 window) public {
+                window = uint32(bound(window, 1, 3650 days));
+                uint256 id = _mkTask(0, window);
+                vm.prank(member1);
+                tm.claimTask(id);
+                uint48 cd = uint48(block.timestamp) + window;
+
+                // exactly at the deadline: still protected
+                vm.warp(cd);
+                vm.prank(member2);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.claimTask(id);
+
+                // one second past: expired
+                vm.warp(uint256(cd) + 1);
+                vm.prank(member2);
+                tm.claimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2);
             }
         }

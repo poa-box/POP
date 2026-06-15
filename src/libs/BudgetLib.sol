@@ -10,7 +10,6 @@ library BudgetLib {
     /* ─────────── Errors ─────────── */
     error BudgetExceeded();
     error SpentUnderflow();
-    error CapBelowCommitted();
 
     /* ─────────── Constants ─────────── */
     /// @notice Sentinel value meaning "unlimited budget" (no cap enforced).
@@ -57,78 +56,5 @@ library BudgetLib {
         unchecked {
             budget.spent -= uint128(delta);
         }
-    }
-
-    /**
-     * @notice Update budget spent amount (can increase or decrease)
-     * @param budget The budget struct to modify
-     * @param oldAmount Previous amount to rollback
-     * @param newAmount New amount to apply
-     * @param cap The budget cap (0 means unlimited)
-     */
-    function updateSpent(Budget storage budget, uint256 oldAmount, uint256 newAmount, uint256 cap) internal {
-        // Rollback old amount
-        if (oldAmount > 0) {
-            subtractSpent(budget, oldAmount);
-        }
-
-        // Apply new amount
-        if (newAmount > 0) {
-            addSpent(budget, newAmount, cap);
-        }
-    }
-
-    /**
-     * @notice Update budget spent amount using budget's own cap
-     * @param budget The budget struct to modify
-     * @param oldAmount Previous amount to rollback
-     * @param newAmount New amount to apply
-     */
-    function updateSpent(Budget storage budget, uint256 oldAmount, uint256 newAmount) internal {
-        updateSpent(budget, oldAmount, newAmount, budget.cap);
-    }
-
-    /**
-     * @notice Check if an amount can be added without exceeding cap
-     * @param budget The budget struct to check
-     * @param delta Amount to potentially add
-     * @return bool True if the addition would not exceed cap
-     */
-    function canAddSpent(Budget storage budget, uint256 delta) internal view returns (bool) {
-        if (budget.cap == UNLIMITED) return true;
-        return budget.spent + delta <= budget.cap;
-    }
-
-    /**
-     * @notice Get remaining budget capacity
-     * @param budget The budget struct to check
-     * @return uint256 Remaining capacity (returns max uint256 if unlimited)
-     */
-    function remainingCapacity(Budget storage budget) internal view returns (uint256) {
-        if (budget.cap == UNLIMITED) return type(uint256).max;
-        if (budget.spent >= budget.cap) return 0;
-        return budget.cap - budget.spent;
-    }
-
-    /**
-     * @notice Check if a new cap is valid (not below current spent)
-     * @param budget The budget struct to check
-     * @param newCap The proposed new cap
-     * @return bool True if the new cap is valid
-     */
-    function isValidCap(Budget storage budget, uint256 newCap) internal view returns (bool) {
-        // Disabled (0) and unlimited are always valid
-        if (newCap == 0 || newCap == UNLIMITED) return true;
-        return newCap >= budget.spent;
-    }
-
-    /**
-     * @notice Set budget cap with validation
-     * @param budget The budget struct to modify
-     * @param newCap The new cap to set
-     */
-    function setCap(Budget storage budget, uint256 newCap) internal {
-        if (!isValidCap(budget, newCap)) revert CapBelowCommitted();
-        budget.cap = uint128(newCap);
     }
 }

@@ -1361,7 +1361,7 @@ contract PaymasterHubSolidarityTest is Test {
     function testOnboardingRejectsNonZeroOrgId() public {
         hub.donateToSolidarity{value: 1 ether}();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, address(0));
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, address(0));
         bytes memory pmData = _buildPaymasterData(ORG_ALPHA, SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
         PackedUserOperation memory userOp = _buildUserOp(address(0xdead), "", pmData);
         userOp.initCode = hex"01";
@@ -1380,7 +1380,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, address(0));
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, address(0));
         address deployed = address(new DummySender());
         bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
         PackedUserOperation memory userOp = _buildUserOp(deployed, "", pmData);
@@ -1396,7 +1396,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, address(0));
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, address(0));
         address newAccount = address(0xbeef);
         bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
         PackedUserOperation memory userOp = _buildUserOp(newAccount, "", pmData);
@@ -1421,7 +1421,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 1, true, address(0));
+        hub.setOnboardingConfig(uint128(MAX_COST), 1, 0, true, address(0));
         address account1 = address(0xaa01);
         bytes memory pmData1 = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
         PackedUserOperation memory userOp1 = _buildUserOp(account1, "", pmData1);
@@ -1451,6 +1451,113 @@ contract PaymasterHubSolidarityTest is Test {
         hub.validatePaymasterUserOp(userOp3, keccak256("hash3"), MAX_COST);
     }
 
+    /*═══════════════════════ H4: per-account onboarding cap ═══════════════════════*/
+
+    /// @dev Build a minimal onboarding userOp for `account` (empty callData + initCode satisfies the
+    ///      registerAccount path; registry is address(0) so no callData parsing is required).
+    function _onboardingOp(address account) internal view returns (PackedUserOperation memory userOp) {
+        bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
+        userOp = _buildUserOp(account, "", pmData);
+        userOp.initCode = hex"01";
+    }
+
+    /// @notice A single sender cannot exceed its lifetime onboarding cap.
+    function testOnboardingPerAccountCapEnforced() public {
+        hub.donateToSolidarity{value: 1 ether}();
+        vm.prank(poaManager);
+        hub.unpauseSolidarityDistribution();
+        vm.prank(poaManager);
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 1, true, address(0)); // cap = 1 per account
+
+        address acct = address(0xbeef);
+        PackedUserOperation memory userOp = _onboardingOp(acct);
+
+        // first onboarding for this sender succeeds
+        vm.prank(address(entryPoint));
+        hub.validatePaymasterUserOp(userOp, keccak256("h1"), MAX_COST);
+
+        // second from the SAME sender is rejected by the per-account cap (daily limit is 10, so it's not that)
+        vm.prank(address(entryPoint));
+        vm.expectRevert(PaymasterHubErrors.OnboardingLimitExceeded.selector);
+        hub.validatePaymasterUserOp(userOp, keccak256("h2"), MAX_COST);
+    }
+
+    /// @notice maxOnboardingsPerAccount == 0 disables the per-account cap (unlimited) — preserves legacy behavior.
+    function testOnboardingCapZeroMeansUnlimited() public {
+        hub.donateToSolidarity{value: 1 ether}();
+        vm.prank(poaManager);
+        hub.unpauseSolidarityDistribution();
+        vm.prank(poaManager);
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, address(0)); // cap = 0 (unlimited)
+
+        address acct = address(0xbeef);
+        PackedUserOperation memory userOp = _onboardingOp(acct);
+
+        // repeated onboardings from the same sender all succeed (bounded only by the global daily limit)
+        for (uint256 i = 0; i < 4; i++) {
+            vm.prank(address(entryPoint));
+            hub.validatePaymasterUserOp(userOp, keccak256(abi.encode("h", i)), MAX_COST);
+        }
+    }
+
+    /// @notice The cap is tracked per sender — exhausting account A does not affect account B.
+    function testOnboardingCapIsolatedPerAccount() public {
+        hub.donateToSolidarity{value: 1 ether}();
+        vm.prank(poaManager);
+        hub.unpauseSolidarityDistribution();
+        vm.prank(poaManager);
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 1, true, address(0)); // cap = 1
+
+        PackedUserOperation memory opA = _onboardingOp(address(0xA11CE));
+        PackedUserOperation memory opB = _onboardingOp(address(0xB0B));
+
+        // A uses its single slot then is blocked
+        vm.prank(address(entryPoint));
+        hub.validatePaymasterUserOp(opA, keccak256("a1"), MAX_COST);
+        vm.prank(address(entryPoint));
+        vm.expectRevert(PaymasterHubErrors.OnboardingLimitExceeded.selector);
+        hub.validatePaymasterUserOp(opA, keccak256("a2"), MAX_COST);
+
+        // B is unaffected and can still onboard
+        vm.prank(address(entryPoint));
+        hub.validatePaymasterUserOp(opB, keccak256("b1"), MAX_COST);
+    }
+
+    /// @notice Security property: a FAILED (reverted) onboarding op still consumes the per-account cap.
+    ///         Unlike the daily throttle (which is refunded in postOp), the lifetime cap must NOT be refunded,
+    ///         because a reverted op still charges the solidarity fund — refunding would let an attacker drain
+    ///         the fund via repeated failing ops while keeping their count at zero.
+    function testOnboardingFailedOpStillConsumesPerAccountCap() public {
+        hub.donateToSolidarity{value: 1 ether}();
+        vm.prank(poaManager);
+        hub.unpauseSolidarityDistribution();
+        vm.prank(poaManager);
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 1, true, address(0)); // cap = 1
+
+        address acct = address(0xbeef);
+        PackedUserOperation memory userOp = _onboardingOp(acct);
+
+        // validate (count -> 1) then simulate a reverted execution via postOp
+        vm.prank(address(entryPoint));
+        (bytes memory ctx,) = hub.validatePaymasterUserOp(userOp, keccak256("h1"), MAX_COST);
+        vm.prank(address(entryPoint));
+        hub.postOp(IPaymaster.PostOpMode.opReverted, ctx, 50_000, 1);
+
+        // the same sender is STILL blocked — the failed op consumed the cap (no refund)
+        vm.prank(address(entryPoint));
+        vm.expectRevert(PaymasterHubErrors.OnboardingLimitExceeded.selector);
+        hub.validatePaymasterUserOp(userOp, keccak256("h2"), MAX_COST);
+    }
+
+    /// @notice setOnboardingConfig persists the per-account cap and it is reflected by the getter.
+    function testSetOnboardingConfigSetsPerAccountCap() public {
+        vm.prank(poaManager);
+        hub.setOnboardingConfig(uint128(MAX_COST), 5, 7, true, address(0xABCD));
+        assertEq(hub.getOnboardingConfig().maxOnboardingsPerAccount, 7);
+        assertEq(hub.getOnboardingConfig().dailyCreationLimit, 5);
+        assertTrue(hub.getOnboardingConfig().enabled);
+    }
+
     /// @notice Onboarding accepts valid registerAccount callData
     function testOnboardingAcceptsRegisterAccountCallData() public {
         address registry = address(0xCC);
@@ -1458,7 +1565,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, registry);
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, registry);
         address deployed = address(new DummySender());
         bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
         // Build execute(registryAddress, 0, registerAccount("alice"))
@@ -1478,7 +1585,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, registry);
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, registry);
         address deployed = address(new DummySender());
         bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
         // Build execute(wrongTarget, 0, registerAccount("alice"))
@@ -1498,7 +1605,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, registry);
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, registry);
         address deployed = address(new DummySender());
         bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
         // Build execute(registry, 0, someOtherFunction("data"))
@@ -1518,7 +1625,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, registry);
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, registry);
         address deployed = address(new DummySender());
         bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
         // Build arbitrary callData (not execute())
@@ -1952,7 +2059,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, address(0));
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, address(0));
 
         address newAccount = address(0xbeef);
         bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);
@@ -2016,7 +2123,7 @@ contract PaymasterHubSolidarityTest is Test {
         vm.prank(poaManager);
         hub.unpauseSolidarityDistribution();
         vm.prank(poaManager);
-        hub.setOnboardingConfig(uint128(MAX_COST), 10, true, address(0));
+        hub.setOnboardingConfig(uint128(MAX_COST), 10, 0, true, address(0));
 
         address newAccount = address(0xbeef);
         bytes memory pmData = _buildPaymasterData(bytes32(0), SUBJECT_TYPE_POA_ONBOARDING, bytes32(0), RULE_ID_GENERIC);

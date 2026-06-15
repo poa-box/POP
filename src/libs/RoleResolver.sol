@@ -30,31 +30,6 @@ library RoleResolver {
     }
 
     /**
-     * @notice Validates that all role indices are within bounds
-     * @param roleIndices Array of role indices to validate
-     * @param maxRoles Maximum number of roles in the organization
-     * @return valid True if all indices are valid
-     */
-    function validateRoleIndices(uint256[] memory roleIndices, uint256 maxRoles) internal pure returns (bool valid) {
-        uint256 length = roleIndices.length;
-        for (uint256 i = 0; i < length; i++) {
-            if (roleIndices[i] >= maxRoles) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * @notice Ensures array is not empty (for critical roles that must be assigned)
-     * @param roleIndices Array to check
-     * @return True if array has at least one element
-     */
-    function requireNonEmpty(uint256[] memory roleIndices) internal pure returns (bool) {
-        return roleIndices.length > 0;
-    }
-
-    /**
      * @notice Resolves a bitmap of role indices to their corresponding Hat IDs
      * @dev Uses bitmap where bit N represents role index N (supports up to 256 roles)
      * @param orgRegistry The OrgRegistry contract address

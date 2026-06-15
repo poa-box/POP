@@ -1146,7 +1146,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // consumes the vm.prank and createTask runs as the test contract.
         taskId = _nextTaskId(tm);
         vm.prank(executorAddr);
-        tm.createTask(2 ether, bytes("fresh-task"), bytes32(0), pid, address(0), 0, false);
+        tm.createTask(2 ether, bytes("fresh-task"), bytes32(0), pid, address(0), 0, false, 0, 0);
 
         vm.prank(claimerAddr);
         tm.claimTask(taskId);
@@ -1188,7 +1188,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // orgOwner wears EXECUTIVE → has global EDIT_FULL → can edit the CLAIMED task on the
         // fresh project (no per-project mask shadowing the global grant).
         vm.prank(orgOwner);
-        tm.updateTask(taskId, 25 ether, bytes("edited-at-deploy"), bytes32(0), address(0), 0);
+        tm.updateTask(taskId, 25 ether, bytes("edited-at-deploy"), bytes32(0), address(0), 0, 0, 0);
 
         // And updateTaskMetadata is also available to EDIT_FULL holders.
         vm.prank(orgOwner);
@@ -1217,7 +1217,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         vm.prank(orgOwner);
         vm.expectRevert(TaskManager.Unauthorized.selector);
-        tm.updateTask(taskId, 50 ether, bytes("nope"), bytes32(0), address(0), 0);
+        tm.updateTask(taskId, 50 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0);
     }
 
     function testBootstrapTaskManagerPerms_BootstrapProjectOverrideShadowsGlobalGrant() public {
@@ -1243,7 +1243,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         vm.prank(orgOwner);
         vm.expectRevert(TaskManager.Unauthorized.selector);
-        tm.updateTask(0, 25 ether, bytes("shadowed"), bytes32(0), address(0), 0);
+        tm.updateTask(0, 25 ether, bytes("shadowed"), bytes32(0), address(0), 0, 0, 0);
     }
 
     function testBootstrapTaskManagerPerms_EmptyRoleIndicesWithMasksRevertsAtomic() public {
@@ -1404,7 +1404,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         vm.prank(orgOwner);
         vm.expectRevert(TaskManager.Unauthorized.selector);
-        tm.updateTask(0, 50 ether, bytes("nope"), bytes32(0), address(0), 0);
+        tm.updateTask(0, 50 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0);
     }
 
     function testDeployFullOrgMismatchExecutorReverts() public {
@@ -1976,6 +1976,63 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         EligibilityModule(setup.eligibilityModule).claimVouchedHat(setup.defaultRoleHat);
 
         _assertWearingHat(candidate, setup.defaultRoleHat, true, "Candidate after claiming");
+    }
+
+    /// @notice H1 characterization test — locks the vouch-gating boundary and documents the exact misconfiguration
+    ///         the frontend must reject (vouching.enabled && combineWithHierarchy && defaultEligible == true).
+    /// @dev This is a TEST-ONLY guard. There is intentionally NO on-chain contract change for H1: a properly
+    ///      configured vouch-gated role (defaultEligible == false) is already un-self-claimable, and KUBI relies on
+    ///      the combineWithHierarchy semantics, so we do not touch getWearerStatus/claimVouchedHat. The dangerous
+    ///      combo is prevented in the UI (see the frontend role-config validation issue). If a future change ever
+    ///      makes a default-not-eligible vouch-gated hat self-claimable, this test fails.
+    function testVouchGatingBoundaryAndComboMisconfig() public {
+        TestOrgSetup memory setup = _createTestOrg("Vouch Gating Boundary DAO");
+        address stranger = address(0x5151);
+        address stranger2 = address(0x5252);
+        address voucher = voter1;
+        uint256 hat = setup.defaultRoleHat;
+
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, voucher);
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, stranger);
+        _setupUserForVouching(setup.eligibilityModule, setup.exec, stranger2);
+
+        // Delegate-shaped config: vouching on (quorum 1), combineWithHierarchy = TRUE, default NOT eligible.
+        // This mirrors DCP's live Delegate hat (vouching+combine, defaultEligible=false → gated).
+        _configureVouching(setup.eligibilityModule, setup.exec, hat, 1, setup.memberRoleHat, true, true);
+        _mintHat(setup.exec, setup.memberRoleHat, voucher);
+
+        // (1) A stranger with zero vouches is NOT eligible and CANNOT self-claim — the gate holds.
+        _assertEligibilityStatus(setup.eligibilityModule, stranger, hat, false, false, "stranger before vouch");
+        vm.prank(stranger);
+        vm.expectRevert(bytes("Not eligible to claim hat"));
+        EligibilityModule(setup.eligibilityModule).claimVouchedHat(hat);
+
+        // (2) After meeting the vouch quorum, the same stranger becomes eligible and can claim.
+        _vouchFor(voucher, setup.eligibilityModule, stranger, hat);
+        _assertEligibilityStatus(setup.eligibilityModule, stranger, hat, true, true, "stranger after vouch");
+        vm.prank(stranger);
+        EligibilityModule(setup.eligibilityModule).claimVouchedHat(hat);
+        _assertWearingHat(stranger, hat, true, "stranger after claim");
+
+        // (3) DOCUMENTED MISCONFIG the frontend must prevent: flipping defaultEligible to TRUE on this
+        //     vouching+combine hat makes a brand-new stranger eligible with ZERO vouches — defeating the quorum.
+        _assertEligibilityStatus(setup.eligibilityModule, stranger2, hat, false, false, "stranger2 before flip");
+        vm.prank(setup.exec);
+        EligibilityModule(setup.eligibilityModule).setDefaultEligibility(hat, true, true); // the dangerous flip
+        _assertEligibilityStatus(
+            setup.eligibilityModule, stranger2, hat, true, true, "stranger2 eligible with no vouches after flip"
+        );
+
+        // (4) Open-join path is unaffected: a hat with vouching DISABLED + defaultEligible=true is openly claimable
+        //     (this is the intended Neighbor/QuickJoin behavior and must keep working).
+        uint256 openHat = setup.executiveRoleHat;
+        vm.prank(setup.exec);
+        EligibilityModule(setup.eligibilityModule).configureVouching(openHat, 0, 0, false); // quorum 0 => disabled
+        vm.prank(setup.exec);
+        EligibilityModule(setup.eligibilityModule).setDefaultEligibility(openHat, true, true);
+        _assertEligibilityStatus(
+            setup.eligibilityModule, address(0x9999), openHat, true, true, "open-join hat: anyone eligible"
+        );
     }
 
     function testVouchingSystemHybridMode() public {
@@ -5685,7 +5742,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         PaymasterHub.OrgConfig memory orgConfig = paymasterHub.getOrgConfig(orgId);
         assertTrue(orgConfig.operatorHatId != 0, "Operator hat should be set");
 
-        // Verify auto-whitelisted rules exist for deployed contracts
+        // Verify auto-whitelisted rules exist for deployed contracts (helper keeps this
+        // function under the production-profile IR stack limit).
+        _assertAutoWhitelistRules(orgId, result);
+
+        // Verify deposit was also credited
+        PaymasterHub.OrgFinancials memory financials = paymasterHub.getOrgFinancials(orgId);
+        assertEq(financials.deposited, 0.05 ether, "Org should have 0.05 ETH deposited");
+    }
+
+    function _assertAutoWhitelistRules(bytes32 orgId, OrgDeployer.DeploymentResult memory result) internal view {
         PaymasterHub.Rule memory rule;
 
         // Check QuickJoin quickJoinWithUser() is whitelisted
@@ -5700,9 +5766,35 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)")));
         assertTrue(rule.allowed, "TaskManager setFolders should be whitelisted (v4 bootstrap)");
 
-        // Check TaskManager v5 post-claim edit functions are whitelisted
+        // Check TaskManager v6 create selectors (deadline params appended) are whitelisted
         rule = paymasterHub.getRule(
-            orgId, result.taskManager, bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)"))
+            orgId,
+            result.taskManager,
+            bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)"))
+        );
+        assertTrue(rule.allowed, "TaskManager createTask should be whitelisted (v6 deadlines)");
+        rule = paymasterHub.getRule(
+            orgId,
+            result.taskManager,
+            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])"))
+        );
+        assertTrue(rule.allowed, "TaskManager createTasksBatch should be whitelisted (v6 deadlines)");
+        rule = paymasterHub.getRule(
+            orgId,
+            result.taskManager,
+            bytes4(
+                keccak256(
+                    "createAndAssignTask(uint256,bytes,bytes32,bytes32,address,address,uint256,bool,uint48,uint32)"
+                )
+            )
+        );
+        assertTrue(rule.allowed, "TaskManager createAndAssignTask should be whitelisted (v6 deadlines)");
+
+        // Check TaskManager v5 post-claim edit functions are whitelisted (v6 updateTask signature)
+        rule = paymasterHub.getRule(
+            orgId,
+            result.taskManager,
+            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)"))
         );
         assertTrue(rule.allowed, "TaskManager updateTask should be whitelisted (v5 edit)");
         rule = paymasterHub.getRule(
@@ -5726,10 +5818,6 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // Check EducationHub completeModule is whitelisted
         rule = paymasterHub.getRule(orgId, result.educationHub, bytes4(keccak256("completeModule(uint256,uint8)")));
         assertTrue(rule.allowed, "EducationHub completeModule should be whitelisted");
-
-        // Verify deposit was also credited
-        PaymasterHub.OrgFinancials memory financials = paymasterHub.getOrgFinancials(orgId);
-        assertEq(financials.deposited, 0.05 ether, "Org should have 0.05 ETH deposited");
     }
 
     function testDeployFullOrgWithPaymasterFeeCaps() public {
@@ -6111,12 +6199,12 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // ── TaskManager (12) ──
         assertEq(
-            bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool)")),
+            bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)")),
             TaskManager.createTask.selector,
             "createTask selector mismatch"
         );
         assertEq(
-            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool)[])")),
+            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])")),
             TaskManager.createTasksBatch.selector,
             "createTasksBatch selector mismatch"
         );
@@ -6155,7 +6243,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             bytes4(keccak256("cancelTask(uint256)")), TaskManager.cancelTask.selector, "cancelTask selector mismatch"
         );
         assertEq(
-            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)")),
+            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)")),
             TaskManager.updateTask.selector,
             "updateTask selector mismatch"
         );
@@ -6524,21 +6612,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         uint32[] memory epochLens = new uint32[](1);
         epochLens[0] = 366 days; // Above MAX_EPOCH_LENGTH (365 days)
 
-        PaymasterHub.DeployConfig memory config = PaymasterHub.DeployConfig({
-            operatorHatId: 0,
-            maxFeePerGas: 0,
-            maxPriorityFeePerGas: 0,
-            maxCallGas: 0,
-            maxVerificationGas: 0,
-            maxPreVerificationGas: 0,
-            ruleTargets: new address[](0),
-            ruleSelectors: new bytes4[](0),
-            ruleAllowed: new bool[](0),
-            ruleMaxCallGasHints: new uint32[](0),
-            budgetSubjectKeys: keys,
-            budgetCapsPerEpoch: caps,
-            budgetEpochLens: epochLens
-        });
+        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        config.budgetSubjectKeys = keys;
+        config.budgetCapsPerEpoch = caps;
+        config.budgetEpochLens = epochLens;
 
         vm.prank(address(poaManager));
         vm.expectRevert(abi.encodeWithSignature("InvalidEpochLength()"));
@@ -6558,21 +6635,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         epochLens[0] = 1 days;
         epochLens[1] = 1 days;
 
-        PaymasterHub.DeployConfig memory config = PaymasterHub.DeployConfig({
-            operatorHatId: 0,
-            maxFeePerGas: 0,
-            maxPriorityFeePerGas: 0,
-            maxCallGas: 0,
-            maxVerificationGas: 0,
-            maxPreVerificationGas: 0,
-            ruleTargets: new address[](0),
-            ruleSelectors: new bytes4[](0),
-            ruleAllowed: new bool[](0),
-            ruleMaxCallGasHints: new uint32[](0),
-            budgetSubjectKeys: keys,
-            budgetCapsPerEpoch: caps,
-            budgetEpochLens: epochLens
-        });
+        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        config.budgetSubjectKeys = keys;
+        config.budgetCapsPerEpoch = caps;
+        config.budgetEpochLens = epochLens;
 
         vm.prank(address(poaManager));
         vm.expectRevert(abi.encodeWithSignature("ArrayLengthMismatch()"));
@@ -6590,32 +6656,21 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         uint32[] memory epochLens = new uint32[](1);
         epochLens[0] = 30 minutes; // Below MIN_EPOCH_LENGTH (1 hour)
 
-        PaymasterHub.DeployConfig memory config = PaymasterHub.DeployConfig({
-            operatorHatId: 0,
-            maxFeePerGas: 0,
-            maxPriorityFeePerGas: 0,
-            maxCallGas: 0,
-            maxVerificationGas: 0,
-            maxPreVerificationGas: 0,
-            ruleTargets: new address[](0),
-            ruleSelectors: new bytes4[](0),
-            ruleAllowed: new bool[](0),
-            ruleMaxCallGasHints: new uint32[](0),
-            budgetSubjectKeys: keys,
-            budgetCapsPerEpoch: caps,
-            budgetEpochLens: epochLens
-        });
+        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        config.budgetSubjectKeys = keys;
+        config.budgetCapsPerEpoch = caps;
+        config.budgetEpochLens = epochLens;
 
         vm.prank(address(poaManager));
         vm.expectRevert(abi.encodeWithSignature("InvalidEpochLength()"));
         paymasterHub.registerAndConfigureOrg(orgId, 1, config);
     }
 
-    function testRegisterAndConfigureOrgUnauthorized() public {
-        // Non-registrar cannot call registerAndConfigureOrg directly
-        bytes32 orgId = keccak256("UNAUTH-ORG");
-
-        PaymasterHub.DeployConfig memory config = PaymasterHub.DeployConfig({
+    /// @dev An empty PaymasterHub.DeployConfig. Extracted into its own frame so callers don't build the
+    ///      14-field struct (+ its abi-encoding) inline — that pushed `testRegisterAndConfigureOrgUnauthorized`
+    ///      exactly 1 slot too deep under the production via-IR + optimizer profile.
+    function _emptyDeployConfig() internal pure returns (PaymasterHub.DeployConfig memory) {
+        return PaymasterHub.DeployConfig({
             operatorHatId: 0,
             maxFeePerGas: 0,
             maxPriorityFeePerGas: 0,
@@ -6630,6 +6685,13 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             budgetCapsPerEpoch: new uint128[](0),
             budgetEpochLens: new uint32[](0)
         });
+    }
+
+    function testRegisterAndConfigureOrgUnauthorized() public {
+        // Non-registrar cannot call registerAndConfigureOrg directly
+        bytes32 orgId = keccak256("UNAUTH-ORG");
+
+        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
 
         // Random address should be rejected
         vm.prank(address(0xBEEF));
@@ -6647,21 +6709,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         bytes4[] memory sels = new bytes4[](1); // Length mismatch!
         sels[0] = bytes4(0x12345678);
 
-        PaymasterHub.DeployConfig memory config = PaymasterHub.DeployConfig({
-            operatorHatId: 0,
-            maxFeePerGas: 0,
-            maxPriorityFeePerGas: 0,
-            maxCallGas: 0,
-            maxVerificationGas: 0,
-            maxPreVerificationGas: 0,
-            ruleTargets: targets,
-            ruleSelectors: sels,
-            ruleAllowed: new bool[](2),
-            ruleMaxCallGasHints: new uint32[](2),
-            budgetSubjectKeys: new bytes32[](0),
-            budgetCapsPerEpoch: new uint128[](0),
-            budgetEpochLens: new uint32[](0)
-        });
+        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        config.ruleTargets = targets;
+        config.ruleSelectors = sels;
+        config.ruleAllowed = new bool[](2);
+        config.ruleMaxCallGasHints = new uint32[](2);
 
         // Call as poaManager (authorized)
         vm.prank(address(poaManager));
