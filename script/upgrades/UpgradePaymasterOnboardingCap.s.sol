@@ -23,15 +23,14 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
 // post-upgrade) keeps sponsoring onboarding until an admin sets a cap — Step3/Step4
 // set the cap to activate the protection.
 //
-// Validated: Sim_GnosisUpgrade PASSES under FOUNDRY_PROFILE=production via `forge script`
-// (scoped compile of this script + its src deps) against a live Gnosis fork — i.e. a real
-// production-profile sim, broadcast-representative bytecode. Run it with:
-//   FOUNDRY_PROFILE=production forge script \
-//     script/upgrades/UpgradePaymasterOnboardingCap.s.sol:Sim_GnosisUpgrade --fork-url gnosis
-// Note: a full-project `FOUNDRY_PROFILE=production forge build` currently fails with a
-// Stack-too-deep in an unrelated NON-deployable test/script file (all of src/ compiles
-// clean under production, and CI gates on the default profile), so it does not affect this
-// scoped broadcast — but if you want a clean full production build, that file needs a fix.
+// Validated: Sim_GnosisUpgrade (Gnosis) and Sim_ArbitrumUpgrade (Arbitrum) both PASS under
+// FOUNDRY_PROFILE=production against live forks, pranking the REAL Step3/Step4 signer (the admin
+// EOA that owns the Gnosis Satellite and the Arbitrum Hub). They exercise the exact destination
+// effect + cap-activation call paths the broadcast uses. Run:
+//   FOUNDRY_PROFILE=production forge script .../UpgradePaymasterOnboardingCap.s.sol:Sim_GnosisUpgrade  --fork-url gnosis
+//   FOUNDRY_PROFILE=production forge script .../UpgradePaymasterOnboardingCap.s.sol:Sim_ArbitrumUpgrade --fork-url arbitrum
+// The full-project `FOUNDRY_PROFILE=production forge build` is also clean (the DeployerTest
+// stack-too-deep that previously blocked it is fixed in this same PR).
 //
 // Version: v18 (probed free on Gnosis + Arbitrum, both registry and CREATE2, 2026-06-09).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,8 +42,18 @@ address constant ARB_PAYMASTER = 0xD6659bCaFAdCB9CC2F57B7aE923c7F1Ca4438a11;
 address constant GNOSIS_PAYMASTER = 0xdEf1038C297493c0b5f82F0CDB49e929B53B4108;
 address constant GNOSIS_POA_MANAGER = 0x794fD39e75140ee1545B1B022E5486B7c863789b;
 uint256 constant HYPERLANE_FEE = 0.005 ether;
+address constant GNOSIS_SATELLITE = 0x4Ad70029a9247D369a5bEA92f90840B9ee58eD06; // PoaManagerSatellite on Gnosis (owner = admin EOA)
+address constant ARB_POA_MANAGER = 0xFF585Fae4A944cD173B19158C6FC5E08980b0815; // PoaManager on Arbitrum (owned by the Hub)
 string constant VERSION = "v18";
 uint8 constant MAX_ONBOARDINGS_PER_ACCOUNT = 3; // register + profile + 1 retry
+
+/// @dev Minimal Gnosis Satellite interface. On Gnosis the Satellite is the PaymasterHub's poaManager, so admin
+///      calls go Hudson(EOA, Satellite.owner) -> Satellite.adminCall(PaymasterHub, ...) — same shape as the
+///      Arbitrum Hub.adminCall path. (Mirrors the proven AddSetFoldersSelectorRules / grace-fix patterns.)
+interface IGnosisSatellite {
+    function owner() external view returns (address);
+    function adminCall(address target, bytes calldata data) external returns (bytes memory);
+}
 
 /// @title Step1_DeployImplOnGnosis — deploy PaymasterHub v18 impl on Gnosis via DD.
 /// Usage: FOUNDRY_PROFILE=production forge script .../UpgradePaymasterOnboardingCap.s.sol:Step1_DeployImplOnGnosis --rpc-url gnosis --broadcast --slow --optimizer-runs 200
@@ -105,9 +114,12 @@ contract Step3_SetCapGnosis is Script {
         PaymasterHub.OnboardingConfig memory c = pm.getOnboardingConfig();
         console.log("Gnosis onboarding pre-set: maxOnboardingsPerAccount =", c.maxOnboardingsPerAccount);
 
+        require(IGnosisSatellite(GNOSIS_SATELLITE).owner() == vm.addr(deployerKey), "signer must own the Satellite");
+
         vm.startBroadcast(deployerKey);
+        // Gnosis admin path: Satellite (which is the Gnosis PaymasterHub's poaManager) calls it directly.
         // Re-set onboarding config, preserving all existing values and only adding the cap.
-        PoaManager(GNOSIS_POA_MANAGER)
+        IGnosisSatellite(GNOSIS_SATELLITE)
             .adminCall(
                 GNOSIS_PAYMASTER,
                 abi.encodeWithSignature(
@@ -199,19 +211,24 @@ contract Sim_GnosisUpgrade is Script {
         require(mid.maxOnboardingsPerAccount == 0, "Sim: appended field should read 0 (unlimited) pre-config");
         console.log("OK: upgrade preserved onboarding storage; cap defaults to 0 (unlimited).");
 
-        // 3. Activate the cap via the PoaManager admin path and assert it took effect.
-        vm.prank(owner);
-        poa.adminCall(
-            GNOSIS_PAYMASTER,
-            abi.encodeWithSignature(
-                "setOnboardingConfig(uint128,uint128,uint8,bool,address)",
-                mid.maxGasPerCreation,
-                mid.dailyCreationLimit,
-                MAX_ONBOARDINGS_PER_ACCOUNT,
-                mid.enabled,
-                mid.accountRegistry
-            )
-        );
+        // 3. Activate the cap via the EXACT path Step3 broadcasts: the Satellite owner (the admin EOA) calls
+        //    Satellite.adminCall(PaymasterHub, setOnboardingConfig). The Satellite is the Gnosis PaymasterHub's
+        //    poaManager, so this exercises the real broadcast signer + call path (not a pranked manager).
+        address satOwner = IGnosisSatellite(GNOSIS_SATELLITE).owner();
+        console.log("Gnosis Satellite owner (Step3 signer):", satOwner);
+        vm.prank(satOwner);
+        IGnosisSatellite(GNOSIS_SATELLITE)
+            .adminCall(
+                GNOSIS_PAYMASTER,
+                abi.encodeWithSignature(
+                    "setOnboardingConfig(uint128,uint128,uint8,bool,address)",
+                    mid.maxGasPerCreation,
+                    mid.dailyCreationLimit,
+                    MAX_ONBOARDINGS_PER_ACCOUNT,
+                    mid.enabled,
+                    mid.accountRegistry
+                )
+            );
         PaymasterHub.OnboardingConfig memory post = pm.getOnboardingConfig();
         require(post.maxOnboardingsPerAccount == MAX_ONBOARDINGS_PER_ACCOUNT, "Sim: cap not applied");
         require(post.maxGasPerCreation == preMaxGas, "Sim: config clobbered while setting cap");
@@ -219,5 +236,63 @@ contract Sim_GnosisUpgrade is Script {
 
         console.log("PASS: v18 upgrade + cap activation validated against live Gnosis state.");
         console.log("POST maxOnboardingsPerAccount:", post.maxOnboardingsPerAccount);
+    }
+}
+
+/**
+ * @title Sim_ArbitrumUpgrade
+ * @notice Arbitrum counterpart of Sim_GnosisUpgrade: validates the v18 beacon upgrade (destination effect via the
+ *         Hub-owned Arbitrum PoaManager) preserves onboarding storage, and that Step4's cap activation
+ *         (Hub.adminCall as the Hub owner — the real Step4 signer) takes effect. Run under production profile:
+ *         FOUNDRY_PROFILE=production forge script .../:Sim_ArbitrumUpgrade --fork-url arbitrum -vvv
+ */
+contract Sim_ArbitrumUpgrade is Script {
+    function run() public {
+        PaymasterHub pm = PaymasterHub(payable(ARB_PAYMASTER));
+        PoaManager poa = PoaManager(ARB_POA_MANAGER);
+
+        (bool ok, bytes memory raw) = ARB_PAYMASTER.staticcall(abi.encodeWithSignature("getOnboardingConfig()"));
+        require(ok, "Sim: pre-upgrade getOnboardingConfig() failed");
+        (uint128 preMaxGas, uint128 preDailyLimit,,, bool preEnabled, address preRegistry) =
+            abi.decode(raw, (uint128, uint128, uint128, uint32, bool, address));
+
+        // 1. Deploy + upgrade the Arbitrum beacon (the Hub owns the Arbitrum PoaManager, exactly as
+        //    upgradeBeaconCrossChain does locally before broadcasting to satellites).
+        address newImpl = address(new PaymasterHub());
+        vm.prank(HUB);
+        poa.upgradeBeacon("PaymasterHub", newImpl, VERSION);
+        require(poa.getCurrentImplementationById(keccak256("PaymasterHub")) == newImpl, "Sim: arb beacon not upgraded");
+
+        // 2. Storage preserved + appended field reads 0 (unlimited).
+        PaymasterHub.OnboardingConfig memory mid = pm.getOnboardingConfig();
+        require(
+            mid.maxGasPerCreation == preMaxGas && mid.dailyCreationLimit == preDailyLimit
+                && mid.accountRegistry == preRegistry && mid.enabled == preEnabled,
+            "Sim: arb onboarding storage drifted"
+        );
+        require(mid.maxOnboardingsPerAccount == 0, "Sim: arb appended field should read 0");
+
+        // 3. Activate cap via the EXACT Step4 path: Hub owner (admin EOA) -> Hub.adminCall(PaymasterHub, ...).
+        address hubOwner = PoaManagerHub(payable(HUB)).owner();
+        console.log("Arbitrum Hub owner (Step4 signer):", hubOwner);
+        vm.prank(hubOwner);
+        PoaManagerHub(payable(HUB))
+            .adminCall(
+                ARB_PAYMASTER,
+                abi.encodeWithSignature(
+                    "setOnboardingConfig(uint128,uint128,uint8,bool,address)",
+                    mid.maxGasPerCreation,
+                    mid.dailyCreationLimit,
+                    MAX_ONBOARDINGS_PER_ACCOUNT,
+                    mid.enabled,
+                    mid.accountRegistry
+                )
+            );
+        PaymasterHub.OnboardingConfig memory post = pm.getOnboardingConfig();
+        require(post.maxOnboardingsPerAccount == MAX_ONBOARDINGS_PER_ACCOUNT, "Sim: arb cap not applied");
+        require(
+            post.maxGasPerCreation == preMaxGas && post.dailyCreationLimit == preDailyLimit, "Sim: arb config clobbered"
+        );
+        console.log("PASS: v18 upgrade + cap activation validated against live Arbitrum state.");
     }
 }

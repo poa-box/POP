@@ -138,8 +138,6 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     /*═══════════════════════════════════════ FLAG CONSTANTS ═══════════════════════════════════════*/
 
-    uint8 private constant ELIGIBLE_FLAG = 0x01; // bit 0
-    uint8 private constant STANDING_FLAG = 0x02; // bit 1
     uint8 private constant ENABLED_FLAG = 0x01; // bit 0
     uint8 private constant COMBINE_HIERARCHY_FLAG = 0x02; // bit 1
 

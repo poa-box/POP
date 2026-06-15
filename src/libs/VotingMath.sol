@@ -14,7 +14,6 @@ library VotingMath {
     error InvalidIndex();
     error InvalidWeight();
     error WeightSumNot100(uint256 sum);
-    error Overflow();
     error TargetSelf();
     error TargetNotAllowed();
     error LengthMismatch();
