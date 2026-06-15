@@ -229,6 +229,13 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         l.accountRegistry = IUniversalAccountRegistry(accountRegistry_);
         l.universalFactory = IUniversalPasskeyAccountFactory(universalFactory_);
 
+        // Emit the initial wiring as events (mirrors the setters) so indexers can observe config
+        // changes from event logs rather than on-chain reads. (Init rules already emit below.)
+        emit VerifierUpdated(verifier_);
+        emit DKIMRegistryUpdated(dkimRegistry_);
+        emit AccountRegistryUpdated(accountRegistry_);
+        emit UniversalFactoryUpdated(universalFactory_);
+
         // Pre-load any deploy-time rules. Same validation as the executor-gated setters —
         // a malformed rule (empty domain / empty hats) reverts the whole deployment (loud).
         for (uint256 i; i < domainRules_.length; ++i) {

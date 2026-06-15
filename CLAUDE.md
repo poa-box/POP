@@ -20,6 +20,7 @@
 - Every upgradeable contract constructor MUST call `_disableInitializers()`
 - Use named imports only: `import {Foo} from "./Foo.sol";` — never `import "./Foo.sol";`
 - Commit style: conventional commits with PR numbers — `feat: description (#123)`, `fix: ...`, `refactor: ...`
+- Emit an event for EVERY state change the subgraph might index — including inside `initialize()` and every setter, not just "loud" mutations. The subgraph indexes from event logs; never make it fall back to `eth_call`s (they slow indexing, require an archive node, and fail silently). If `initialize` sets config or seeds rules, emit the same events the setters do (mirror them). See **Events & subgraph indexing** under Subgraph for the per-org-module template-ordering caveat.
 
 ## Gotchas
 
@@ -148,6 +149,13 @@ When you need to find an org's deployed contract addresses (TaskManager, Executo
 - Manifest (chain network names + start blocks): https://github.com/poa-box/subgraph-pop/blob/main/pop-subgraph/subgraph.yaml
 
 Each chain runs its own subgraph — Poa governance lives on Arbitrum, KUBI/Test6/etc. on Gnosis. Query the chain where the org was deployed.
+
+### Events & subgraph indexing
+
+When adding or changing a contract the subgraph indexes, emit events for ALL state changes (config, rules, wiring) so mappings read them from logs — never make the subgraph `eth_call` to recover state (slow, needs an archive node, fails silently). Two things that bite here:
+
+- **Emit in `initialize()` too, not just setters.** A setter that emits while `initialize()` sets the same state silently makes the deploy-time snapshot invisible to indexers. Mirror the setter's event inside `initialize` (e.g. `ZkEmailInvites.initialize` emits `VerifierUpdated`/`DKIMRegistryUpdated`/… next to the rule events).
+- **Per-org module template-ordering.** A per-org module's subgraph data-source template is created when the module is registered in `OrgRegistry` (`ContractRegistered`), which fires *after* the module's `initialize()` in the deploy tx — so `initialize` events are **not** backfilled by the template. The contract stays the source of truth for the initial snapshot; the subgraph indexes *changes* from registration onward. Design for this (don't paper over it with `eth_call`s): keep config/rules observable via post-registration events, or accept the initial-snapshot gap (the `ZkEmailInvitesContract` config fields are nullable for exactly this reason).
 
 Quick recipe — find an org's TaskManager + Executor + QuickJoin from its `orgId`:
 
