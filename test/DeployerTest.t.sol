@@ -17,6 +17,8 @@ import {Executor} from "../src/Executor.sol";
 import {ParticipationToken} from "../src/ParticipationToken.sol";
 import {QuickJoin} from "../src/QuickJoin.sol";
 import {TaskManager} from "../src/TaskManager.sol";
+import {TaskManagerLens} from "../src/lens/TaskManagerLens.sol";
+import {TaskPerm} from "../src/libs/TaskPerm.sol";
 import {EducationHub} from "../src/EducationHub.sol";
 import {PaymentManager} from "../src/PaymentManager.sol";
 import {IPaymentManager} from "../src/interfaces/IPaymentManager.sol";
@@ -184,7 +186,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -282,6 +285,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             new ITaskManagerBootstrap.BootstrapProjectConfig[](0);
         ITaskManagerBootstrap.BootstrapTaskConfig[] memory tasks = new ITaskManagerBootstrap.BootstrapTaskConfig[](0);
         return OrgDeployer.BootstrapConfig({projects: projects, tasks: tasks});
+    }
+
+    function _emptyTaskManagerPerms() internal pure returns (OrgDeployer.TaskManagerPermConfig memory) {
+        return OrgDeployer.TaskManagerPermConfig({roleIndices: new uint256[](0), masks: new uint8[](0)});
     }
 
     /// @dev Helper to build bootstrap config with one project and two tasks
@@ -442,7 +449,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -503,7 +511,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -868,7 +877,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1001,7 +1011,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _buildBootstrapWithTasks(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1049,6 +1060,353 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         ITaskManagerBootstrap(result.taskManager).clearDeployer();
     }
 
+    /*━━━━━━━━━━━━━━━━━━━━ taskManagerPerms bootstrap (v5) ━━━━━━━━━━━━━━━━━━━━*/
+
+    /// @dev Common builder for a deploy that grants `mask` to the role at `roleIndex` globally.
+    function _buildParamsWithTaskPerm(uint256 roleIndex, uint8 mask)
+        internal
+        view
+        returns (OrgDeployer.DeploymentParams memory params)
+    {
+        string[] memory names = new string[](2);
+        names[0] = "DEFAULT";
+        names[1] = "EXECUTIVE";
+        string[] memory images = new string[](2);
+        images[0] = "ipfs://default";
+        images[1] = "ipfs://executive";
+        bool[] memory voting = new bool[](2);
+        voting[0] = true;
+        voting[1] = true;
+
+        uint256[] memory roleIndices = new uint256[](1);
+        roleIndices[0] = roleIndex;
+        uint8[] memory masks = new uint8[](1);
+        masks[0] = mask;
+
+        params = OrgDeployer.DeploymentParams({
+            orgId: ORG_ID,
+            orgName: "v5-bootstrap-perms",
+            metadataHash: bytes32(0),
+            registryAddr: accountRegProxy,
+            deployerAddress: orgOwner,
+            deployerUsername: "",
+            regDeadline: 0,
+            regNonce: 0,
+            regSignature: "",
+            autoUpgrade: true,
+            hybridThresholdPct: 50,
+            ddThresholdPct: 50,
+            hybridClasses: _buildLegacyClasses(50, 50, false, 4 ether),
+            ddInitialTargets: new address[](0),
+            roles: _buildSimpleRoleConfigs(names, images, voting),
+            roleAssignments: _buildDefaultRoleAssignments(),
+            metadataAdminRoleIndex: type(uint256).max,
+            passkeyEnabled: false,
+            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
+            bootstrap: _buildBootstrapWithTasks(),
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+        });
+    }
+
+    /// @dev Create a fresh project + task post-deploy with no per-project mask for the editor hat
+    ///      (so the global ROLE_PERM grant isn't shadowed). Uses the executor as creator/PM to
+    ///      avoid leaking per-project perms to any role we care about, and to give the test a
+    ///      caller that bypasses createTask's permission gate. The claimer is then a hat wearer
+    ///      whose hat IS in claimHats. Returns the fresh pid and the claimed task id.
+    function _createFreshProjectAndClaim(
+        TaskManager tm,
+        address executorAddr,
+        uint256 claimerHatId,
+        address claimerAddr
+    ) internal returns (bytes32 pid, uint256 taskId) {
+        uint256[] memory clHats = new uint256[](1);
+        clHats[0] = claimerHatId;
+
+        // Executor creates the project — bypasses createProject's creator-hat gate. We
+        // deliberately pass empty createHats so no role gets a per-project CREATE mask that
+        // could shadow a global grant we want to test.
+        vm.prank(executorAddr);
+        pid = tm.createProject(
+            TaskManager.BootstrapProjectConfig({
+                title: bytes("fresh"),
+                metadataHash: bytes32(0),
+                cap: 100 ether,
+                managers: new address[](0),
+                createHats: new uint256[](0),
+                claimHats: clHats,
+                reviewHats: new uint256[](0),
+                assignHats: new uint256[](0),
+                bountyTokens: new address[](0),
+                bountyCaps: new uint256[](0)
+            })
+        );
+
+        // Compute the next task id BEFORE pranking, otherwise the staticcall inside _nextTaskId
+        // consumes the vm.prank and createTask runs as the test contract.
+        taskId = _nextTaskId(tm);
+        vm.prank(executorAddr);
+        tm.createTask(2 ether, bytes("fresh-task"), bytes32(0), pid, address(0), 0, false);
+
+        vm.prank(claimerAddr);
+        tm.claimTask(taskId);
+    }
+
+    /// @dev Probe the next available task id without relying on internal storage.
+    function _nextTaskId(TaskManager tm) internal view returns (uint256 id) {
+        for (uint256 i; i < 1_000_000; ++i) {
+            (bool ok,) = address(tm)
+                .staticcall(abi.encodeWithSelector(TaskManager.getLensData.selector, uint8(1), abi.encode(i)));
+            if (!ok) return i;
+        }
+        revert("no available task id");
+    }
+
+    function testBootstrapTaskManagerPerms_GrantsEditFullAtDeployTime() public {
+        // Grant EDIT_FULL to EXECUTIVE (role 1) at deploy time. orgOwner wears EXECUTIVE.
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(1, TaskPerm.EDIT_FULL);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        TaskManager tm = TaskManager(result.taskManager);
+
+        // Pre-flight: orgOwner must wear EXECUTIVE for the rest of this test to mean anything.
+        uint256 executiveHat = orgRegistry.getRoleHat(ORG_ID, 1);
+        require(IHats(SEPOLIA_HATS).isWearerOfHat(orgOwner, executiveHat), "orgOwner must wear EXECUTIVE");
+
+        // QuickJoin a member who'll claim the fresh task.
+        address member = makeAddr("v5-member");
+        vm.prank(result.executor);
+        QuickJoin(result.quickJoin).quickJoinNoUserMasterDeploy(member);
+
+        // Create a fresh project with no per-project perms for any role — global EDIT_FULL
+        // grant for EXECUTIVE applies via _permMask's fallback path.
+        uint256 defaultHat = orgRegistry.getRoleHat(ORG_ID, 0);
+        (, uint256 taskId) = _createFreshProjectAndClaim(tm, result.executor, defaultHat, member);
+
+        // orgOwner wears EXECUTIVE → has global EDIT_FULL → can edit the CLAIMED task on the
+        // fresh project (no per-project mask shadowing the global grant).
+        vm.prank(orgOwner);
+        tm.updateTask(taskId, 25 ether, bytes("edited-at-deploy"), bytes32(0), address(0), 0);
+
+        // And updateTaskMetadata is also available to EDIT_FULL holders.
+        vm.prank(orgOwner);
+        tm.updateTaskMetadata(taskId, bytes("meta-edit"), bytes32(uint256(0xfeed)));
+    }
+
+    function testBootstrapTaskManagerPerms_GrantsEditMetaOnlyAtDeployTime() public {
+        // Grant EDIT_META (not EDIT_FULL) to EXECUTIVE.
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(1, TaskPerm.EDIT_META);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        TaskManager tm = TaskManager(result.taskManager);
+
+        address member = makeAddr("v5-member-meta");
+        vm.prank(result.executor);
+        QuickJoin(result.quickJoin).quickJoinNoUserMasterDeploy(member);
+
+        uint256 defaultHat = orgRegistry.getRoleHat(ORG_ID, 0);
+        (, uint256 taskId) = _createFreshProjectAndClaim(tm, result.executor, defaultHat, member);
+
+        // EDIT_META only — metadata edit succeeds, full edit reverts.
+        vm.prank(orgOwner);
+        tm.updateTaskMetadata(taskId, bytes("meta-only"), bytes32(uint256(0xab)));
+
+        vm.prank(orgOwner);
+        vm.expectRevert(TaskManager.Unauthorized.selector);
+        tm.updateTask(taskId, 50 ether, bytes("nope"), bytes32(0), address(0), 0);
+    }
+
+    function testBootstrapTaskManagerPerms_BootstrapProjectOverrideShadowsGlobalGrant() public {
+        // CRITICAL CAVEAT: if a bootstrap project ALSO sets per-project perms for the same hat,
+        // the project mask replaces the global mask in _permMask. The global EDIT_FULL grant is
+        // silently shadowed on that project. To get EDIT_FULL on a bootstrap project, the operator
+        // must call setProjectRolePerm(pid, hat, existingMask | EDIT_FULL) post-deploy. This test
+        // pins that behavior so the caveat doesn't regress.
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(1, TaskPerm.EDIT_FULL);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        TaskManager tm = TaskManager(result.taskManager);
+
+        // Bootstrap task 0 is in the bootstrap project, which set per-project perms for EXECUTIVE
+        // (createHats/claimHats/etc.). The global EDIT_FULL grant is shadowed there.
+        address member = makeAddr("v5-shadow-member");
+        vm.prank(result.executor);
+        QuickJoin(result.quickJoin).quickJoinNoUserMasterDeploy(member);
+        vm.prank(member);
+        tm.claimTask(0);
+
+        vm.prank(orgOwner);
+        vm.expectRevert(TaskManager.Unauthorized.selector);
+        tm.updateTask(0, 25 ether, bytes("shadowed"), bytes32(0), address(0), 0);
+    }
+
+    function testBootstrapTaskManagerPerms_EmptyRoleIndicesWithMasksRevertsAtomic() public {
+        // Regression: an earlier draft only entered the bootstrapGlobalPerms branch when
+        // roleIndices.length > 0, which silently dropped a malformed config that had empty
+        // roleIndices + non-empty masks. The deploy must revert atomically so the misconfig
+        // surfaces immediately.
+        vm.startPrank(orgOwner);
+
+        string[] memory names = new string[](2);
+        names[0] = "DEFAULT";
+        names[1] = "EXECUTIVE";
+        string[] memory images = new string[](2);
+        images[0] = "ipfs://default";
+        images[1] = "ipfs://executive";
+        bool[] memory voting = new bool[](2);
+        voting[0] = true;
+        voting[1] = true;
+
+        // Empty roleIndices + non-empty masks — the malformed-config case.
+        uint256[] memory roleIndices = new uint256[](0);
+        uint8[] memory masks = new uint8[](1);
+        masks[0] = TaskPerm.EDIT_FULL;
+
+        OrgDeployer.DeploymentParams memory params = OrgDeployer.DeploymentParams({
+            orgId: ORG_ID,
+            orgName: "v5-empty-roles-masks",
+            metadataHash: bytes32(0),
+            registryAddr: accountRegProxy,
+            deployerAddress: orgOwner,
+            deployerUsername: "",
+            regDeadline: 0,
+            regNonce: 0,
+            regSignature: "",
+            autoUpgrade: true,
+            hybridThresholdPct: 50,
+            ddThresholdPct: 50,
+            hybridClasses: _buildLegacyClasses(50, 50, false, 4 ether),
+            ddInitialTargets: new address[](0),
+            roles: _buildSimpleRoleConfigs(names, images, voting),
+            roleAssignments: _buildDefaultRoleAssignments(),
+            metadataAdminRoleIndex: type(uint256).max,
+            passkeyEnabled: false,
+            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
+            bootstrap: _emptyBootstrap(),
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+        });
+
+        vm.expectRevert(TaskManager.ArrayLengthMismatch.selector);
+        deployer.deployFullOrg(params);
+        vm.stopPrank();
+    }
+
+    function testBootstrapTaskManagerPerms_LengthMismatchRevertsAtomicDeploy() public {
+        vm.startPrank(orgOwner);
+
+        string[] memory names = new string[](2);
+        names[0] = "DEFAULT";
+        names[1] = "EXECUTIVE";
+        string[] memory images = new string[](2);
+        images[0] = "ipfs://default";
+        images[1] = "ipfs://executive";
+        bool[] memory voting = new bool[](2);
+        voting[0] = true;
+        voting[1] = true;
+
+        uint256[] memory roleIndices = new uint256[](2);
+        roleIndices[0] = 0;
+        roleIndices[1] = 1;
+        uint8[] memory masks = new uint8[](1); // mismatched length
+        masks[0] = TaskPerm.EDIT_FULL;
+
+        OrgDeployer.DeploymentParams memory params = OrgDeployer.DeploymentParams({
+            orgId: ORG_ID,
+            orgName: "v5-bad-perms",
+            metadataHash: bytes32(0),
+            registryAddr: accountRegProxy,
+            deployerAddress: orgOwner,
+            deployerUsername: "",
+            regDeadline: 0,
+            regNonce: 0,
+            regSignature: "",
+            autoUpgrade: true,
+            hybridThresholdPct: 50,
+            ddThresholdPct: 50,
+            hybridClasses: _buildLegacyClasses(50, 50, false, 4 ether),
+            ddInitialTargets: new address[](0),
+            roles: _buildSimpleRoleConfigs(names, images, voting),
+            roleAssignments: _buildDefaultRoleAssignments(),
+            metadataAdminRoleIndex: type(uint256).max,
+            passkeyEnabled: false,
+            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
+            bootstrap: _emptyBootstrap(),
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+        });
+
+        // The whole deploy reverts atomically — no partial state.
+        vm.expectRevert(TaskManager.ArrayLengthMismatch.selector);
+        deployer.deployFullOrg(params);
+        vm.stopPrank();
+    }
+
+    function testBootstrapTaskManagerPerms_InvalidRoleIndexReverts() public {
+        vm.startPrank(orgOwner);
+
+        // Role index 99 is out of bounds (only 2 roles defined).
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(99, TaskPerm.EDIT_FULL);
+
+        vm.expectRevert(bytes("Invalid role index in bootstrap config"));
+        deployer.deployFullOrg(params);
+        vm.stopPrank();
+    }
+
+    function testBootstrapTaskManagerPerms_GrantedHatIsEnumeratedPostDeploy() public {
+        // After deploy, the granted hat should be in permissionHatIds (so setProjectRolePerm
+        // and other downstream consumers can iterate it correctly).
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(1, TaskPerm.EDIT_FULL);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        TaskManager tm = TaskManager(result.taskManager);
+        TaskManagerLens permsLens = new TaskManagerLens();
+        uint256[] memory permHats =
+            abi.decode(permsLens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[]));
+
+        // Bootstrap also added per-project perms for createHats/claimHats/etc, so we just assert
+        // that the granted EXECUTIVE hat is present.
+        uint256 executiveHatId = orgRegistry.getRoleHat(ORG_ID, 1);
+        bool found;
+        for (uint256 i; i < permHats.length; ++i) {
+            if (permHats[i] == executiveHatId) {
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "executive hat enumerated after bootstrap");
+    }
+
+    function testBootstrapTaskManagerPerms_EmptyArraysSkipsTheCall() public {
+        // Backwards-compat: empty taskManagerPerms = no grants, no revert (existing deploys work).
+        vm.startPrank(orgOwner);
+        OrgDeployer.DeploymentParams memory params = _buildParamsWithTaskPerm(0, 0); // overwritten below
+        params.taskManagerPerms = _emptyTaskManagerPerms();
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        vm.stopPrank();
+
+        // Deploy succeeded. Without any global EDIT_FULL grant, post-claim edits revert.
+        TaskManager tm = TaskManager(result.taskManager);
+
+        address member = makeAddr("v5-empty-member");
+        vm.prank(result.executor);
+        QuickJoin(result.quickJoin).quickJoinNoUserMasterDeploy(member);
+        vm.prank(member);
+        tm.claimTask(0);
+
+        vm.prank(orgOwner);
+        vm.expectRevert(TaskManager.Unauthorized.selector);
+        tm.updateTask(0, 50 ether, bytes("nope"), bytes32(0), address(0), 0);
+    }
+
     function testDeployFullOrgMismatchExecutorReverts() public {
         _deployFullOrg();
         address other = address(99);
@@ -1090,7 +1448,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -1134,7 +1493,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1221,7 +1581,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1501,7 +1862,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1719,7 +2081,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1963,7 +2326,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2103,7 +2467,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.expectRevert(OrgDeployer.InvalidRoleConfiguration.selector);
@@ -2382,7 +2747,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2642,7 +3008,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2728,7 +3095,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -2783,7 +3151,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2953,7 +3322,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -3945,7 +4315,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         // Record logs to verify HatCreatedWithEligibility events were emitted
@@ -4284,7 +4655,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4349,7 +4721,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4427,7 +4800,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4863,7 +5237,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(deployerSigner);
@@ -4909,7 +5284,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -4966,7 +5342,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(deployerSigner);
@@ -5019,7 +5396,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -5070,7 +5448,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -5125,7 +5504,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params);
@@ -5174,7 +5554,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         deployer.deployFullOrg(params); // Should NOT revert
@@ -5225,7 +5606,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5291,7 +5673,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5316,6 +5699,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // Check TaskManager setFolders is whitelisted (v4 bootstrap)
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)")));
         assertTrue(rule.allowed, "TaskManager setFolders should be whitelisted (v4 bootstrap)");
+
+        // Check TaskManager v5 post-claim edit functions are whitelisted
+        rule = paymasterHub.getRule(
+            orgId, result.taskManager, bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)"))
+        );
+        assertTrue(rule.allowed, "TaskManager updateTask should be whitelisted (v5 edit)");
+        rule = paymasterHub.getRule(
+            orgId, result.taskManager, bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)"))
+        );
+        assertTrue(rule.allowed, "TaskManager updateTaskMetadata should be whitelisted (v5 edit)");
 
         // Check HybridVoting vote is whitelisted
         bytes4 voteSel = bytes4(keccak256("vote(uint256,uint8[],uint8[])"));
@@ -5389,7 +5782,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5443,7 +5837,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5513,7 +5908,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5580,7 +5976,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -5656,7 +6053,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5711,7 +6109,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "registerAndQuickJoinWithPasskey selector mismatch"
         );
 
-        // ── TaskManager (10) ──
+        // ── TaskManager (12) ──
         assertEq(
             bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool)")),
             TaskManager.createTask.selector,
@@ -5755,6 +6153,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         );
         assertEq(
             bytes4(keccak256("cancelTask(uint256)")), TaskManager.cancelTask.selector, "cancelTask selector mismatch"
+        );
+        assertEq(
+            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)")),
+            TaskManager.updateTask.selector,
+            "updateTask selector mismatch"
+        );
+        assertEq(
+            bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)")),
+            TaskManager.updateTaskMetadata.selector,
+            "updateTaskMetadata selector mismatch"
         );
 
         // ── HybridVoting (3) ──
@@ -5862,7 +6270,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5937,7 +6346,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -6006,7 +6416,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.prank(orgOwner);
@@ -6074,7 +6485,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         // No ETH sent — budgets are the only config
@@ -6313,7 +6725,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: true,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmConfig
+            paymasterConfig: pmConfig,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -6571,7 +6984,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -6795,7 +7209,8 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig()
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);

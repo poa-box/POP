@@ -545,7 +545,8 @@ contract ZkEmailOrgFlowTest is DeployerTest {
             passkeyEnabled: false,
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: enableEducation}),
             bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmCfg
+            paymasterConfig: pmCfg,
+            taskManagerPerms: _emptyTaskManagerPerms()
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrgWithZkEmail(params, zkCfg);
