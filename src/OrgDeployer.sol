@@ -234,6 +234,34 @@ contract OrgDeployer is Initializable {
         if (dkimRegistry != address(0)) l.zkEmailDkimRegistry = dkimRegistry;
     }
 
+    /// @notice Re-point the deployer at a freshly-deployed ModulesFactory.
+    /// @dev ModulesFactory is a plain (non-proxy) contract referenced by address, so a beacon
+    ///      upgrade of this OrgDeployer keeps the OLD factory in storage. After deploying a new
+    ///      ModulesFactory (e.g. to add the ZkEmailInvites deploy path), call this to switch.
+    ///      Only callable by PoaManager (via Hub/Satellite adminCall).
+    function setModulesFactory(address _modulesFactory) external {
+        Layout storage l = _layout();
+        if (msg.sender != l.poaManager) revert InvalidAddress();
+        if (_modulesFactory == address(0)) revert InvalidAddress();
+        l.modulesFactory = ModulesFactory(_modulesFactory);
+    }
+
+    /// @notice Re-point the deployer at freshly-deployed Governance/Access factories.
+    /// @dev Same rationale as setModulesFactory. Only callable by PoaManager.
+    function setGovernanceFactory(address _governanceFactory) external {
+        Layout storage l = _layout();
+        if (msg.sender != l.poaManager) revert InvalidAddress();
+        if (_governanceFactory == address(0)) revert InvalidAddress();
+        l.governanceFactory = GovernanceFactory(_governanceFactory);
+    }
+
+    function setAccessFactory(address _accessFactory) external {
+        Layout storage l = _layout();
+        if (msg.sender != l.poaManager) revert InvalidAddress();
+        if (_accessFactory == address(0)) revert InvalidAddress();
+        l.accessFactory = AccessFactory(_accessFactory);
+    }
+
     /*════════════════  DEPLOYMENT STRUCTS  ════════════════*/
 
     struct DeploymentResult {
@@ -356,13 +384,36 @@ contract OrgDeployer is Initializable {
 
     /*════════════════  MAIN DEPLOYMENT FUNCTION  ════════════════*/
 
+    /// @notice Deploy a full org without ZK Email invites (backwards-compatible entrypoint).
     function deployFullOrg(DeploymentParams calldata params) external payable returns (DeploymentResult memory result) {
+        // Empty (disabled) ZK Email config — module is skipped.
+        ModulesFactory.ZkEmailConfig memory emptyZk;
+        result = _deployFullOrgGuarded(params, emptyZk);
+    }
+
+    /// @notice Deploy a full org and opt into ZK Email role invitations with an initial allowlist.
+    /// @dev The ZkEmailInvites module deploys only if `zkConfig.enabled` AND the chain has the ZK
+    ///      Email infra wired (verifier + DKIM registry via setZkEmailInfrastructure) AND the
+    ///      ZkEmailInvites beacon is registered. Domain/email rules use role-index bitmaps,
+    ///      resolved to hat IDs at deploy. Rules are applied atomically before ownership renounce.
+    function deployFullOrgWithZkEmail(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig calldata zkConfig)
+        external
+        payable
+        returns (DeploymentResult memory result)
+    {
+        result = _deployFullOrgGuarded(params, zkConfig);
+    }
+
+    function _deployFullOrgGuarded(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig memory zkConfig)
+        internal
+        returns (DeploymentResult memory result)
+    {
         // Manual reentrancy guard
         Layout storage l = _layout();
         if (l._status == 2) revert Reentrant();
         l._status = 2;
 
-        result = _deployFullOrgInternal(params);
+        result = _deployFullOrgInternal(params, zkConfig);
 
         // Reset reentrancy guard
         l._status = 1;
@@ -372,7 +423,7 @@ contract OrgDeployer is Initializable {
 
     /*════════════════  INTERNAL ORCHESTRATION  ════════════════*/
 
-    function _deployFullOrgInternal(DeploymentParams calldata params)
+    function _deployFullOrgInternal(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig memory zkConfig)
         internal
         returns (DeploymentResult memory result)
     {
@@ -472,7 +523,8 @@ contract OrgDeployer is Initializable {
                 zkEmailVerifier: l.zkEmailVerifier,
                 zkEmailDkimRegistry: l.zkEmailDkimRegistry,
                 accountRegistry: params.registryAddr,
-                universalFactory: l.universalPasskeyFactory
+                universalFactory: l.universalPasskeyFactory,
+                zkEmailConfig: zkConfig
             });
 
             modules = l.modulesFactory.deployModules(moduleParams);

@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import "../OrgRegistry.sol";
 import {ModuleTypes} from "./ModuleTypes.sol";
+import {ZkEmailInvites} from "../ZkEmailInvites.sol";
 
 // Moved interfaces here to break circular dependency
 interface IPoaManager {
@@ -98,15 +99,8 @@ interface IPasskeyAccountFactoryInit {
         external;
 }
 
-interface IZkEmailInvitesInit {
-    function initialize(
-        address executor,
-        address verifier,
-        address dkimRegistry,
-        address accountRegistry,
-        address universalFactory
-    ) external;
-}
+// ZkEmailInvites init uses the contract's own struct types (InitDomainRule/InitEmailRule),
+// so we reference ZkEmailInvites directly rather than a micro-interface.
 
 library ModuleDeploymentLib {
     error InvalidAddress();
@@ -326,15 +320,19 @@ library ModuleDeploymentLib {
         address dkimRegistry,
         address accountRegistry,
         address universalFactory,
+        ZkEmailInvites.InitDomainRule[] memory domainRules,
+        ZkEmailInvites.InitEmailRule[] memory emailRules,
         address beacon
     ) internal returns (address proxy) {
         bytes memory init = abi.encodeWithSelector(
-            IZkEmailInvitesInit.initialize.selector,
+            ZkEmailInvites.initialize.selector,
             executorAddr,
             verifier,
             dkimRegistry,
             accountRegistry,
-            universalFactory
+            universalFactory,
+            domainRules,
+            emailRules
         );
         proxy = deployCore(config, ModuleTypes.ZKEMAIL_INVITES_ID, init, beacon);
     }

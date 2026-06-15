@@ -198,7 +198,15 @@ contract ZkEmailInvitesTest is Test {
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
         zk = ZkEmailInvites(address(new BeaconProxy(address(beacon), "")));
 
-        zk.initialize(executorAddr, address(verifier), address(dkim), address(acctRegistry), address(factory));
+        zk.initialize(
+            executorAddr,
+            address(verifier),
+            address(dkim),
+            address(acctRegistry),
+            address(factory),
+            _noDomainRules(),
+            _noEmailRules()
+        );
     }
 
     /*────────── Helpers ──────────*/
@@ -263,6 +271,50 @@ contract ZkEmailInvitesTest is Test {
         // zero-valued struct; mock registry doesn't verify
     }
 
+    function _noDomainRules() internal pure returns (ZkEmailInvites.InitDomainRule[] memory) {
+        return new ZkEmailInvites.InitDomainRule[](0);
+    }
+
+    function _noEmailRules() internal pure returns (ZkEmailInvites.InitEmailRule[] memory) {
+        return new ZkEmailInvites.InitEmailRule[](0);
+    }
+
+    /// @dev Deploy an uninitialized ZkEmailInvites proxy (so initialize can be called/tested directly).
+    function _deployUninitProxy() internal returns (ZkEmailInvites zkp) {
+        ZkEmailInvites impl = new ZkEmailInvites();
+        UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
+        zkp = ZkEmailInvites(address(new BeaconProxy(address(beacon), "")));
+    }
+
+    /// @dev Deploy a fresh ZkEmailInvites proxy initialized with the given deploy-time rules.
+    function _freshProxyWithRules(
+        ZkEmailInvites.InitDomainRule[] memory dRules,
+        ZkEmailInvites.InitEmailRule[] memory eRules
+    ) internal returns (ZkEmailInvites zkp) {
+        zkp = _deployUninitProxy();
+        zkp.initialize(
+            executorAddr, address(verifier), address(dkim), address(acctRegistry), address(factory), dRules, eRules
+        );
+    }
+
+    function _oneDomainRule(string memory domain, uint256[] memory hatIds, uint64 expiry)
+        internal
+        pure
+        returns (ZkEmailInvites.InitDomainRule[] memory r)
+    {
+        r = new ZkEmailInvites.InitDomainRule[](1);
+        r[0] = ZkEmailInvites.InitDomainRule({domain: domain, hatIds: hatIds, expiry: expiry});
+    }
+
+    function _oneEmailRule(bytes32 accountSalt, uint256[] memory hatIds, uint64 expiry)
+        internal
+        pure
+        returns (ZkEmailInvites.InitEmailRule[] memory r)
+    {
+        r = new ZkEmailInvites.InitEmailRule[](1);
+        r[0] = ZkEmailInvites.InitEmailRule({accountSalt: accountSalt, hatIds: hatIds, expiry: expiry});
+    }
+
     /*────────── Storage slot guard ──────────*/
 
     /// @dev Confirms that the contract reads/writes at `keccak256("poa.zkemailinvites.storage")`.
@@ -278,13 +330,135 @@ contract ZkEmailInvitesTest is Test {
 
     function testCannotInitializeTwice() public {
         vm.expectRevert();
-        zk.initialize(executorAddr, address(verifier), address(dkim), address(acctRegistry), address(factory));
+        zk.initialize(
+            executorAddr,
+            address(verifier),
+            address(dkim),
+            address(acctRegistry),
+            address(factory),
+            _noDomainRules(),
+            _noEmailRules()
+        );
     }
 
     function testCannotInitializeImpl() public {
         ZkEmailInvites impl = new ZkEmailInvites();
         vm.expectRevert();
-        impl.initialize(executorAddr, address(verifier), address(dkim), address(acctRegistry), address(factory));
+        impl.initialize(
+            executorAddr,
+            address(verifier),
+            address(dkim),
+            address(acctRegistry),
+            address(factory),
+            _noDomainRules(),
+            _noEmailRules()
+        );
+    }
+
+    /*────────── Deploy-time rules (initialize with rules) ──────────*/
+
+    function testInitializeWithDomainRule_immediatelyClaimable() public {
+        // A proxy initialized with a domain rule is claimable with NO follow-up governance call.
+        ZkEmailInvites zkp = _freshProxyWithRules(_oneDomainRule(DOMAIN, _hatIds(42), 0), _noEmailRules());
+
+        (uint256[] memory hatIds, uint64 expiry, bool exists) = zkp.getDomainRule(DOMAIN_HASH);
+        assertTrue(exists, "rule preloaded at init");
+        assertEq(expiry, 0);
+        assertEq(hatIds.length, 1);
+        assertEq(hatIds[0], 42);
+
+        EmailProof memory p = _makeProof(SALT_ALICE, bytes32(uint256(1)), user);
+        vm.prank(user);
+        zkp.claimRoleByDomain(p, user);
+
+        assertEq(executorMock.mintCount(), 1, "claim works immediately after deploy");
+        (address mintedTo, uint256[] memory minted) = executorMock.mintAt(0);
+        assertEq(mintedTo, user);
+        assertEq(minted[0], 42);
+    }
+
+    function testInitializeWithEmailRule_immediatelyClaimable() public {
+        ZkEmailInvites zkp = _freshProxyWithRules(_noDomainRules(), _oneEmailRule(SALT_ALICE, _hatIds(7), 0));
+
+        (uint256[] memory hatIds,, bool exists, bool claimed) = zkp.getEmailRule(SALT_ALICE);
+        assertTrue(exists, "email rule preloaded");
+        assertFalse(claimed);
+        assertEq(hatIds[0], 7);
+
+        EmailProof memory p = _makeProof(SALT_ALICE, bytes32(uint256(1)), user);
+        vm.prank(user);
+        zkp.claimRoleByEmail(p, user);
+        assertEq(executorMock.mintCount(), 1);
+    }
+
+    function testInitializeWithBothRuleTypes() public {
+        ZkEmailInvites.InitDomainRule[] memory d = _oneDomainRule(DOMAIN, _hatIds(1), 0);
+        ZkEmailInvites.InitEmailRule[] memory e = _oneEmailRule(SALT_BOB, _hatIds(2), 0);
+        ZkEmailInvites zkp = _freshProxyWithRules(d, e);
+
+        (,, bool dExists) = zkp.getDomainRule(DOMAIN_HASH);
+        (,, bool eExists,) = zkp.getEmailRule(SALT_BOB);
+        assertTrue(dExists && eExists, "both rule types preloaded");
+    }
+
+    function testInitializeWithMultiHatDomainRule() public {
+        ZkEmailInvites zkp = _freshProxyWithRules(_oneDomainRule(DOMAIN, _hatIds(11, 22), 0), _noEmailRules());
+        (uint256[] memory hatIds,,) = zkp.getDomainRule(DOMAIN_HASH);
+        assertEq(hatIds.length, 2);
+        assertEq(hatIds[0], 11);
+        assertEq(hatIds[1], 22);
+    }
+
+    function testInitializeWithNoRules_nothingClaimable() public {
+        ZkEmailInvites zkp = _freshProxyWithRules(_noDomainRules(), _noEmailRules());
+        EmailProof memory p = _makeProof(SALT_ALICE, bytes32(uint256(1)), user);
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.DomainNotAllowed.selector);
+        zkp.claimRoleByDomain(p, user);
+    }
+
+    function testInitializeRevertsOnEmptyDomainInRule() public {
+        ZkEmailInvites zkp = _deployUninitProxy();
+        vm.expectRevert(ZkEmailInvites.EmptyDomain.selector);
+        zkp.initialize(
+            executorAddr,
+            address(verifier),
+            address(dkim),
+            address(acctRegistry),
+            address(factory),
+            _oneDomainRule("", _hatIds(1), 0),
+            _noEmailRules()
+        );
+    }
+
+    function testInitializeRevertsOnEmptyHatsInRule() public {
+        uint256[] memory empty = new uint256[](0);
+        ZkEmailInvites zkp = _deployUninitProxy();
+        vm.expectRevert(ZkEmailInvites.EmptyHats.selector);
+        zkp.initialize(
+            executorAddr,
+            address(verifier),
+            address(dkim),
+            address(acctRegistry),
+            address(factory),
+            _oneDomainRule(DOMAIN, empty, 0),
+            _noEmailRules()
+        );
+    }
+
+    function testInitializeRevertsOnEmptyHatsInEmailRule() public {
+        uint256[] memory empty = new uint256[](0);
+        ZkEmailInvites zkp = _deployUninitProxy();
+        vm.expectRevert(ZkEmailInvites.EmptyHats.selector);
+        zkp.initialize(
+            executorAddr,
+            address(verifier),
+            address(dkim),
+            address(acctRegistry),
+            address(factory),
+            _noDomainRules(),
+            _oneEmailRule(SALT_ALICE, empty, 0)
+        );
     }
 
     /*────────── Admin gating ──────────*/
@@ -840,7 +1014,15 @@ contract ZkEmailInvitesTest is Test {
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
         ZkEmailInvites attacker = ZkEmailInvites(address(new BeaconProxy(address(beacon), "")));
         ReentrancyExecutor rx = new ReentrancyExecutor();
-        attacker.initialize(address(rx), address(verifier), address(dkim), address(acctRegistry), address(factory));
+        attacker.initialize(
+            address(rx),
+            address(verifier),
+            address(dkim),
+            address(acctRegistry),
+            address(factory),
+            _noDomainRules(),
+            _noEmailRules()
+        );
 
         uint256[] memory ids = _hatIds(1);
         vm.prank(address(rx));

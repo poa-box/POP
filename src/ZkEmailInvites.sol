@@ -129,6 +129,22 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         bool claimed; // one-shot
     }
 
+    /* ───────── Deploy-time rule inputs (set atomically in `initialize`) ───────── */
+    /// @dev Hat IDs are pre-resolved by the caller (ModulesFactory resolves role-index bitmaps
+    ///      to hat IDs). These let an org pre-load its allowlist at deploy time so no follow-up
+    ///      governance call is needed before the first claim.
+    struct InitDomainRule {
+        string domain;
+        uint256[] hatIds;
+        uint64 expiry;
+    }
+
+    struct InitEmailRule {
+        bytes32 accountSalt;
+        uint256[] hatIds;
+        uint64 expiry;
+    }
+
     /* ───────── ERC-7201 Storage ──────── */
     /// @custom:storage-location erc7201:poa.zkemailinvites.storage
     struct Layout {
@@ -186,12 +202,16 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     }
 
     /* ───────── Initialiser ───── */
+    /// @param domainRules_ Optional domain rules to pre-load (empty = none; add later via governance).
+    /// @param emailRules_  Optional per-email rules to pre-load (empty = none).
     function initialize(
         address executor_,
         address verifier_,
         address dkimRegistry_,
         address accountRegistry_,
-        address universalFactory_
+        address universalFactory_,
+        InitDomainRule[] calldata domainRules_,
+        InitEmailRule[] calldata emailRules_
     ) external initializer {
         executor_.requireNonZeroAddress();
         verifier_.requireNonZeroAddress();
@@ -208,6 +228,15 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         l.dkimRegistry = IDKIMRegistry(dkimRegistry_);
         l.accountRegistry = IUniversalAccountRegistry(accountRegistry_);
         l.universalFactory = IUniversalPasskeyAccountFactory(universalFactory_);
+
+        // Pre-load any deploy-time rules. Same validation as the executor-gated setters —
+        // a malformed rule (empty domain / empty hats) reverts the whole deployment (loud).
+        for (uint256 i; i < domainRules_.length; ++i) {
+            _writeDomainRule(domainRules_[i].domain, domainRules_[i].hatIds, domainRules_[i].expiry);
+        }
+        for (uint256 i; i < emailRules_.length; ++i) {
+            _writeEmailRule(emailRules_[i].accountSalt, emailRules_[i].hatIds, emailRules_[i].expiry);
+        }
     }
 
     /* ───────── Modifiers ─────── */
@@ -218,17 +247,7 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
 
     /* ───────── Admin: rule management (executor-gated) ─────── */
     function setDomainRule(string calldata domain, uint256[] calldata hatIds, uint64 expiry) external onlyExecutor {
-        if (bytes(domain).length == 0) revert EmptyDomain();
-        if (hatIds.length == 0) revert EmptyHats();
-        bytes32 dh = keccak256(bytes(_lower(domain)));
-        DomainRule storage r = _layout().domainRules[dh];
-        HatManager.clearHatArray(r.hatIds);
-        for (uint256 i; i < hatIds.length; ++i) {
-            HatManager.setHatInArray(r.hatIds, hatIds[i], true);
-        }
-        r.expiry = expiry;
-        r.exists = true;
-        emit DomainRuleSet(dh, hatIds, expiry);
+        _writeDomainRule(domain, hatIds, expiry);
     }
 
     function removeDomainRule(string calldata domain) external onlyExecutor {
@@ -240,16 +259,7 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     /// @dev accountSalt is Poseidon(emailAddress, accountCode) — admin derives off-chain using a
     ///      known accountCode (recommend `keccak256(orgId)` truncated to BN254 field size).
     function setEmailRule(bytes32 accountSalt, uint256[] calldata hatIds, uint64 expiry) external onlyExecutor {
-        if (hatIds.length == 0) revert EmptyHats();
-        EmailRule storage r = _layout().emailRules[accountSalt];
-        HatManager.clearHatArray(r.hatIds);
-        for (uint256 i; i < hatIds.length; ++i) {
-            HatManager.setHatInArray(r.hatIds, hatIds[i], true);
-        }
-        r.expiry = expiry;
-        r.exists = true;
-        r.claimed = false;
-        emit EmailRuleSet(accountSalt, hatIds, expiry);
+        _writeEmailRule(accountSalt, hatIds, expiry);
     }
 
     function removeEmailRule(bytes32 accountSalt) external onlyExecutor {
@@ -406,6 +416,37 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         if (rule.claimed) revert AlreadyClaimed();
         rule.claimed = true;
         return rule.hatIds;
+    }
+
+    /// @dev Shared writer for domain rules. Used by the executor-gated `setDomainRule` and by
+    ///      `initialize` (deploy-time pre-load). `memory` params so both calldata and
+    ///      in-memory (init) callers can reuse it.
+    function _writeDomainRule(string memory domain, uint256[] memory hatIds, uint64 expiry) private {
+        if (bytes(domain).length == 0) revert EmptyDomain();
+        if (hatIds.length == 0) revert EmptyHats();
+        bytes32 dh = keccak256(bytes(_lower(domain)));
+        DomainRule storage r = _layout().domainRules[dh];
+        HatManager.clearHatArray(r.hatIds);
+        for (uint256 i; i < hatIds.length; ++i) {
+            HatManager.setHatInArray(r.hatIds, hatIds[i], true);
+        }
+        r.expiry = expiry;
+        r.exists = true;
+        emit DomainRuleSet(dh, hatIds, expiry);
+    }
+
+    /// @dev Shared writer for email rules. Resets `claimed` so re-issuing an invite is allowed.
+    function _writeEmailRule(bytes32 accountSalt, uint256[] memory hatIds, uint64 expiry) private {
+        if (hatIds.length == 0) revert EmptyHats();
+        EmailRule storage r = _layout().emailRules[accountSalt];
+        HatManager.clearHatArray(r.hatIds);
+        for (uint256 i; i < hatIds.length; ++i) {
+            HatManager.setHatInArray(r.hatIds, hatIds[i], true);
+        }
+        r.expiry = expiry;
+        r.exists = true;
+        r.claimed = false;
+        emit EmailRuleSet(accountSalt, hatIds, expiry);
     }
 
     /// @dev ASCII lowercase — domain names are ASCII per RFC 1035.

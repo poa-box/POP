@@ -160,7 +160,7 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         // {edu = false, zk = true} — TaskManager + PaymentManager + ZkEmailInvites = 3 entries
         _registerZkBeacon();
         _wireZkInfra();
-        OrgDeployer.DeploymentResult memory result = _deployZkOrgInner(ZK_ORG_ID, false, false);
+        OrgDeployer.DeploymentResult memory result = _deployZkOrgInner(ZK_ORG_ID, false, false, _enabledZkConfig());
         assertTrue(result.zkEmailInvites != address(0), "ZkEmailInvites deployed without edu hub");
         assertEq(result.educationHub, address(0), "EducationHub not deployed");
 
@@ -299,6 +299,91 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         assertTrue(zk.isNullifierUsed(p.emailNullifier), "nullifier consumed");
     }
 
+    /*──────────── Deploy-time config (ZkEmailConfig) end-to-end ────────────*/
+
+    /// @notice The headline test: an org deployer specifies "anthropic.com -> DEFAULT role" in the
+    ///         deploy params, and a user claims that role via a ZK proof — with NO post-deploy
+    ///         governance call. Proves the deploy-time config flows all the way to a working claim.
+    function testOrgDeploy_withZkConfig_domainRule_endToEnd() public {
+        _registerZkBeacon();
+        _wireZkInfra();
+
+        // rolesBitmap = 1 (bit 0) -> role index 0 (DEFAULT)
+        OrgDeployer.DeploymentResult memory result =
+            _deployZkOrgInner(ZK_ORG_ID, false, true, _zkConfigWithDomain("anthropic.com", 1));
+        assertTrue(result.zkEmailInvites != address(0), "module deployed");
+
+        ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
+        uint256 role0Hat = orgRegistry.getRoleHat(ZK_ORG_ID, 0);
+
+        // Rule is present immediately — set by OrgDeployer at init, no governance.
+        (uint256[] memory hatIds,, bool exists) = zk.getDomainRule(keccak256(bytes("anthropic.com")));
+        assertTrue(exists, "domain rule preloaded by deploy config");
+        assertEq(hatIds.length, 1);
+        assertEq(hatIds[0], role0Hat, "role-index bitmap resolved to the DEFAULT role hat");
+
+        // Claim end-to-end.
+        address claimer = address(0xC0FFEE);
+        EmailProof memory p = _buildProof(claimer, "anthropic.com", bytes32(uint256(0xBEEF)));
+        vm.prank(claimer);
+        zk.claimRoleByDomain(p, claimer);
+
+        assertTrue(
+            IHats(SEPOLIA_HATS).isWearerOfHat(claimer, role0Hat), "claimer wears DEFAULT hat via deploy-time rule"
+        );
+    }
+
+    function testOrgDeploy_withZkConfig_emailRule_endToEnd() public {
+        _registerZkBeacon();
+        _wireZkInfra();
+
+        bytes32 salt = bytes32(uint256(0xA11CE));
+        // rolesBitmap = 2 (bit 1) -> role index 1 (EXECUTIVE)
+        OrgDeployer.DeploymentResult memory result =
+            _deployZkOrgInner(ZK_ORG_ID, false, true, _zkConfigWithEmail(salt, 2));
+        ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
+        uint256 role1Hat = orgRegistry.getRoleHat(ZK_ORG_ID, 1);
+
+        (uint256[] memory hatIds,, bool exists,) = zk.getEmailRule(salt);
+        assertTrue(exists, "email rule preloaded");
+        assertEq(hatIds[0], role1Hat, "bitmap resolved to EXECUTIVE role hat");
+
+        address claimer = address(0xBEEF11);
+        EmailProof memory p = _buildProof(claimer, "anthropic.com", bytes32(uint256(0x1234)));
+        p.accountSalt = salt; // must match the pre-loaded email rule's salt
+        vm.prank(claimer);
+        zk.claimRoleByEmail(p, claimer);
+
+        assertTrue(IHats(SEPOLIA_HATS).isWearerOfHat(claimer, role1Hat), "claimer wears EXECUTIVE hat");
+    }
+
+    function testOrgDeploy_withZkConfig_multiRoleBitmap_resolvesAllHats() public {
+        _registerZkBeacon();
+        _wireZkInfra();
+
+        // rolesBitmap = 3 (bits 0+1) -> roles 0 and 1
+        OrgDeployer.DeploymentResult memory result =
+            _deployZkOrgInner(ZK_ORG_ID, false, true, _zkConfigWithDomain("anthropic.com", 3));
+        ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
+
+        (uint256[] memory hatIds,,) = zk.getDomainRule(keccak256(bytes("anthropic.com")));
+        assertEq(hatIds.length, 2, "two roles resolved from bitmap");
+        uint256 r0 = orgRegistry.getRoleHat(ZK_ORG_ID, 0);
+        uint256 r1 = orgRegistry.getRoleHat(ZK_ORG_ID, 1);
+        bool hasR0 = hatIds[0] == r0 || hatIds[1] == r0;
+        bool hasR1 = hatIds[0] == r1 || hatIds[1] == r1;
+        assertTrue(hasR0 && hasR1, "both role hats present in resolved rule");
+    }
+
+    function testOrgDeploy_zkConfigDisabled_skipsEvenWithInfra() public {
+        _registerZkBeacon();
+        _wireZkInfra();
+
+        ModulesFactory.ZkEmailConfig memory disabled; // enabled defaults to false
+        OrgDeployer.DeploymentResult memory result = _deployZkOrgInner(ZK_ORG_ID, false, true, disabled);
+        assertEq(result.zkEmailInvites, address(0), "enabled=false skips module even with infra + beacon");
+    }
+
     /*──────────── Paymaster auto-whitelist ────────────*/
 
     function testPaymasterRules_includeZkEmailSelectors_whenInfraWired() public {
@@ -365,18 +450,50 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         );
     }
 
+    /// @dev ZkEmailConfig opted-in with no pre-loaded rules (the common case for these tests).
+    function _enabledZkConfig() internal pure returns (ModulesFactory.ZkEmailConfig memory cfg) {
+        cfg.enabled = true;
+        // domainRules / emailRules default to empty arrays.
+    }
+
+    /// @dev ZkEmailConfig with one pre-loaded domain rule (roles selected by index bitmap).
+    function _zkConfigWithDomain(string memory domain, uint256 rolesBitmap)
+        internal
+        pure
+        returns (ModulesFactory.ZkEmailConfig memory cfg)
+    {
+        cfg.enabled = true;
+        cfg.domainRules = new ModulesFactory.ZkEmailDomainRuleInput[](1);
+        cfg.domainRules[0] =
+            ModulesFactory.ZkEmailDomainRuleInput({domain: domain, rolesBitmap: rolesBitmap, expiry: 0});
+    }
+
+    /// @dev ZkEmailConfig with one pre-loaded per-email rule (roles selected by index bitmap).
+    function _zkConfigWithEmail(bytes32 accountSalt, uint256 rolesBitmap)
+        internal
+        pure
+        returns (ModulesFactory.ZkEmailConfig memory cfg)
+    {
+        cfg.enabled = true;
+        cfg.emailRules = new ModulesFactory.ZkEmailEmailRuleInput[](1);
+        cfg.emailRules[0] =
+            ModulesFactory.ZkEmailEmailRuleInput({accountSalt: accountSalt, rolesBitmap: rolesBitmap, expiry: 0});
+    }
+
     function _deployZkOrg(bytes32 orgId) internal returns (OrgDeployer.DeploymentResult memory) {
-        return _deployZkOrgInner(orgId, false, true);
+        return _deployZkOrgInner(orgId, false, true, _enabledZkConfig());
     }
 
     function _deployZkOrgWithPaymaster(bytes32 orgId) internal returns (OrgDeployer.DeploymentResult memory) {
-        return _deployZkOrgInner(orgId, true, true);
+        return _deployZkOrgInner(orgId, true, true, _enabledZkConfig());
     }
 
-    function _deployZkOrgInner(bytes32 orgId, bool autoWhitelist, bool enableEducation)
-        internal
-        returns (OrgDeployer.DeploymentResult memory)
-    {
+    function _deployZkOrgInner(
+        bytes32 orgId,
+        bool autoWhitelist,
+        bool enableEducation,
+        ModulesFactory.ZkEmailConfig memory zkCfg
+    ) internal returns (OrgDeployer.DeploymentResult memory) {
         vm.startPrank(orgOwner);
         string[] memory names = new string[](2);
         names[0] = "DEFAULT";
@@ -431,7 +548,7 @@ contract ZkEmailOrgFlowTest is DeployerTest {
             paymasterConfig: pmCfg
         });
 
-        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrgWithZkEmail(params, zkCfg);
         vm.stopPrank();
         return result;
     }
