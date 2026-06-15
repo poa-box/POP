@@ -313,27 +313,15 @@ library ModuleDeploymentLib {
         factoryProxy = deployCore(config, ModuleTypes.PASSKEY_ACCOUNT_FACTORY_ID, init, factoryBeacon);
     }
 
-    function deployZkEmailInvites(
-        DeployConfig memory config,
-        address executorAddr,
-        address verifier,
-        address dkimRegistry,
-        address accountRegistry,
-        address universalFactory,
-        ZkEmailInvites.InitDomainRule[] memory domainRules,
-        ZkEmailInvites.InitEmailRule[] memory emailRules,
-        address beacon
-    ) internal returns (address proxy) {
-        bytes memory init = abi.encodeWithSelector(
-            ZkEmailInvites.initialize.selector,
-            executorAddr,
-            verifier,
-            dkimRegistry,
-            accountRegistry,
-            universalFactory,
-            domainRules,
-            emailRules
-        );
-        proxy = deployCore(config, ModuleTypes.ZKEMAIL_INVITES_ID, init, beacon);
+    /// @notice Deploy a module proxy WITHOUT initializing it. The caller initializes it AFTER the
+    ///         module is registered in OrgRegistry, so a per-org subgraph data-source template (created
+    ///         on ContractRegistered) catches the config/rule events that initialize() emits — avoiding
+    ///         eth_calls and indexing the deploy-time snapshot. (See CLAUDE.md "Events & subgraph indexing".)
+    function deployUninitializedProxy(DeployConfig memory config, bytes32 typeId, address beacon)
+        internal
+        returns (address proxy)
+    {
+        proxy = address(new BeaconProxy(beacon, ""));
+        emit ModuleDeployed(config.orgId, typeId, proxy, beacon, config.autoUpgrade, config.moduleOwner);
     }
 }

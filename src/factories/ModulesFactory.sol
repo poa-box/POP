@@ -224,20 +224,10 @@ contract ModulesFactory {
                 customImpl: address(0)
             });
 
-            // Resolve role-index bitmaps -> hat IDs and build the deploy-time rule arrays.
-            (ZkEmailInvites.InitDomainRule[] memory domainRules, ZkEmailInvites.InitEmailRule[] memory emailRules) =
-                _buildZkInitRules(params);
-
-            result.zkEmailInvites = ModuleDeploymentLib.deployZkEmailInvites(
-                config,
-                params.executor,
-                params.zkEmailVerifier,
-                params.zkEmailDkimRegistry,
-                params.accountRegistry,
-                params.universalFactory,
-                domainRules,
-                emailRules,
-                zkEmailInvitesBeacon
+            // Deploy the proxy UNINITIALIZED here; initialize() runs in step 6 AFTER registration so the
+            // subgraph's per-org template (created on ContractRegistered) catches its config + rule events.
+            result.zkEmailInvites = ModuleDeploymentLib.deployUninitializedProxy(
+                config, ModuleTypes.ZKEMAIL_INVITES_ID, zkEmailInvitesBeacon
             );
         }
 
@@ -287,7 +277,32 @@ contract ModulesFactory {
             IOrgDeployer(params.deployer).batchRegisterContracts(params.orgId, registrations, params.autoUpgrade, false);
         }
 
+        /* 6. Initialize ZkEmailInvites AFTER registration. Its config + rule events thus fire after the
+              module's ContractRegistered, so the subgraph's per-org template catches them (no eth_calls,
+              deploy-time rules indexed). Same tx, before OrgDeployer renounces — see CLAUDE.md. */
+        if (zkEmailEnabled) {
+            _initZkEmailInvites(params, result.zkEmailInvites);
+        }
+
         return result;
+    }
+
+    /// @dev Resolves the ZkEmailConfig role-index bitmaps to hat IDs and initializes the (already
+    ///      deployed + registered) ZkEmailInvites proxy. Separate function so the rule arrays stay off
+    ///      deployModules' stack under via_ir.
+    function _initZkEmailInvites(ModulesParams memory params, address proxy) private {
+        (ZkEmailInvites.InitDomainRule[] memory domainRules, ZkEmailInvites.InitEmailRule[] memory emailRules) =
+            _buildZkInitRules(params);
+        ZkEmailInvites(proxy)
+            .initialize(
+                params.executor,
+                params.zkEmailVerifier,
+                params.zkEmailDkimRegistry,
+                params.accountRegistry,
+                params.universalFactory,
+                domainRules,
+                emailRules
+            );
     }
 
     /// @dev Resolves the role-index bitmaps in the ZkEmailConfig to concrete hat IDs and builds the

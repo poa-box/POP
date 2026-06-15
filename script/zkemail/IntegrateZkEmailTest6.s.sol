@@ -21,14 +21,19 @@ import {HybridVoting} from "../../src/HybridVoting.sol";
  * Test6 was deployed before ZkEmailInvites existed, so it has no per-org proxy.
  * Retrofitting it takes three on-chain actions:
  *
- *   1. Deploy + initialize a ZkEmailInvites proxy for Test6 (rules baked in at
- *      init — NO governance needed for the allowlist), owned/governed by Test6's
- *      executor.                                            [Hudson broadcast]
+ *   1. Deploy a ZkEmailInvites proxy for Test6 UNINITIALIZED — so the vote can
+ *      register it BEFORE initializing it (see below).      [Hudson broadcast]
  *   2. Whitelist the 4 claim selectors on the Gnosis PaymasterHub so claims are
  *      gasless, via Satellite.adminCall (same path as the createTasksBatch /
  *      setFolders retro-fixes).                             [Hudson broadcast]
- *   3. Authorize the proxy as a hat minter on Test6's executor via a governance
- *      proposal (executor.setHatMinterAuthorization).       [governance vote]
+ *   3. ONE governance vote, in order: register the proxy in OrgRegistry
+ *      (ContractRegistered -> the subgraph's per-org template is created), then
+ *      initialize it (the rule + config events the template now catches), then
+ *      authorize it as a hat minter.                        [governance vote]
+ *
+ * Registering before initializing is what lets the subgraph index the deploy-time
+ * rules/config without eth_calls (init events follow ContractRegistered). New orgs
+ * get this for free in ModulesFactory; existing orgs do it via the step-3 batch.
  *
  * Why step 3 needs governance (and an Executor upgrade): Test6's executor has
  * renounced ownership (owner() == 0), so the only authorized caller of its admin
@@ -99,6 +104,18 @@ contract SimMockDKIM is IDKIMRegistry {
     }
 }
 
+interface IOrgRegistryRegister {
+    function registerOrgContract(
+        bytes32 orgId,
+        bytes32 typeId,
+        address proxy,
+        address beacon,
+        bool autoUp,
+        address moduleOwner,
+        bool lastRegister
+    ) external;
+}
+
 abstract contract Test6Base is Script {
     /* ── Verified Test6 + Gnosis addresses (subgraph + cast, 2026-05-29) ── */
     address internal constant HUDSON = 0xA6F4D9f44Dd980b7168D829d5f74c2b00a46b2c9;
@@ -111,6 +128,10 @@ abstract contract Test6Base is Script {
     address internal constant TEST6_HV = 0xF642DdE77848dC195c8089F4042A311Ed650d7a6;
     address internal constant TEST6_ELIGIBILITY = 0xf01F2bDd5C86E7B676117cB0d6E2c07aa36E8c8B;
     address internal constant TEST6_ACCOUNT_REGISTRY = 0x55F72CEB09cBC1fAAED734b6505b99b0a1DFA1cA;
+    // OrgRegistry (owned by the OrgDeployer). Registering the proxy here BEFORE initialize lets the
+    // subgraph's per-org template (created on ContractRegistered) catch initialize's config + rule events.
+    address internal constant TEST6_ORG_REGISTRY = 0x3744b372abc41589226313F2bB1dB3aCAa22A854;
+    bytes32 internal constant ZKEMAIL_INVITES_ID = keccak256("ZkEmailInvites");
     // Member role hat (entry-level) — the role granted to anyone proving the invite domain.
     uint256 internal constant TEST6_MEMBER_HAT =
         29035862971903655586674243772344327311664727652070589302159213246545920;
@@ -214,16 +235,33 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
         address verifier = address(new SimMockVerifier());
         address dkim = address(new SimMockDKIM());
 
-        // 2. Deploy the ZkEmailInvites proxy against Test6's REAL executor, rule baked in at init.
+        // 2. Deploy the ZkEmailInvites proxy UNINITIALIZED, register it in Test6's OrgRegistry (as the
+        //    executor), THEN initialize — so initialize's config + rule events fire AFTER ContractRegistered
+        //    and the subgraph's per-org template (created on ContractRegistered) catches them. No eth_calls.
         ZkEmailInvites impl = new ZkEmailInvites();
         // Local beacon for the sim (broadcast uses a SwitchableBeacon mirroring the protocol beacon).
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), HUDSON);
-        ZkEmailInvites proxy = ZkEmailInvites(address(new BeaconProxy(address(beacon), _initData(verifier, dkim))));
+        ZkEmailInvites proxy = ZkEmailInvites(address(new BeaconProxy(address(beacon), "")));
+
+        vm.prank(TEST6_EXECUTOR);
+        IOrgRegistryRegister(TEST6_ORG_REGISTRY)
+            .registerOrgContract(
+                TEST6_ORG, ZKEMAIL_INVITES_ID, address(proxy), address(beacon), true, TEST6_EXECUTOR, false
+            );
+        proxy.initialize(
+            TEST6_EXECUTOR,
+            verifier,
+            dkim,
+            TEST6_ACCOUNT_REGISTRY,
+            UNIVERSAL_FACTORY,
+            _initDomainRules(),
+            _noEmailRules()
+        );
 
         require(proxy.executor() == TEST6_EXECUTOR, "executor not wired");
         (uint256[] memory hatIds,, bool exists) = proxy.getDomainRule(keccak256(bytes(INVITE_DOMAIN)));
         require(exists && hatIds.length == 1 && hatIds[0] == TEST6_MEMBER_HAT, "domain rule not preloaded");
-        console.log("  Proxy deployed + Member-role domain rule preloaded:", address(proxy));
+        console.log("  Proxy deployed (uninit) -> registered in OrgRegistry -> initialized:", address(proxy));
 
         // 3. Whitelist the 4 selectors via the REAL Satellite.adminCall (pranked as Hudson).
         require(!IPaymasterHubRule(GNOSIS_PM).getRule(TEST6_ORG, address(proxy), SEL_CLAIM_DOMAIN).allowed, "pre-set?");
@@ -310,8 +348,6 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
 ///      the protocol ZkEmailInvites beacon and is owned by Test6's executor (org-governed upgrades).
 contract BroadcastDeployAndWhitelistTest6 is Test6Base {
     function run() public {
-        address zkVerifier = _zkVerifier();
-        address zkDkim = _zkDkimRegistry();
         address zkBeacon = _zkBeacon();
         uint256 key = vm.envUint("PRIVATE_KEY");
         require(vm.addr(key) == HUDSON, "Sender must be Hudson (Satellite owner)");
@@ -319,7 +355,9 @@ contract BroadcastDeployAndWhitelistTest6 is Test6Base {
 
         vm.startBroadcast(key);
         SwitchableBeacon sb = new SwitchableBeacon(TEST6_EXECUTOR, zkBeacon, address(0), SwitchableBeacon.Mode.Mirror);
-        BeaconProxy proxy = new BeaconProxy(address(sb), _initData(zkVerifier, zkDkim));
+        // Deploy UNINITIALIZED — the governance proposal (step 3) registers it in OrgRegistry and THEN
+        // initializes it, so initialize's events follow ContractRegistered for the subgraph template.
+        BeaconProxy proxy = new BeaconProxy(address(sb), "");
         ISatellite(GNOSIS_SATELLITE).adminCall(GNOSIS_PM, _paymasterInner(address(proxy)));
         vm.stopBroadcast();
 
@@ -327,10 +365,11 @@ contract BroadcastDeployAndWhitelistTest6 is Test6Base {
             IPaymasterHubRule(GNOSIS_PM).getRule(TEST6_ORG, address(proxy), SEL_CLAIM_DOMAIN).allowed,
             "paymaster rule not set"
         );
-        console.log("Test6 ZkEmailInvites proxy:", address(proxy));
-        console.log("Member-role domain rule preloaded for:", INVITE_DOMAIN);
+        console.log("Test6 ZkEmailInvites proxy (uninitialized):", address(proxy));
         console.log("NEXT (after Executor upgrade): run BroadcastGovProposalTest6 with");
         console.log("  ZKEMAIL_PROXY=", address(proxy));
+        console.log("  ZKEMAIL_BEACON=", address(sb));
+        console.log("  (one vote registers + initializes + authorizes the proxy)");
     }
 }
 
@@ -343,10 +382,31 @@ contract BroadcastGovProposalTest6 is Test6Base {
 
     function run() public {
         address proxy = vm.envAddress("ZKEMAIL_PROXY");
+        address beacon = vm.envAddress("ZKEMAIL_BEACON");
+        address verifier = _zkVerifier();
+        address dkim = _zkDkimRegistry();
         uint256 key = vm.envUint("PRIVATE_KEY");
 
-        IExecutor.Call[] memory batch = new IExecutor.Call[](1);
+        // One vote does it all, in order: (1) register the proxy in OrgRegistry -> ContractRegistered
+        // creates the subgraph's per-org template; (2) initialize -> config + rule events the template
+        // now catches; (3) authorize the minter (self-targets the executor -> needs the Executor upgrade).
+        IExecutor.Call[] memory batch = new IExecutor.Call[](3);
         batch[0] = IExecutor.Call({
+            target: TEST6_ORG_REGISTRY,
+            value: 0,
+            data: abi.encodeWithSignature(
+                "registerOrgContract(bytes32,bytes32,address,address,bool,address,bool)",
+                TEST6_ORG,
+                ZKEMAIL_INVITES_ID,
+                proxy,
+                beacon,
+                true,
+                TEST6_EXECUTOR,
+                false
+            )
+        });
+        batch[1] = IExecutor.Call({target: proxy, value: 0, data: _initData(verifier, dkim)});
+        batch[2] = IExecutor.Call({
             target: TEST6_EXECUTOR,
             value: 0,
             data: abi.encodeWithSignature("setHatMinterAuthorization(address,bool)", proxy, true)
