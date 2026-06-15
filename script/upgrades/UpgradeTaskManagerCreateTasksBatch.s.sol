@@ -294,7 +294,9 @@ contract DryRun_GnosisUpgrade is Script {
             metadataHash: bytes32(0),
             bountyToken: address(0),
             bountyPayout: 0,
-            requiresApplication: false
+            requiresApplication: false,
+            absoluteDeadline: 0,
+            completionWindow: 0
         });
         inputs[1] = TaskManager.CreateTaskInput({
             payout: 2 ether,
@@ -302,7 +304,9 @@ contract DryRun_GnosisUpgrade is Script {
             metadataHash: bytes32(0),
             bountyToken: address(0),
             bountyPayout: 0,
-            requiresApplication: false
+            requiresApplication: false,
+            absoluteDeadline: 0,
+            completionWindow: 0
         });
         inputs[2] = TaskManager.CreateTaskInput({
             payout: 3 ether,
@@ -310,7 +314,9 @@ contract DryRun_GnosisUpgrade is Script {
             metadataHash: bytes32(0),
             bountyToken: address(0),
             bountyPayout: 0,
-            requiresApplication: false
+            requiresApplication: false,
+            absoluteDeadline: 0,
+            completionWindow: 0
         });
 
         vm.prank(executor);
@@ -345,7 +351,9 @@ contract DryRun_GnosisUpgrade is Script {
             metadataHash: bytes32(0),
             bountyToken: address(0),
             bountyPayout: 0,
-            requiresApplication: false
+            requiresApplication: false,
+            absoluteDeadline: 0,
+            completionWindow: 0
         });
 
         vm.prank(executor);

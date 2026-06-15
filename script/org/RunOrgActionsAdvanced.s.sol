@@ -579,7 +579,9 @@ contract RunOrgActionsAdvanced is Script {
             projectId,
             address(0), // bountyToken (0 = no bounty)
             0, // bountyPayout
-            false // requiresApplication (can be claimed directly)
+            false, // requiresApplication (can be claimed directly)
+            0,
+            0
         );
         uint256 task0 = 0; // First task ID starts at 0
         console.log("  [OK] Task 0 Created");
@@ -593,7 +595,9 @@ contract RunOrgActionsAdvanced is Script {
             projectId,
             address(0),
             0,
-            true // Requires application for this one
+            true, // Requires application for this one
+            0,
+            0
         );
         uint256 task1 = 1; // Second task ID
         console.log("  [OK] Task 1 Created");

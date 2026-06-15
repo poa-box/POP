@@ -29,7 +29,8 @@ contract TaskManagerLens {
         TASK_APPLICATION,
         TASK_APPLICANT_COUNT,
         HAS_APPLIED_FOR_TASK,
-        BOUNTY_BUDGET
+        BOUNTY_BUDGET,
+        TASK_DEADLINES
     }
 
     enum Status {
@@ -63,7 +64,7 @@ contract TaskManagerLens {
             uint256[] memory hats = abi.decode(tm.getLensData(6, ""), (uint256[]));
             return abi.encode(hats.length);
         } else if (key == StorageKey.VERSION) {
-            return abi.encode("v1");
+            return abi.encode("v2");
         } else if (key == StorageKey.TASK_INFO) {
             uint256 id = abi.decode(params, (uint256));
             bytes memory data = tm.getLensData(1, params);
@@ -86,9 +87,23 @@ contract TaskManagerLens {
                 uint96 bountyPayout,
                 bool requiresApplication,
                 Status status,
-                address bountyToken
-            ) = abi.decode(data, (bytes32, uint96, address, uint96, bool, Status, address));
-            return abi.encode(payout, bountyPayout, bountyToken, status, claimer, projectId, requiresApplication);
+                address bountyToken,
+                uint48 absoluteDeadline,
+                uint32 completionWindow,
+                uint48 claimDeadline
+            ) = abi.decode(data, (bytes32, uint96, address, uint96, bool, Status, address, uint48, uint32, uint48));
+            return abi.encode(
+                payout,
+                bountyPayout,
+                bountyToken,
+                status,
+                claimer,
+                projectId,
+                requiresApplication,
+                absoluteDeadline,
+                completionWindow,
+                claimDeadline
+            );
         } else if (key == StorageKey.PROJECT_INFO) {
             bytes32 pid = abi.decode(params, (bytes32));
             bytes memory data = tm.getLensData(2, params);
@@ -114,6 +129,12 @@ contract TaskManagerLens {
             bytes memory data = tm.getLensData(9, params);
             (uint128 cap, uint128 spent) = abi.decode(data, (uint128, uint128));
             return abi.encode(cap, spent);
+        } else if (key == StorageKey.TASK_DEADLINES) {
+            // v6: (uint48 absoluteDeadline, uint32 completionWindow, uint48 claimDeadline)
+            bytes memory data = tm.getLensData(1, params);
+            (,,,,,,, uint48 absoluteDeadline, uint32 completionWindow, uint48 claimDeadline) =
+                abi.decode(data, (bytes32, uint96, address, uint96, bool, Status, address, uint48, uint32, uint48));
+            return abi.encode(absoluteDeadline, completionWindow, claimDeadline);
         }
 
         revert("Invalid index");

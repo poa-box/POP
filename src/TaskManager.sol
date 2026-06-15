@@ -65,6 +65,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
     /// @param expected Root the caller believed was current.
     /// @param actual   Root that is actually current on-chain.
     error FoldersRootStale(bytes32 expected, bytes32 actual);
+    /// @notice Non-zero absolute deadline supplied at task creation must be in the future.
+    error InvalidDeadline();
 
     /*──────── Constants ─────*/
     bytes4 public constant MODULE_ID = 0x54534b32; // "TSK2"
@@ -102,6 +104,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
         bool requiresApplication; // slot 3: 1 byte
         Status status; // slot 3: 1 byte (enum fits in 1 byte)
         address bountyToken; // slot 4: 20 bytes (optimized packing: small fields grouped together)
+        // ─── Deadlines (v6) ─── appended only: pre-v6 tasks read zeros = "no deadlines".
+        uint48 absoluteDeadline; // slot 4: 6 bytes — unix cutoff for any claim (0 = none)
+        uint32 completionWindow; // slot 4: 4 bytes — per-claim submission window in seconds (0 = none)
+        uint48 claimDeadline; // slot 5: 6 bytes — current claim's deadline, set on claim/assign/approve (0 = none)
     }
 
     struct Project {
@@ -144,6 +150,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
         address bountyToken;
         uint256 bountyPayout;
         bool requiresApplication;
+        uint48 absoluteDeadline; // unix cutoff (0 = none); must be in the future when set
+        uint32 completionWindow; // per-claim submission window in seconds (0 = none)
     }
 
     /*──────── Storage (ERC-7201) ───────*/
@@ -236,6 +244,18 @@ contract TaskManager is Initializable, ContextUpgradeable {
     event TaskApplicationSubmitted(uint256 indexed id, address indexed applicant, bytes32 applicationHash);
     /// @notice An application was approved and the task moved to CLAIMED for `applicant`.
     event TaskApplicationApproved(uint256 indexed id, address indexed applicant, address indexed approver);
+    /// @notice A task's deadline configuration was set at creation or changed via `updateTask`.
+    /// @dev `absoluteDeadline` is a unix cutoff (0 = none); `completionWindow` is the per-claim
+    ///      submission window in seconds (0 = none). Emitted at creation only when at least one
+    ///      value is non-zero; emitted on update whenever either value changes.
+    event TaskDeadlinesSet(uint256 indexed id, uint48 absoluteDeadline, uint32 completionWindow);
+    /// @notice The current claim's submission deadline changed (claim/assign/approve start,
+    ///         reject reset, window edit adjustment, or clear). Emitted only on value change.
+    event TaskClaimDeadlineSet(uint256 indexed id, uint48 claimDeadline);
+    /// @notice An expired claim was taken over: `previousClaimer` lost the task to `newClaimer`.
+    /// @dev Always followed in the same tx by the lifecycle event recording the new claim
+    ///      (`TaskClaimed`, `TaskAssigned`, or `TaskApplicationApproved`).
+    event TaskClaimExpired(uint256 indexed id, address indexed previousClaimer, address indexed newClaimer);
     /// @notice The executor address was set or changed.
     event ExecutorUpdated(address newExecutor);
 
@@ -556,6 +576,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
      * @param bountyToken         ERC-20 bounty token; `address(0)` for no bounty.
      * @param bountyPayout        Bounty amount in `bountyToken` units.
      * @param requiresApplication If true, claimants must submit an application first.
+     * @param absoluteDeadline    Unix cutoff after which any claim is open to takeover (0 = none);
+     *                            must be in the future when non-zero.
+     * @param completionWindow    Per-claim submission window in seconds (0 = none). Each claimer's
+     *                            deadline is set to `claimTime + completionWindow`.
      */
     function createTask(
         uint256 payout,
@@ -564,10 +588,13 @@ contract TaskManager is Initializable, ContextUpgradeable {
         bytes32 pid,
         address bountyToken,
         uint256 bountyPayout,
-        bool requiresApplication
+        bool requiresApplication,
+        uint48 absoluteDeadline,
+        uint32 completionWindow
     ) external {
         _requireCanCreate(pid);
-        _createTask(payout, title, metadataHash, pid, requiresApplication, bountyToken, bountyPayout);
+        uint48 id = _createTask(payout, title, metadataHash, pid, requiresApplication, bountyToken, bountyPayout);
+        _setTaskDeadlines(id, _layout()._tasks[id], absoluteDeadline, completionWindow);
     }
 
     /**
@@ -586,14 +613,17 @@ contract TaskManager is Initializable, ContextUpgradeable {
         if (tasks.length == 0) revert EmptyBatch();
         _requireCanCreate(pid);
 
+        Layout storage l = _layout();
         uint256 len = tasks.length;
         taskIds = new uint256[](len);
 
         for (uint256 i; i < len;) {
             CreateTaskInput calldata t = tasks[i];
-            taskIds[i] = _createTask(
+            uint48 id = _createTask(
                 t.payout, t.title, t.metadataHash, pid, t.requiresApplication, t.bountyToken, t.bountyPayout
             );
+            taskIds[i] = id;
+            _setTaskDeadlines(id, l._tasks[id], t.absoluteDeadline, t.completionWindow);
             unchecked {
                 ++i;
             }
@@ -630,9 +660,18 @@ contract TaskManager is Initializable, ContextUpgradeable {
         }
 
         id = l.nextTaskId++;
-        l._tasks[id] = Task(
-            pid, uint96(payout), address(0), uint96(bountyPayout), requiresApplication, Status.UNCLAIMED, bountyToken
-        );
+        l._tasks[id] = Task({
+            projectId: pid,
+            payout: uint96(payout),
+            claimer: address(0),
+            bountyPayout: uint96(bountyPayout),
+            requiresApplication: requiresApplication,
+            status: Status.UNCLAIMED,
+            bountyToken: bountyToken,
+            absoluteDeadline: 0, // set via _setTaskDeadlines after creation (create paths only)
+            completionWindow: 0,
+            claimDeadline: 0
+        });
         emit TaskCreated(id, pid, payout, bountyToken, bountyPayout, requiresApplication, title, metadataHash);
     }
 
@@ -654,12 +693,20 @@ contract TaskManager is Initializable, ContextUpgradeable {
      *      with `setConfig(BOUNTY_CAP, ...)`.
      *
      *      Re-runs validation on the new values and adjusts both PT and bounty budgets.
-     * @param id               Task ID.
-     * @param newPayout        New participation-token payout.
-     * @param newTitle         New title.
-     * @param newMetadataHash  New IPFS CID (emitted; not stored).
-     * @param newBountyToken   New bounty token (or `address(0)` to clear).
-     * @param newBountyPayout  New bounty amount.
+     *
+     *      Deadline fields: unlike the create paths, a past `newAbsoluteDeadline` is deliberately
+     *      accepted here — it is the admin lever that opens an abandoned CLAIMED task to takeover
+     *      (cancelTask is UNCLAIMED-only, so no other remedy exists, including for tasks claimed
+     *      before v6). Changing `newCompletionWindow` while the task is claimed adjusts the
+     *      current claim's deadline, preserving the original claim start where derivable.
+     * @param id                  Task ID.
+     * @param newPayout           New participation-token payout.
+     * @param newTitle            New title.
+     * @param newMetadataHash     New IPFS CID (emitted; not stored).
+     * @param newBountyToken      New bounty token (or `address(0)` to clear).
+     * @param newBountyPayout     New bounty amount.
+     * @param newAbsoluteDeadline New unix cutoff (0 = none); past values allowed (see above).
+     * @param newCompletionWindow New per-claim submission window in seconds (0 = none).
      */
     function updateTask(
         uint256 id,
@@ -667,7 +714,9 @@ contract TaskManager is Initializable, ContextUpgradeable {
         bytes calldata newTitle,
         bytes32 newMetadataHash,
         address newBountyToken,
-        uint256 newBountyPayout
+        uint256 newBountyPayout,
+        uint48 newAbsoluteDeadline,
+        uint32 newCompletionWindow
     ) external {
         Layout storage l = _layout();
         Task storage t = _task(l, id);
@@ -711,6 +760,7 @@ contract TaskManager is Initializable, ContextUpgradeable {
         t.bountyPayout = uint96(newBountyPayout);
 
         emit TaskUpdated(id, newPayout, newBountyToken, newBountyPayout, newTitle, newMetadataHash);
+        _updateTaskDeadlines(id, t, newAbsoluteDeadline, newCompletionWindow);
     }
 
     /**
@@ -750,26 +800,44 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /**
-     * @notice Claim an UNCLAIMED task that does not require an application.
+     * @notice Claim an UNCLAIMED task — or take over a CLAIMED task whose claim has expired.
      * @dev Permission: CLAIM on the task's project. Reverts RequiresApplication for
      *      application-only tasks (use `applyForTask`).
+     *
+     *      Takeover (v6): if the task is CLAIMED and its claim has expired (per-claim deadline
+     *      or absolute deadline passed), the claim is unprotected and any eligible caller may
+     *      claim it directly — `TaskClaimExpired` is emitted for the ousted claimer, then the
+     *      claim proceeds as normal with a fresh completion window. The expired claimer may
+     *      re-claim their own task to refresh the window. SUBMITTED tasks are never
+     *      takeover-able: delivered work must be reviewed (completed or rejected) first.
      * @param id Task ID.
      */
     function claimTask(uint256 id) external {
         _requireCanClaim(id);
         Layout storage l = _layout();
         Task storage t = _task(l, id);
-        if (t.status != Status.UNCLAIMED) revert BadStatus();
         if (t.requiresApplication) revert RequiresApplication();
+        if (t.status == Status.CLAIMED) {
+            if (!_claimExpired(t)) revert BadStatus();
+            emit TaskClaimExpired(id, t.claimer, _msgSender());
+        } else if (t.status != Status.UNCLAIMED) {
+            revert BadStatus();
+        }
 
         t.status = Status.CLAIMED;
         t.claimer = _msgSender();
         emit TaskClaimed(id, _msgSender());
+        _startClaimWindow(id, t);
     }
 
     /**
-     * @notice Force-assign an UNCLAIMED task to `assignee`, bypassing the claim flow.
-     * @dev Permission: ASSIGN on the task's project. Task must be UNCLAIMED.
+     * @notice Force-assign an UNCLAIMED task to `assignee`, bypassing the claim flow —
+     *         or reassign a CLAIMED task whose claim has expired.
+     * @dev Permission: ASSIGN on the task's project.
+     *
+     *      Takeover (v6): an expired claim (see {claimTask}) may be reassigned to anyone —
+     *      including the same claimer, which acts as an explicit window refresh. Emits
+     *      `TaskClaimExpired` for the ousted claimer before the new assignment.
      * @param id       Task ID.
      * @param assignee Address to record as the claimer.
      */
@@ -779,11 +847,17 @@ contract TaskManager is Initializable, ContextUpgradeable {
         Layout storage l = _layout();
 
         Task storage t = _task(l, id);
-        if (t.status != Status.UNCLAIMED) revert BadStatus();
+        if (t.status == Status.CLAIMED) {
+            if (!_claimExpired(t)) revert BadStatus();
+            emit TaskClaimExpired(id, t.claimer, assignee);
+        } else if (t.status != Status.UNCLAIMED) {
+            revert BadStatus();
+        }
 
         t.status = Status.CLAIMED;
         t.claimer = assignee;
         emit TaskAssigned(id, assignee, _msgSender());
+        _startClaimWindow(id, t);
     }
 
     /**
@@ -840,6 +914,9 @@ contract TaskManager is Initializable, ContextUpgradeable {
     /**
      * @notice Reject a SUBMITTED task. Task reverts to CLAIMED so the claimer can resubmit.
      * @dev Permission: REVIEW on the project. `rejectionHash` must be non-zero (IPFS CID of feedback).
+     *      If the task has a completion window, the claimer's deadline restarts from now —
+     *      rejection means "revise and resubmit", so the rework gets a fresh window. A passed
+     *      absolute deadline still leaves the claim open to takeover (lenient model).
      * @param id             Task ID.
      * @param rejectionHash  IPFS CID of the rejection reasoning.
      */
@@ -852,6 +929,7 @@ contract TaskManager is Initializable, ContextUpgradeable {
 
         t.status = Status.CLAIMED;
         emit TaskRejected(id, _msgSender(), rejectionHash);
+        _startClaimWindow(id, t);
     }
 
     /**
@@ -891,6 +969,9 @@ contract TaskManager is Initializable, ContextUpgradeable {
      * @notice Apply to claim a task that requires applications.
      * @dev Permission: CLAIM on the task's project. Reverts AlreadyApplied if the
      *      caller already submitted an application for this task.
+     *      Takeover (v6): applications are also accepted while the task is CLAIMED with an
+     *      expired claim — otherwise application-gated tasks could only be taken over by the
+     *      original applicant pool. Approval (or assignment) still performs the takeover.
      * @param id              Task ID to apply for.
      * @param applicationHash IPFS CID of the application/submission payload.
      */
@@ -898,7 +979,7 @@ contract TaskManager is Initializable, ContextUpgradeable {
         _requireCanClaim(id);
         Layout storage l = _layout();
         Task storage t = _task(l, id);
-        if (t.status != Status.UNCLAIMED) revert BadStatus();
+        if (t.status != Status.UNCLAIMED && !(t.status == Status.CLAIMED && _claimExpired(t))) revert BadStatus();
         ValidationLib.requireValidApplicationHash(applicationHash);
         if (!t.requiresApplication) revert NoApplicationRequired();
 
@@ -918,6 +999,9 @@ contract TaskManager is Initializable, ContextUpgradeable {
      * @notice Approve a pending application: the task moves to CLAIMED for `applicant`
      *         and the remaining applicants are dropped.
      * @dev Permission: ASSIGN on the task's project.
+     *      Takeover (v6): an expired claim (see {claimTask}) may be handed to any past or new
+     *      applicant — application hashes persist, so the original applicant pool (including
+     *      the ousted claimer) stays approvable. Emits `TaskClaimExpired` before the approval.
      * @param id        Task ID.
      * @param applicant Address of the applicant to approve.
      */
@@ -925,13 +1009,19 @@ contract TaskManager is Initializable, ContextUpgradeable {
         _requireCanAssign(_layout()._tasks[id].projectId);
         Layout storage l = _layout();
         Task storage t = _task(l, id);
-        if (t.status != Status.UNCLAIMED) revert BadStatus();
+        if (t.status == Status.CLAIMED) {
+            if (!_claimExpired(t)) revert BadStatus();
+            emit TaskClaimExpired(id, t.claimer, applicant);
+        } else if (t.status != Status.UNCLAIMED) {
+            revert BadStatus();
+        }
         if (l.taskApplications[id][applicant] == bytes32(0)) revert NotApplicant();
 
         t.status = Status.CLAIMED;
         t.claimer = applicant;
         delete l.taskApplicants[id];
         emit TaskApplicationApproved(id, applicant, _msgSender());
+        _startClaimWindow(id, t);
     }
 
     /**
@@ -946,6 +1036,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
      * @param bountyToken         ERC-20 bounty token (or `address(0)` for none).
      * @param bountyPayout        Bounty amount in `bountyToken` units.
      * @param requiresApplication Recorded on the task even though it's already claimed.
+     * @param absoluteDeadline    Unix cutoff after which the claim is open to takeover (0 = none);
+     *                            must be in the future when non-zero.
+     * @param completionWindow    Per-claim submission window in seconds (0 = none). The assignee's
+     *                            deadline starts at assignment: `now + completionWindow`.
      * @return taskId             ID of the created task.
      */
     function createAndAssignTask(
@@ -956,11 +1050,16 @@ contract TaskManager is Initializable, ContextUpgradeable {
         address assignee,
         address bountyToken,
         uint256 bountyPayout,
-        bool requiresApplication
+        bool requiresApplication,
+        uint48 absoluteDeadline,
+        uint32 completionWindow
     ) external returns (uint256 taskId) {
-        return _createAndAssignTask(
+        taskId = _createAndAssignTask(
             payout, title, metadataHash, pid, assignee, requiresApplication, bountyToken, bountyPayout
         );
+        Task storage t = _layout()._tasks[taskId];
+        _setTaskDeadlines(taskId, t, absoluteDeadline, completionWindow);
+        _startClaimWindow(taskId, t);
     }
 
     function _createAndAssignTask(
@@ -1006,12 +1105,100 @@ contract TaskManager is Initializable, ContextUpgradeable {
 
         // Create and assign task in one go
         taskId = l.nextTaskId++;
-        l._tasks[taskId] =
-            Task(pid, uint96(payout), assignee, uint96(bountyPayout), requiresApplication, Status.CLAIMED, bountyToken);
+        l._tasks[taskId] = Task({
+            projectId: pid,
+            payout: uint96(payout),
+            claimer: assignee,
+            bountyPayout: uint96(bountyPayout),
+            requiresApplication: requiresApplication,
+            status: Status.CLAIMED,
+            bountyToken: bountyToken,
+            absoluteDeadline: 0, // set via _setTaskDeadlines / _startClaimWindow by the caller
+            completionWindow: 0,
+            claimDeadline: 0
+        });
 
         // Emit events
         emit TaskCreated(taskId, pid, payout, bountyToken, bountyPayout, requiresApplication, title, metadataHash);
         emit TaskAssigned(taskId, assignee, sender);
+    }
+
+    /*──────── Deadline Logic (v6) ─────*/
+    /**
+     * @dev True iff a CLAIMED task's claim protection has lapsed: its per-claim deadline or
+     *      absolute deadline (when set) is strictly in the past. The deadline second itself is
+     *      still protected (`>` not `>=`). Enforcement is lenient — expiry never blocks the
+     *      claimer's `submitTask`; it only allows someone else to take the claim over.
+     *      Callers gate on `status == CLAIMED` before consulting this.
+     */
+    function _claimExpired(Task storage t) internal view returns (bool) {
+        uint48 cd = t.claimDeadline;
+        if (cd != 0 && block.timestamp > cd) return true;
+        uint48 ad = t.absoluteDeadline;
+        return ad != 0 && block.timestamp > ad;
+    }
+
+    /**
+     * @dev Create-path deadline init. No-op (no write, no event) when both values are zero so
+     *      deadline-less tasks cost exactly what they did pre-v6. Reverts InvalidDeadline for a
+     *      non-zero absolute deadline that is not in the future — born-expired tasks are a footgun.
+     */
+    function _setTaskDeadlines(uint256 id, Task storage t, uint48 absoluteDeadline, uint32 completionWindow) internal {
+        if (absoluteDeadline == 0 && completionWindow == 0) return;
+        if (absoluteDeadline != 0 && absoluteDeadline <= block.timestamp) revert InvalidDeadline();
+        t.absoluteDeadline = absoluteDeadline;
+        t.completionWindow = completionWindow;
+        emit TaskDeadlinesSet(id, absoluteDeadline, completionWindow);
+    }
+
+    /**
+     * @dev Update-path deadline write plus in-flight claim-window adjustment. A past
+     *      `newAbsoluteDeadline` is deliberately accepted (see {updateTask}). Window changes
+     *      while the task is claimed adjust the current claim's deadline preserving the original
+     *      claim start (`claimDeadline - oldWindow + newWindow`); a task claimed while windowless
+     *      gets `now + newWindow`; clearing the window clears the claim deadline.
+     */
+    function _updateTaskDeadlines(uint256 id, Task storage t, uint48 newAbsoluteDeadline, uint32 newCompletionWindow)
+        internal
+    {
+        uint32 oldWindow = t.completionWindow;
+        if (t.absoluteDeadline != newAbsoluteDeadline || oldWindow != newCompletionWindow) {
+            t.absoluteDeadline = newAbsoluteDeadline;
+            t.completionWindow = newCompletionWindow;
+            emit TaskDeadlinesSet(id, newAbsoluteDeadline, newCompletionWindow);
+        }
+        // claimer != 0 ⟺ status ∈ {CLAIMED, SUBMITTED} here (terminal states revert in updateTask)
+        if (t.claimer != address(0) && oldWindow != newCompletionWindow) {
+            uint48 cd = t.claimDeadline;
+            uint48 newClaimDeadline;
+            if (newCompletionWindow == 0) {
+                newClaimDeadline = 0;
+            } else if (cd == 0) {
+                newClaimDeadline = uint48(block.timestamp) + newCompletionWindow;
+            } else {
+                // cd was claimStart + oldWindow, so this preserves the original claim start.
+                newClaimDeadline = uint48(uint256(cd) - oldWindow + newCompletionWindow);
+            }
+            if (newClaimDeadline != cd) {
+                t.claimDeadline = newClaimDeadline;
+                emit TaskClaimDeadlineSet(id, newClaimDeadline);
+            }
+        }
+    }
+
+    /**
+     * @dev (Re)start the per-claim submission window for the task's current claimer:
+     *      `claimDeadline = now + completionWindow`, or 0 when no window is configured.
+     *      Called on claim, assignment, application approval, and rejection (fresh window for
+     *      rework). Emits only when the stored value changes.
+     */
+    function _startClaimWindow(uint256 id, Task storage t) internal {
+        uint32 window = t.completionWindow;
+        uint48 newClaimDeadline = window == 0 ? 0 : uint48(block.timestamp) + window;
+        if (newClaimDeadline != t.claimDeadline) {
+            t.claimDeadline = newClaimDeadline;
+            emit TaskClaimDeadlineSet(id, newClaimDeadline);
+        }
     }
 
     /*──────── Config Setter (Optimized) ─────── */
@@ -1298,7 +1485,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
      * @notice Read-only dispatcher used by `TaskManagerLens` to surface storage fields
      *         without bloating the proxy ABI.
      * @dev Variants:
-     *      - `1` → Task: `d = abi.encode(uint256 id)` → `(bytes32 projectId, uint96 payout, address claimer, uint96 bountyPayout, bool requiresApplication, Status status, address bountyToken)`.
+     *      - `1` → Task: `d = abi.encode(uint256 id)` → `(bytes32 projectId, uint96 payout, address claimer, uint96 bountyPayout, bool requiresApplication, Status status, address bountyToken, uint48 absoluteDeadline, uint32 completionWindow, uint48 claimDeadline)`.
+     *             Deadline fields appended in v6 — `abi.decode` of the old 7-field tuple still works (trailing words are ignored for static tuples).
      *      - `2` → Project: `d = abi.encode(bytes32 pid)` → `(uint128 cap, uint128 spent, bool exists)`.
      *      - `3` → Hats contract: `d = ""` → `(address hats)`.
      *      - `4` → Executor: `d = ""` → `(address executor)`.
@@ -1327,7 +1515,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
                 task.bountyPayout,
                 task.requiresApplication,
                 task.status,
-                task.bountyToken
+                task.bountyToken,
+                task.absoluteDeadline,
+                task.completionWindow,
+                task.claimDeadline
             );
         } else if (t == 2) {
             // Project
