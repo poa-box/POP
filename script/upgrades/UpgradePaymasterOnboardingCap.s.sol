@@ -32,6 +32,15 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
 // The full-project `FOUNDRY_PROFILE=production forge build` is also clean (the DeployerTest
 // stack-too-deep that previously blocked it is fixed in this same PR).
 //
+// ⚠️ EIP-170 SIZE: PaymasterHub's runtime code exceeds the 24576-byte limit at the standard
+// optimizer_runs=200 (origin/main alone is ~25,488 B; +188 B from H4). It only fits at a LOW
+// optimizer setting: runs=1 -> 24,464 B (fits); runs=50 -> 24,578 B (2 B over). So Step1/Step2
+// MUST be broadcast with `--optimizer-runs 1`. The DeterministicDeployer is CREATE3 (address is
+// salt-only, code-independent) so the optimizer setting does NOT change the v18 address. The
+// sims assert `impl.code.length <= 24576`, so run them with the SAME `--optimizer-runs 1`.
+// (Proper long-term fix: slim PaymasterHub by moving code to PaymasterHubLens — mostly a main
+// concern, since main is already over the limit independent of this PR.)
+//
 // Version: v18 (probed free on Gnosis + Arbitrum, both registry and CREATE2, 2026-06-09).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -56,7 +65,7 @@ interface IGnosisSatellite {
 }
 
 /// @title Step1_DeployImplOnGnosis — deploy PaymasterHub v18 impl on Gnosis via DD.
-/// Usage: FOUNDRY_PROFILE=production forge script .../UpgradePaymasterOnboardingCap.s.sol:Step1_DeployImplOnGnosis --rpc-url gnosis --broadcast --slow --optimizer-runs 200
+/// Usage: FOUNDRY_PROFILE=production forge script .../UpgradePaymasterOnboardingCap.s.sol:Step1_DeployImplOnGnosis --rpc-url gnosis --broadcast --slow --optimizer-runs 1
 contract Step1_DeployImplOnGnosis is Script {
     function run() public {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
@@ -79,7 +88,7 @@ contract Step1_DeployImplOnGnosis is Script {
 }
 
 /// @title Step2_UpgradeFromArbitrum — deploy on Arbitrum via DD + upgrade beacon cross-chain.
-/// Usage: FOUNDRY_PROFILE=production forge script .../:Step2_UpgradeFromArbitrum --rpc-url arbitrum --broadcast --slow --optimizer-runs 200
+/// Usage: FOUNDRY_PROFILE=production forge script .../:Step2_UpgradeFromArbitrum --rpc-url arbitrum --broadcast --slow --optimizer-runs 1
 contract Step2_UpgradeFromArbitrum is Script {
     function run() public {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
@@ -106,7 +115,7 @@ contract Step2_UpgradeFromArbitrum is Script {
 }
 
 /// @title Step3_SetCapGnosis — activate the per-account cap on the Gnosis paymaster (preserves other config).
-/// Usage: FOUNDRY_PROFILE=production forge script .../:Step3_SetCapGnosis --rpc-url gnosis --broadcast --slow --optimizer-runs 200
+/// Usage: FOUNDRY_PROFILE=production forge script .../:Step3_SetCapGnosis --rpc-url gnosis --broadcast --slow --optimizer-runs 1
 contract Step3_SetCapGnosis is Script {
     function run() public {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
@@ -137,7 +146,7 @@ contract Step3_SetCapGnosis is Script {
 }
 
 /// @title Step4_SetCapArbitrum — activate the per-account cap on the Arbitrum paymaster (preserves other config).
-/// Usage: FOUNDRY_PROFILE=production forge script .../:Step4_SetCapArbitrum --rpc-url arbitrum --broadcast --slow --optimizer-runs 200
+/// Usage: FOUNDRY_PROFILE=production forge script .../:Step4_SetCapArbitrum --rpc-url arbitrum --broadcast --slow --optimizer-runs 1
 contract Step4_SetCapArbitrum is Script {
     function run() public {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
@@ -198,6 +207,10 @@ contract Sim_GnosisUpgrade is Script {
 
         // 1. Deploy the new impl and upgrade the Gnosis beacon (as the PoaManager owner would).
         address newImpl = address(new PaymasterHub());
+        // EIP-170: the live chain rejects runtime code > 24576 bytes (Foundry's script EVM does NOT enforce this,
+        // which is why an oversized impl can pass a sim yet fail the real CREATE3 deploy). PaymasterHub sits at the
+        // edge, so it must be deployed with a low --optimizer-runs (size-optimized). Fail loudly here if it won't fit.
+        require(newImpl.code.length <= 24576, "impl exceeds EIP-170 24KB limit -- lower --optimizer-runs");
         vm.prank(owner);
         poa.upgradeBeacon("PaymasterHub", newImpl, VERSION);
         require(poa.getCurrentImplementationById(keccak256("PaymasterHub")) == newImpl, "Sim: beacon not upgraded");
@@ -259,6 +272,10 @@ contract Sim_ArbitrumUpgrade is Script {
         // 1. Deploy + upgrade the Arbitrum beacon (the Hub owns the Arbitrum PoaManager, exactly as
         //    upgradeBeaconCrossChain does locally before broadcasting to satellites).
         address newImpl = address(new PaymasterHub());
+        // EIP-170: the live chain rejects runtime code > 24576 bytes (Foundry's script EVM does NOT enforce this,
+        // which is why an oversized impl can pass a sim yet fail the real CREATE3 deploy). PaymasterHub sits at the
+        // edge, so it must be deployed with a low --optimizer-runs (size-optimized). Fail loudly here if it won't fit.
+        require(newImpl.code.length <= 24576, "impl exceeds EIP-170 24KB limit -- lower --optimizer-runs");
         vm.prank(HUB);
         poa.upgradeBeacon("PaymasterHub", newImpl, VERSION);
         require(poa.getCurrentImplementationById(keccak256("PaymasterHub")) == newImpl, "Sim: arb beacon not upgraded");
