@@ -1146,7 +1146,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // consumes the vm.prank and createTask runs as the test contract.
         taskId = _nextTaskId(tm);
         vm.prank(executorAddr);
-        tm.createTask(2 ether, bytes("fresh-task"), bytes32(0), pid, address(0), 0, false);
+        tm.createTask(2 ether, bytes("fresh-task"), bytes32(0), pid, address(0), 0, false, 0, 0);
 
         vm.prank(claimerAddr);
         tm.claimTask(taskId);
@@ -1188,7 +1188,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // orgOwner wears EXECUTIVE → has global EDIT_FULL → can edit the CLAIMED task on the
         // fresh project (no per-project mask shadowing the global grant).
         vm.prank(orgOwner);
-        tm.updateTask(taskId, 25 ether, bytes("edited-at-deploy"), bytes32(0), address(0), 0);
+        tm.updateTask(taskId, 25 ether, bytes("edited-at-deploy"), bytes32(0), address(0), 0, 0, 0);
 
         // And updateTaskMetadata is also available to EDIT_FULL holders.
         vm.prank(orgOwner);
@@ -1217,7 +1217,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         vm.prank(orgOwner);
         vm.expectRevert(TaskManager.Unauthorized.selector);
-        tm.updateTask(taskId, 50 ether, bytes("nope"), bytes32(0), address(0), 0);
+        tm.updateTask(taskId, 50 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0);
     }
 
     function testBootstrapTaskManagerPerms_BootstrapProjectOverrideShadowsGlobalGrant() public {
@@ -1243,7 +1243,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         vm.prank(orgOwner);
         vm.expectRevert(TaskManager.Unauthorized.selector);
-        tm.updateTask(0, 25 ether, bytes("shadowed"), bytes32(0), address(0), 0);
+        tm.updateTask(0, 25 ether, bytes("shadowed"), bytes32(0), address(0), 0, 0, 0);
     }
 
     function testBootstrapTaskManagerPerms_EmptyRoleIndicesWithMasksRevertsAtomic() public {
@@ -1404,7 +1404,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         vm.prank(orgOwner);
         vm.expectRevert(TaskManager.Unauthorized.selector);
-        tm.updateTask(0, 50 ether, bytes("nope"), bytes32(0), address(0), 0);
+        tm.updateTask(0, 50 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0);
     }
 
     function testDeployFullOrgMismatchExecutorReverts() public {
@@ -5742,7 +5742,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         PaymasterHub.OrgConfig memory orgConfig = paymasterHub.getOrgConfig(orgId);
         assertTrue(orgConfig.operatorHatId != 0, "Operator hat should be set");
 
-        // Verify auto-whitelisted rules exist for deployed contracts
+        // Verify auto-whitelisted rules exist for deployed contracts (helper keeps this
+        // function under the production-profile IR stack limit).
+        _assertAutoWhitelistRules(orgId, result);
+
+        // Verify deposit was also credited
+        PaymasterHub.OrgFinancials memory financials = paymasterHub.getOrgFinancials(orgId);
+        assertEq(financials.deposited, 0.05 ether, "Org should have 0.05 ETH deposited");
+    }
+
+    function _assertAutoWhitelistRules(bytes32 orgId, OrgDeployer.DeploymentResult memory result) internal view {
         PaymasterHub.Rule memory rule;
 
         // Check QuickJoin quickJoinWithUser() is whitelisted
@@ -5757,9 +5766,35 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)")));
         assertTrue(rule.allowed, "TaskManager setFolders should be whitelisted (v4 bootstrap)");
 
-        // Check TaskManager v5 post-claim edit functions are whitelisted
+        // Check TaskManager v6 create selectors (deadline params appended) are whitelisted
         rule = paymasterHub.getRule(
-            orgId, result.taskManager, bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)"))
+            orgId,
+            result.taskManager,
+            bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)"))
+        );
+        assertTrue(rule.allowed, "TaskManager createTask should be whitelisted (v6 deadlines)");
+        rule = paymasterHub.getRule(
+            orgId,
+            result.taskManager,
+            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])"))
+        );
+        assertTrue(rule.allowed, "TaskManager createTasksBatch should be whitelisted (v6 deadlines)");
+        rule = paymasterHub.getRule(
+            orgId,
+            result.taskManager,
+            bytes4(
+                keccak256(
+                    "createAndAssignTask(uint256,bytes,bytes32,bytes32,address,address,uint256,bool,uint48,uint32)"
+                )
+            )
+        );
+        assertTrue(rule.allowed, "TaskManager createAndAssignTask should be whitelisted (v6 deadlines)");
+
+        // Check TaskManager v5 post-claim edit functions are whitelisted (v6 updateTask signature)
+        rule = paymasterHub.getRule(
+            orgId,
+            result.taskManager,
+            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)"))
         );
         assertTrue(rule.allowed, "TaskManager updateTask should be whitelisted (v5 edit)");
         rule = paymasterHub.getRule(
@@ -5783,10 +5818,6 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // Check EducationHub completeModule is whitelisted
         rule = paymasterHub.getRule(orgId, result.educationHub, bytes4(keccak256("completeModule(uint256,uint8)")));
         assertTrue(rule.allowed, "EducationHub completeModule should be whitelisted");
-
-        // Verify deposit was also credited
-        PaymasterHub.OrgFinancials memory financials = paymasterHub.getOrgFinancials(orgId);
-        assertEq(financials.deposited, 0.05 ether, "Org should have 0.05 ETH deposited");
     }
 
     function testDeployFullOrgWithPaymasterFeeCaps() public {
@@ -6168,12 +6199,12 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // ── TaskManager (12) ──
         assertEq(
-            bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool)")),
+            bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)")),
             TaskManager.createTask.selector,
             "createTask selector mismatch"
         );
         assertEq(
-            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool)[])")),
+            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])")),
             TaskManager.createTasksBatch.selector,
             "createTasksBatch selector mismatch"
         );
@@ -6212,7 +6243,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             bytes4(keccak256("cancelTask(uint256)")), TaskManager.cancelTask.selector, "cancelTask selector mismatch"
         );
         assertEq(
-            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)")),
+            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)")),
             TaskManager.updateTask.selector,
             "updateTask selector mismatch"
         );

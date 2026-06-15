@@ -437,7 +437,76 @@ setConfig(ConfigKey.PROJECT_MANAGER, abi.encode(projectId, oldManager, false)); 
 | `UNCLAIMED` | `updateTask` | CREATE permission |
 | `UNCLAIMED` | `cancelTask` | CREATE permission |
 | `CLAIMED` | `submitTask` | Only the claimer |
+| `CLAIMED` (claim expired) | `claimTask` / `assignTask` / `approveApplication` — takeover | CLAIM / ASSIGN / ASSIGN |
+| `CLAIMED` (claim expired, requiresApplication) | `applyForTask` | CLAIM permission |
 | `SUBMITTED` | `completeTask` | REVIEW permission |
+
+---
+
+## Deadlines & Takeover (v6)
+
+Tasks carry three deadline fields. Two are configured by creators/editors; the third is
+derived per claim. All are optional — `0` means "no deadline", and every task created
+before v6 reads zeros (no behavior change).
+
+| Field | Type | Set by | Meaning |
+|-------|------|--------|---------|
+| `absoluteDeadline` | `uint48` unix | create / `updateTask` | Calendar cutoff. While the task is CLAIMED past this moment, the claim is open to takeover. |
+| `completionWindow` | `uint32` seconds | create / `updateTask` | Per-claim window: each claimer must submit within this many seconds of claiming, or the claim becomes open to takeover. |
+| `claimDeadline` | `uint48` unix | contract | `claimTime + completionWindow`, recomputed at every claim, assignment, application approval, and rejection (fresh window for rework). `0` when no window. |
+
+A fourth, **soft due date** lives only in the task's IPFS metadata JSON (`dueDate`,
+unix seconds) — display-only, never enforced on-chain.
+
+### Lenient enforcement model
+
+Deadlines never block work — they only remove claim *protection*:
+
+- **`submitTask` is never deadline-gated.** A late claimer can still submit (and be
+  paid) right up until someone actually takes the task over.
+- A CLAIMED task is **expired** when `claimDeadline` or `absoluteDeadline` (whichever
+  is set) is strictly in the past. The deadline second itself is still protected.
+- An expired claim can be **taken over** in one transaction: `claimTask` (CLAIM
+  permission), `assignTask` (ASSIGN), or `approveApplication` (ASSIGN, for
+  application-gated tasks). The contract emits `TaskClaimExpired(id, previousClaimer,
+  newClaimer)` followed by the normal lifecycle event, and the new claimer gets a
+  fresh window. The ousted claimer can no longer submit.
+- For `requiresApplication` tasks, direct `claimTask` still reverts — but new
+  applicants may `applyForTask` while the task is CLAIMED-and-expired, and any past
+  or new applicant (including the ousted claimer) can be approved into the takeover.
+- The expired claimer may re-claim their own task to refresh the window — visible
+  on-chain as `TaskClaimExpired(prev == new)`.
+- `SUBMITTED` tasks are **never** takeover-able: delivered work must be reviewed
+  (completed or rejected) first. `rejectTask` restarts the window so rework gets a
+  fresh allowance.
+- Past the `absoluteDeadline`, claims (and takeovers) are still allowed — they are
+  simply born unprotected. Reviewers keep full control via `completeTask`.
+
+### Editing deadlines
+
+`updateTask` carries both knobs under its existing permission gates (executor / PM /
+`EDIT_FULL` any non-terminal status; `CREATE` while UNCLAIMED):
+
+- Changing `completionWindow` while a task is claimed adjusts the live
+  `claimDeadline`, preserving the original claim start (`claimDeadline - oldWindow +
+  newWindow`); a previously windowless claim starts `now + newWindow`; setting `0`
+  clears it.
+- A **past `absoluteDeadline` is deliberately accepted on update** (create paths
+  revert `InvalidDeadline` for non-future values). This is the admin lever that opens
+  an abandoned CLAIMED task to takeover — `cancelTask` is UNCLAIMED-only, so no other
+  remedy exists, including for tasks claimed before v6.
+
+### Events (indexer contract)
+
+| Event | Emitted |
+|-------|---------|
+| `TaskDeadlinesSet(uint256 indexed id, uint48 absoluteDeadline, uint32 completionWindow)` | At create only when at least one value is non-zero; on `updateTask` whenever either value changes. |
+| `TaskClaimDeadlineSet(uint256 indexed id, uint48 claimDeadline)` | Only when the stored value changes (claim/assign/approve start, reject reset, window-edit adjustment, clear). |
+| `TaskClaimExpired(uint256 indexed id, address indexed previousClaimer, address indexed newClaimer)` | On takeover, always before the lifecycle event (`TaskClaimed` / `TaskAssigned` / `TaskApplicationApproved`) in the same transaction. |
+
+Intra-tx ordering guarantees: `TaskCreated` → `TaskDeadlinesSet?` →
+`TaskClaimDeadlineSet?` (create paths); `TaskClaimExpired` → lifecycle event →
+`TaskClaimDeadlineSet?` (takeovers).
 
 ---
 

@@ -977,11 +977,14 @@ contract OrgDeployer is Initializable {
         pure
         returns (uint256)
     {
+        // TaskManager v6: create/update selectors carry deadline params (uint48 absoluteDeadline,
+        // uint32 completionWindow appended).
         targets[i] = tm;
-        selectors[i] = bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool)"));
+        selectors[i] = bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)"));
         i++;
         targets[i] = tm;
-        selectors[i] = bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool)[])"));
+        selectors[i] =
+            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])"));
         i++;
         targets[i] = tm;
         selectors[i] = bytes4(keccak256("claimTask(uint256)"));
@@ -1008,8 +1011,9 @@ contract OrgDeployer is Initializable {
         selectors[i] = bytes4(keccak256("cancelTask(uint256)"));
         i++;
         targets[i] = tm;
-        selectors[i] =
-            bytes4(keccak256("createAndAssignTask(uint256,bytes,bytes32,bytes32,address,address,uint256,bool)"));
+        selectors[i] = bytes4(
+            keccak256("createAndAssignTask(uint256,bytes,bytes32,bytes32,address,address,uint256,bool,uint48,uint32)")
+        );
         i++;
         targets[i] = tm;
         selectors[i] = bytes4(
@@ -1028,8 +1032,9 @@ contract OrgDeployer is Initializable {
         i++;
         // TaskManager v5: post-claim edit functions, gated on EDIT_META / EDIT_FULL perms.
         // Whitelist for gasless 4337/passkey calls by edit-permitted hat holders.
+        // (updateTask signature is the v6 variant with deadline params.)
         targets[i] = tm;
-        selectors[i] = bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256)"));
+        selectors[i] = bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)"));
         i++;
         targets[i] = tm;
         selectors[i] = bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)"));
