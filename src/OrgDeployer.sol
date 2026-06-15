@@ -983,11 +983,11 @@ contract OrgDeployer is Initializable {
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
     {
-        // Count: QuickJoin(6) + TaskManager(16) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 4)
+        // Count: QuickJoin(6) + TaskManager(16) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 2)
         uint256 count = 43;
         if (educationEnabled) count += 4;
         bool zkEmailEnabled = result.zkEmailInvites != address(0);
-        if (zkEmailEnabled) count += 4;
+        if (zkEmailEnabled) count += 2;
 
         targets = new address[](count);
         selectors = new bytes4[](count);
@@ -1024,9 +1024,10 @@ contract OrgDeployer is Initializable {
         }
     }
 
-    /// @dev EmailProof tuple: (string,bytes32,uint256,string,bytes32,bytes32,bool,bytes)
+    /// @dev ZkEmailProof tuple: (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string)
     ///      PasskeyEnrollment tuple: (bytes32,bytes32,bytes32,uint256)
     ///      WebAuthnAuth tuple: (bytes,bytes,uint256,uint256,bytes32,bytes32)
+    ///      v1 is domain-only (per-email claims land in Phase 5), so 2 selectors are whitelisted.
     function _appendZkEmailInvitesRules(
         address[] memory targets,
         bytes4[] memory selectors,
@@ -1036,28 +1037,16 @@ contract OrgDeployer is Initializable {
     ) private pure returns (uint256) {
         // Bare claim: Groth16 verify (~250k) + DKIM lookup + hat mint.
         targets[i] = zk;
-        selectors[i] =
-            bytes4(keccak256("claimRoleByDomain((string,bytes32,uint256,string,bytes32,bytes32,bool,bytes),address)"));
-        gasHints[i] = 800_000;
-        i++;
-        targets[i] = zk;
-        selectors[i] =
-            bytes4(keccak256("claimRoleByEmail((string,bytes32,uint256,string,bytes32,bytes32,bool,bytes),address)"));
+        selectors[i] = bytes4(
+            keccak256("claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address)")
+        );
         gasHints[i] = 800_000;
         i++;
         // Combined register + claim: passkey registration + account create + proof verify + hat mint.
         targets[i] = zk;
         selectors[i] = bytes4(
             keccak256(
-                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(string,bytes32,uint256,string,bytes32,bytes32,bool,bytes))"
-            )
-        );
-        gasHints[i] = 1_200_000;
-        i++;
-        targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(string,bytes32,uint256,string,bytes32,bytes32,bool,bytes))"
+                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string))"
             )
         );
         gasHints[i] = 1_200_000;

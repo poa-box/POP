@@ -7,7 +7,7 @@ import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/Upgradeabl
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
-import {EmailProof, IVerifier} from "../../src/zkemail/IVerifier.sol";
+import {ZkEmailProof, IZkEmailGroth16Verifier} from "../../src/zkemail/IVerifier.sol";
 import {IDKIMRegistry} from "../../src/zkemail/IDKIMRegistry.sol";
 import {SwitchableBeacon} from "../../src/SwitchableBeacon.sol";
 import {IExecutor, Executor} from "../../src/Executor.sol";
@@ -23,7 +23,7 @@ import {HybridVoting} from "../../src/HybridVoting.sol";
  *
  *   1. Deploy a ZkEmailInvites proxy for Test6 UNINITIALIZED — so the vote can
  *      register it BEFORE initializing it (see below).      [Hudson broadcast]
- *   2. Whitelist the 4 claim selectors on the Gnosis PaymasterHub so claims are
+ *   2. Whitelist the 2 domain claim selectors on the Gnosis PaymasterHub so claims are
  *      gasless, via Satellite.adminCall (same path as the createTasksBatch /
  *      setFolders retro-fixes).                             [Hudson broadcast]
  *   3. ONE governance vote, in order: register the proxy in OrgRegistry
@@ -88,12 +88,12 @@ interface IHatsLike {
 }
 
 /* ─────────────────────── Sim-only mocks ─────────────────────── */
-contract SimMockVerifier is IVerifier {
-    function commandBytes() external pure returns (uint256) {
-        return 605;
-    }
-
-    function verifyEmailProof(EmailProof memory) external pure returns (bool) {
+contract SimMockVerifier is IZkEmailGroth16Verifier {
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[3] calldata)
+        external
+        pure
+        returns (bool)
+    {
         return true;
     }
 }
@@ -159,17 +159,10 @@ abstract contract Test6Base is Script {
 
     /* ── Selectors (must match ZkEmailInvites external signatures exactly) ── */
     bytes4 internal constant SEL_CLAIM_DOMAIN =
-        bytes4(keccak256("claimRoleByDomain((string,bytes32,uint256,string,bytes32,bytes32,bool,bytes),address)"));
-    bytes4 internal constant SEL_CLAIM_EMAIL =
-        bytes4(keccak256("claimRoleByEmail((string,bytes32,uint256,string,bytes32,bytes32,bool,bytes),address)"));
+        bytes4(keccak256("claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address)"));
     bytes4 internal constant SEL_REG_CLAIM_DOMAIN = bytes4(
         keccak256(
-            "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(string,bytes32,uint256,string,bytes32,bytes32,bool,bytes))"
-        )
-    );
-    bytes4 internal constant SEL_REG_CLAIM_EMAIL = bytes4(
-        keccak256(
-            "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(string,bytes32,uint256,string,bytes32,bytes32,bool,bytes))"
+            "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string))"
         )
     );
 
@@ -185,24 +178,20 @@ abstract contract Test6Base is Script {
         return new ZkEmailInvites.InitEmailRule[](0);
     }
 
-    /// @dev Build the Satellite -> PaymasterHub.setRulesBatch calldata for the proxy's 4 selectors.
+    /// @dev Build the Satellite -> PaymasterHub.setRulesBatch calldata for the proxy's 2 domain selectors.
     function _paymasterInner(address proxy) internal pure returns (bytes memory) {
-        address[] memory targets = new address[](4);
-        bytes4[] memory sels = new bytes4[](4);
-        bool[] memory allowed = new bool[](4);
-        uint32[] memory hints = new uint32[](4);
-        for (uint256 i; i < 4; ++i) {
+        address[] memory targets = new address[](2);
+        bytes4[] memory sels = new bytes4[](2);
+        bool[] memory allowed = new bool[](2);
+        uint32[] memory hints = new uint32[](2);
+        for (uint256 i; i < 2; ++i) {
             targets[i] = proxy;
             allowed[i] = true;
         }
         sels[0] = SEL_CLAIM_DOMAIN;
         hints[0] = 800_000;
-        sels[1] = SEL_CLAIM_EMAIL;
-        hints[1] = 800_000;
-        sels[2] = SEL_REG_CLAIM_DOMAIN;
-        hints[2] = 1_200_000;
-        sels[3] = SEL_REG_CLAIM_EMAIL;
-        hints[3] = 1_200_000;
+        sels[1] = SEL_REG_CLAIM_DOMAIN;
+        hints[1] = 1_200_000;
         return abi.encodeWithSignature(
             "setRulesBatch(bytes32,address[],bytes4[],bool[],uint32[])", TEST6_ORG, targets, sels, allowed, hints
         );
@@ -275,7 +264,7 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
                 == 1_200_000,
             "register+claim rule not set"
         );
-        console.log("  Paymaster: all 4 selectors whitelisted via Satellite.adminCall");
+        console.log("  Paymaster: both domain selectors whitelisted via Satellite.adminCall");
 
         // 4. Authorize the proxy as a hat minter — the REAL governance path (no vm.store):
         //    (a) upgrade the Executor beacon (path A) so a vote can self-target the admin selector;
@@ -306,7 +295,7 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
 
         // 6. Claim end-to-end against the REAL Test6 executor + REAL Hats.
         require(!IHatsLike(HATS).isWearerOfHat(claimer, TEST6_MEMBER_HAT), "already wears hat");
-        EmailProof memory p = _proof(claimer);
+        ZkEmailProof memory p = _proof(claimer);
         vm.prank(claimer);
         proxy.claimRoleByDomain(p, claimer);
 
@@ -316,28 +305,15 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
         console.log("PASS: Test6 ZkEmailInvites integration verified end-to-end on Gnosis fork.");
     }
 
-    function _proof(address claimer) internal view returns (EmailProof memory p) {
-        p.domainName = INVITE_DOMAIN;
-        p.publicKeyHash = bytes32(uint256(0xAA));
-        p.timestamp = block.timestamp;
-        p.maskedCommand = string.concat("Claim POP role for ", _hex(claimer));
+    /// @dev The claimer is bound via the third public signal supplied by the call site (the verifier is
+    ///      mocked here), not carried in the struct. Nullifier stays claimer-derived to keep it unique.
+    function _proof(address claimer) internal pure returns (ZkEmailProof memory p) {
+        p.pA = [uint256(1), uint256(2)];
+        p.pB = [[uint256(1), uint256(2)], [uint256(3), uint256(4)]];
+        p.pC = [uint256(5), uint256(6)];
+        p.pubkeyHash = bytes32(uint256(0xAA));
         p.emailNullifier = keccak256(abi.encode("nullifier", claimer));
-        p.accountSalt = keccak256(abi.encode("salt", claimer));
-        p.isCodeExist = true;
-        p.proof = hex"00";
-    }
-
-    function _hex(address a) internal pure returns (string memory out) {
-        bytes16 alphabet = "0123456789abcdef";
-        bytes memory s = new bytes(42);
-        s[0] = "0";
-        s[1] = "x";
-        uint256 v = uint256(uint160(a));
-        for (uint256 i = 0; i < 40; ++i) {
-            s[41 - i] = alphabet[v & 0xf];
-            v >>= 4;
-        }
-        out = string(s);
+        p.domainName = INVITE_DOMAIN;
     }
 }
 

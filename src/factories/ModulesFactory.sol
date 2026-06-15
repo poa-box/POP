@@ -328,7 +328,7 @@ contract ModulesFactory {
         emailRules = new ZkEmailInvites.InitEmailRule[](cfg.emailRules.length);
         for (uint256 i; i < cfg.emailRules.length; ++i) {
             emailRules[i] = ZkEmailInvites.InitEmailRule({
-                accountSalt: cfg.emailRules[i].accountSalt,
+                emailHash: cfg.emailRules[i].accountSalt,
                 hatIds: RoleResolver.resolveRoleBitmap(registry, params.orgId, cfg.emailRules[i].rolesBitmap),
                 expiry: cfg.emailRules[i].expiry
             });

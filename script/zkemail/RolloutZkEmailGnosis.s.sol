@@ -6,14 +6,13 @@ import "forge-std/console.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
-import {EmailProof, IVerifier} from "../../src/zkemail/IVerifier.sol";
+import {ZkEmailProof, IZkEmailGroth16Verifier} from "../../src/zkemail/IVerifier.sol";
 import {SwitchableBeacon} from "../../src/SwitchableBeacon.sol";
 import {IExecutor} from "../../src/Executor.sol";
 import {Executor} from "../../src/Executor.sol";
 import {OrgDeployer} from "../../src/OrgDeployer.sol";
 import {ModulesFactory} from "../../src/factories/ModulesFactory.sol";
 import {Groth16Verifier} from "../../src/zkemail/vendor/Groth16Verifier.sol";
-import {Verifier} from "../../src/zkemail/vendor/Verifier.sol";
 import {PoaDKIMRegistry} from "../../src/zkemail/PoaDKIMRegistry.sol";
 
 /*
@@ -24,13 +23,13 @@ import {PoaDKIMRegistry} from "../../src/zkemail/PoaDKIMRegistry.sol";
  * Chains EVERY step of the production rollout end-to-end on a real Gnosis fork, in order, and
  * asserts each effect against live state:
  *
- *   1. Deploy the REAL ZK crypto infra (Groth16Verifier + Verifier + PoaDKIMRegistry) and prove
+ *   1. Deploy the REAL ZK crypto infra (Groth16Verifier + PoaDKIMRegistry) and prove
  *      the real verifier executes the pairing check (rejects a bogus proof).
  *   2. Upgrade the OrgDeployer beacon, repoint the ModulesFactory, register the ZkEmailInvites beacon.
  *   3. Upgrade the Executor beacon (reaches Test6 via its Mirror-mode SwitchableBeacon).
  *   4. Wire the verifier + registry into the OrgDeployer (setZkEmailInfrastructure).
  *   5. Deploy Test6's ZkEmailInvites proxy (real verifier + registry, Member-role domain rule at init).
- *   6. Whitelist the 4 claim selectors on the real PaymasterHub (gasless).
+ *   6. Whitelist the 2 domain claim selectors on the real PaymasterHub (gasless).
  *   7. Authorize the proxy as a hat minter through the REAL upgraded Executor, via the exact call
  *      announceWinner makes — executor.execute(batch) pranked as the org's allowedCaller (HybridVoting),
  *      with the batch self-targeting setHatMinterAuthorization (impossible before the Executor upgrade).
@@ -78,12 +77,12 @@ interface IHatsLikeR {
     function isWearerOfHat(address wearer, uint256 hatId) external view returns (bool);
 }
 
-contract SimMockVerifierR is IVerifier {
-    function commandBytes() external pure returns (uint256) {
-        return 605;
-    }
-
-    function verifyEmailProof(EmailProof memory) external pure returns (bool) {
+contract SimMockVerifierR is IZkEmailGroth16Verifier {
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[3] calldata)
+        external
+        pure
+        returns (bool)
+    {
         return true;
     }
 }
@@ -111,22 +110,15 @@ contract SimRolloutGnosis is Script {
     bytes32 constant EXEC_SLOT = keccak256("poa.executor.storage");
 
     bytes4 constant SEL_CLAIM_DOMAIN =
-        bytes4(keccak256("claimRoleByDomain((string,bytes32,uint256,string,bytes32,bytes32,bool,bytes),address)"));
-    bytes4 constant SEL_CLAIM_EMAIL =
-        bytes4(keccak256("claimRoleByEmail((string,bytes32,uint256,string,bytes32,bytes32,bool,bytes),address)"));
+        bytes4(keccak256("claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address)"));
     bytes4 constant SEL_REG_CLAIM_DOMAIN = bytes4(
         keccak256(
-            "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(string,bytes32,uint256,string,bytes32,bytes32,bool,bytes))"
-        )
-    );
-    bytes4 constant SEL_REG_CLAIM_EMAIL = bytes4(
-        keccak256(
-            "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(string,bytes32,uint256,string,bytes32,bytes32,bool,bytes))"
+            "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string))"
         )
     );
 
     /* ── State threaded across phases ── */
-    Verifier verifier;
+    Groth16Verifier verifier;
     PoaDKIMRegistry registry;
     ZkEmailInvites proxy;
     bytes32 dkimKeyHash;
@@ -153,10 +145,12 @@ contract SimRolloutGnosis is Script {
 
     /* ─── 1. Deploy real crypto infra ─── */
     function _phase1DeployInfra() internal {
-        address groth16 = address(new Groth16Verifier());
-        verifier = new Verifier(groth16);
+        verifier = new Groth16Verifier();
         registry = new PoaDKIMRegistry(HUDSON);
-        require(!verifier.verifyEmailProof(_bogusProof()), "real verifier accepted a bogus proof!");
+        ZkEmailProof memory bogus = _bogusProof();
+        uint256[3] memory signals =
+            [uint256(bogus.pubkeyHash), uint256(bogus.emailNullifier), uint256(uint160(address(0)))];
+        require(!verifier.verifyProof(bogus.pA, bogus.pB, bogus.pC, signals), "real verifier accepted a bogus proof!");
         console.log("[1] Real infra deployed; verifier rejected a bogus proof. Verifier:", address(verifier));
     }
 
@@ -229,7 +223,7 @@ contract SimRolloutGnosis is Script {
         IPaymasterHubRuleR.Rule memory r =
             IPaymasterHubRuleR(PAYMASTER).getRule(TEST6_ORG, address(proxy), SEL_CLAIM_DOMAIN);
         require(r.allowed && r.maxCallGasHint == 800_000, "claim rule not set");
-        console.log("[6] Paymaster: 4 claim selectors whitelisted (gasless).");
+        console.log("[6] Paymaster: 2 domain claim selectors whitelisted (gasless).");
     }
 
     /* ─── 7. Authorize minter through the REAL upgraded Executor (governance path) ─── */
@@ -255,7 +249,7 @@ contract SimRolloutGnosis is Script {
         vm.prank(HUDSON);
         registry.setKeyForDomain(INVITE_DOMAIN, dkimKeyHash, true);
 
-        EmailProof memory bogus = _claimProof();
+        ZkEmailProof memory bogus = _claimProof();
         vm.prank(claimer);
         vm.expectRevert(ZkEmailInvites.InvalidProof.selector);
         proxy.claimRoleByDomain(bogus, claimer);
@@ -273,7 +267,7 @@ contract SimRolloutGnosis is Script {
         IEligibilityR(TEST6_ELIGIBILITY).setWearerEligibility(claimer, TEST6_MEMBER_HAT, true, true);
 
         require(!IHatsLikeR(HATS).isWearerOfHat(claimer, TEST6_MEMBER_HAT), "already wears hat");
-        EmailProof memory p = _claimProof();
+        ZkEmailProof memory p = _claimProof();
         vm.prank(claimer);
         proxy.claimRoleByDomain(p, claimer);
 
@@ -297,70 +291,44 @@ contract SimRolloutGnosis is Script {
     }
 
     function _paymasterInner(address p) internal pure returns (bytes memory) {
-        address[] memory targets = new address[](4);
-        bytes4[] memory sels = new bytes4[](4);
-        bool[] memory allowed = new bool[](4);
-        uint32[] memory hints = new uint32[](4);
-        for (uint256 i; i < 4; ++i) {
+        address[] memory targets = new address[](2);
+        bytes4[] memory sels = new bytes4[](2);
+        bool[] memory allowed = new bool[](2);
+        uint32[] memory hints = new uint32[](2);
+        for (uint256 i; i < 2; ++i) {
             targets[i] = p;
             allowed[i] = true;
         }
         sels[0] = SEL_CLAIM_DOMAIN;
         hints[0] = 800_000;
-        sels[1] = SEL_CLAIM_EMAIL;
-        hints[1] = 800_000;
-        sels[2] = SEL_REG_CLAIM_DOMAIN;
-        hints[2] = 1_200_000;
-        sels[3] = SEL_REG_CLAIM_EMAIL;
-        hints[3] = 1_200_000;
+        sels[1] = SEL_REG_CLAIM_DOMAIN;
+        hints[1] = 1_200_000;
         return abi.encodeWithSignature(
             "setRulesBatch(bytes32,address[],bytes4[],bool[],uint32[])", TEST6_ORG, targets, sels, allowed, hints
         );
     }
 
-    /// @dev Structurally valid (coords < field q) but cryptographically bogus proof bound to `claimer`.
-    function _claimProof() internal view returns (EmailProof memory p) {
-        uint256[2] memory pA = [uint256(1), uint256(2)];
-        uint256[2][2] memory pB = [[uint256(1), uint256(2)], [uint256(3), uint256(4)]];
-        uint256[2] memory pC = [uint256(5), uint256(6)];
-        p = EmailProof({
-            domainName: INVITE_DOMAIN,
-            publicKeyHash: dkimKeyHash,
-            timestamp: block.timestamp,
-            maskedCommand: string.concat("Claim POP role for ", _hex(claimer)),
+    /// @dev Structurally valid (coords < field q) but cryptographically bogus proof. The claimer is
+    ///      bound via the third public signal supplied by the call site, not carried in the struct.
+    function _claimProof() internal view returns (ZkEmailProof memory p) {
+        p = ZkEmailProof({
+            pA: [uint256(1), uint256(2)],
+            pB: [[uint256(1), uint256(2)], [uint256(3), uint256(4)]],
+            pC: [uint256(5), uint256(6)],
+            pubkeyHash: dkimKeyHash,
             emailNullifier: keccak256(abi.encode("nullifier", claimer)),
-            accountSalt: keccak256(abi.encode("salt", claimer)),
-            isCodeExist: true,
-            proof: abi.encode(pA, pB, pC)
+            domainName: INVITE_DOMAIN
         });
     }
 
-    function _bogusProof() internal pure returns (EmailProof memory p) {
-        uint256[2] memory pA = [uint256(1), uint256(2)];
-        uint256[2][2] memory pB = [[uint256(1), uint256(2)], [uint256(3), uint256(4)]];
-        uint256[2] memory pC = [uint256(5), uint256(6)];
-        p = EmailProof({
-            domainName: "gmail.com",
-            publicKeyHash: bytes32(uint256(0xAA)),
-            timestamp: 0,
-            maskedCommand: "Claim POP role for 0x0000000000000000000000000000000000000000",
+    function _bogusProof() internal pure returns (ZkEmailProof memory p) {
+        p = ZkEmailProof({
+            pA: [uint256(1), uint256(2)],
+            pB: [[uint256(1), uint256(2)], [uint256(3), uint256(4)]],
+            pC: [uint256(5), uint256(6)],
+            pubkeyHash: bytes32(uint256(0xAA)),
             emailNullifier: bytes32(uint256(7)),
-            accountSalt: bytes32(uint256(8)),
-            isCodeExist: true,
-            proof: abi.encode(pA, pB, pC)
+            domainName: "gmail.com"
         });
-    }
-
-    function _hex(address a) internal pure returns (string memory out) {
-        bytes16 alphabet = "0123456789abcdef";
-        bytes memory s = new bytes(42);
-        s[0] = "0";
-        s[1] = "x";
-        uint256 v = uint256(uint160(a));
-        for (uint256 i = 0; i < 40; ++i) {
-            s[41 - i] = alphabet[v & 0xf];
-            v >>= 4;
-        }
-        out = string(s);
     }
 }

@@ -5,23 +5,21 @@ import "forge-std/Script.sol";
 import "forge-std/console.sol";
 
 import {Groth16Verifier} from "../../src/zkemail/vendor/Groth16Verifier.sol";
-import {Verifier} from "../../src/zkemail/vendor/Verifier.sol";
 import {PoaDKIMRegistry} from "../../src/zkemail/PoaDKIMRegistry.sol";
-import {EmailProof} from "../../src/zkemail/IVerifier.sol";
+import {ZkEmailProof} from "../../src/zkemail/IVerifier.sol";
 
 /*
  * ============================================================================
  * Deploy the ZK Email cryptographic infrastructure (per chain)
  * ============================================================================
  *
- * Deploys the three contracts the ZkEmailInvites module needs to verify email
+ * Deploys the two contracts the ZkEmailInvites module needs to verify email
  * proofs on-chain. None of these are deployed on Gnosis/Arbitrum today, so they
  * must be stood up fresh:
  *
- *   1. Groth16Verifier — zk-email's snarkjs-generated proof verifier (vendored verbatim),
- *      bound to the email_auth_with_body_parsing_with_qp_encoding circuit.
- *   2. Verifier         — thin wrapper packing EmailProof public signals and calling (1).
- *   3. PoaDKIMRegistry  — owner-managed ERC-7969 DKIM key-hash allowlist.
+ *   1. Groth16Verifier — snarkjs-generated proof verifier (vendored verbatim) for the
+ *      PopRoleClaim circuit (3 public signals). The module calls it directly.
+ *   2. PoaDKIMRegistry  — owner-managed ERC-7969 DKIM key-hash allowlist.
  *
  * Then (broadcast only) it seeds the DKIM key for INVITE_DOMAIN and wires the addresses into
  * the OrgDeployer via Satellite.adminCall(setZkEmailInfrastructure). The wire step REQUIRES the
@@ -52,29 +50,24 @@ abstract contract DeployInfraBase is Script {
 
     function _deployInfra(address registryOwner)
         internal
-        returns (Verifier verifier, PoaDKIMRegistry registry, address groth16)
+        returns (Groth16Verifier verifier, PoaDKIMRegistry registry, address groth16)
     {
-        groth16 = address(new Groth16Verifier());
-        verifier = new Verifier(groth16);
+        verifier = new Groth16Verifier();
+        groth16 = address(verifier);
         registry = new PoaDKIMRegistry(registryOwner);
     }
 
     /// @dev A structurally-valid (all coords < field q) but cryptographically-bogus proof. The real
     ///      Groth16 verifier should run the full pairing check and return false — proving the
     ///      deployed verifier actually executes, not a stub.
-    function _bogusProof(string memory domain, bytes32 keyHash) internal pure returns (EmailProof memory p) {
-        uint256[2] memory pA = [uint256(1), uint256(2)];
-        uint256[2][2] memory pB = [[uint256(1), uint256(2)], [uint256(3), uint256(4)]];
-        uint256[2] memory pC = [uint256(5), uint256(6)];
-        p = EmailProof({
-            domainName: domain,
-            publicKeyHash: keyHash,
-            timestamp: 0,
-            maskedCommand: "Claim POP role for 0x0000000000000000000000000000000000000000",
+    function _bogusProof(string memory domain, bytes32 keyHash) internal pure returns (ZkEmailProof memory p) {
+        p = ZkEmailProof({
+            pA: [uint256(1), uint256(2)],
+            pB: [[uint256(1), uint256(2)], [uint256(3), uint256(4)]],
+            pC: [uint256(5), uint256(6)],
+            pubkeyHash: keyHash,
             emailNullifier: bytes32(uint256(7)),
-            accountSalt: bytes32(uint256(8)),
-            isCodeExist: true,
-            proof: abi.encode(pA, pB, pC)
+            domainName: domain
         });
     }
 }
@@ -83,18 +76,19 @@ contract SimDeployInfraGnosis is DeployInfraBase {
     function run() public {
         console.log("\n=== SIM: Deploy ZK Email infra (Gnosis) ===");
 
-        (Verifier verifier, PoaDKIMRegistry registry, address groth16) = _deployInfra(HUDSON);
+        (Groth16Verifier verifier, PoaDKIMRegistry registry, address groth16) = _deployInfra(HUDSON);
         require(groth16.code.length > 0, "Groth16Verifier has no code");
         require(address(verifier).code.length > 0, "Verifier has no code");
         require(address(registry).code.length > 0, "Registry has no code");
-        require(verifier.commandBytes() == 605, "unexpected commandBytes");
         console.log("  Groth16Verifier:", groth16);
-        console.log("  Verifier:", address(verifier));
         console.log("  PoaDKIMRegistry:", address(registry));
 
         // The REAL verifier executes the pairing check and rejects a bogus proof (not a stub).
         bytes32 keyHash = keccak256("sim-dkim-key");
-        require(!verifier.verifyEmailProof(_bogusProof("gmail.com", keyHash)), "bogus proof accepted!");
+        ZkEmailProof memory bogus = _bogusProof("gmail.com", keyHash);
+        uint256[3] memory signals =
+            [uint256(bogus.pubkeyHash), uint256(bogus.emailNullifier), uint256(uint160(address(0)))];
+        require(!verifier.verifyProof(bogus.pA, bogus.pB, bogus.pC, signals), "bogus proof accepted!");
         console.log("  Real Groth16 verifier rejected a bogus proof OK");
 
         // Registry: seeded key valid, everything else invalid.
@@ -118,7 +112,7 @@ contract BroadcastDeployInfraGnosis is DeployInfraBase {
         address registryOwner = vm.envOr("REGISTRY_OWNER", HUDSON);
 
         vm.startBroadcast(key);
-        (Verifier verifier, PoaDKIMRegistry registry, address groth16) = _deployInfra(registryOwner);
+        (Groth16Verifier verifier, PoaDKIMRegistry registry, address groth16) = _deployInfra(registryOwner);
         // Seed the real DKIM key (works in-broadcast only if registryOwner == Hudson; else seed separately).
         if (registryOwner == HUDSON) {
             registry.setKeyForDomain(domain, keyHash, true);
