@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IPaymaster} from "./interfaces/IPaymaster.sol";
 import {IEntryPoint} from "./interfaces/IEntryPoint.sol";
-import {PackedUserOperation, UserOpLib} from "./interfaces/PackedUserOperation.sol";
+import {PackedUserOperation} from "./interfaces/PackedUserOperation.sol";
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {IERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol";
 import {PaymasterHubErrors} from "./libs/PaymasterHubErrors.sol";
@@ -91,8 +91,6 @@ interface IPaymasterHubStorage {
  *      All public functions take bytes32 orgId to match PaymasterHub's org-scoped storage.
  */
 contract PaymasterHubLens {
-    using UserOpLib for bytes32;
-
     // ============ Constants ============
     uint8 private constant PAYMASTER_DATA_VERSION = 1;
     uint8 private constant SUBJECT_TYPE_ACCOUNT = 0x00;

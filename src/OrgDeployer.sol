@@ -7,7 +7,6 @@ import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 
 import "./OrgRegistry.sol";
 import {IHybridVotingInit} from "./libs/ModuleDeploymentLib.sol";
-import {RoleResolver} from "./libs/RoleResolver.sol";
 import {GovernanceFactory, IHatsTreeSetup} from "./factories/GovernanceFactory.sol";
 import {AccessFactory} from "./factories/AccessFactory.sol";
 import {ModulesFactory} from "./factories/ModulesFactory.sol";

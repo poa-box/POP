@@ -25,8 +25,6 @@ import {PaymasterCalldataLib} from "./libs/PaymasterCalldataLib.sol";
  * @custom:security-contact security@poa.org
  */
 contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IERC165 {
-    using UserOpLib for bytes32;
-
     // ============ Constants ============
     uint8 private constant PAYMASTER_DATA_VERSION = 1;
     uint8 private constant SUBJECT_TYPE_ACCOUNT = 0x00;
@@ -111,6 +109,9 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         uint32 currentDay; // Day tracker (timestamp / 1 days)
         bool enabled; // Whether onboarding sponsorship is active
         address accountRegistry; // UniversalAccountRegistry — only allowed callData target during onboarding
+        // Appended (v-next): lifetime cap on sponsored onboardings per sender (0 == unlimited).
+        // Packs into the same slot as `accountRegistry` (160 + 8 bits) — no existing field moves.
+        uint8 maxOnboardingsPerAccount;
     }
 
     /**
@@ -167,6 +168,8 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.orgdeploy")) - 1));
     bytes32 private constant ORG_DEPLOY_COUNTS_STORAGE_LOCATION =
         keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.orgdeploy.counts")) - 1));
+    bytes32 private constant ONBOARDING_COUNTS_STORAGE_LOCATION =
+        keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.onboarding.counts")) - 1));
 
     // ============ Constructor ============
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -221,6 +224,7 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         OnboardingConfig storage onboarding = _getOnboardingStorage();
         onboarding.maxGasPerCreation = 0.01 ether; // ~$30 worth of gas at typical L1 prices
         onboarding.dailyCreationLimit = 1000; // 1000 accounts per day
+        onboarding.maxOnboardingsPerAccount = 3; // lifetime sponsored onboardings per sender: register + profile + 1 retry (0 == unlimited)
         onboarding.enabled = true;
 
         // Initialize org deploy config (enabled, max cost per deploy, 100 deployments/day, 2 per account)
@@ -1276,25 +1280,30 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
      * @dev Only PoaManager can modify onboarding parameters
      * @param _maxGasPerCreation Maximum cost in wei allowed per account creation
      * @param _dailyCreationLimit Maximum accounts that can be created per day globally
+     * @param _maxOnboardingsPerAccount Lifetime cap on sponsored onboardings per sender (0 == unlimited)
      * @param _enabled Whether onboarding sponsorship is active
      * @param _accountRegistry UniversalAccountRegistry address (only allowed callData target)
      */
     function setOnboardingConfig(
         uint128 _maxGasPerCreation,
         uint128 _dailyCreationLimit,
+        uint8 _maxOnboardingsPerAccount,
         bool _enabled,
         address _accountRegistry
     ) external {
-        if (msg.sender != _getMainStorage().poaManager) revert PaymasterHubErrors.NotPoaManager();
+        if (msg.sender != _getMainStorage().poaManager) {
+            revert PaymasterHubErrors.NotPoaManager();
+        }
 
         OnboardingConfig storage onboarding = _getOnboardingStorage();
         onboarding.maxGasPerCreation = _maxGasPerCreation;
         onboarding.dailyCreationLimit = _dailyCreationLimit;
+        onboarding.maxOnboardingsPerAccount = _maxOnboardingsPerAccount;
         onboarding.enabled = _enabled;
         onboarding.accountRegistry = _accountRegistry;
 
         emit PaymasterHubErrors.OnboardingConfigUpdated(
-            _maxGasPerCreation, _dailyCreationLimit, _enabled, _accountRegistry
+            _maxGasPerCreation, _dailyCreationLimit, _maxOnboardingsPerAccount, _enabled, _accountRegistry
         );
     }
 
@@ -1488,6 +1497,13 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         }
     }
 
+    function _getOnboardingCountsStorage() private pure returns (mapping(address => uint8) storage $) {
+        bytes32 slot = ONBOARDING_COUNTS_STORAGE_LOCATION;
+        assembly {
+            $.slot := slot
+        }
+    }
+
     function _getOrgDeployStorage() private pure returns (OrgDeployConfig storage $) {
         bytes32 slot = ORG_DEPLOY_STORAGE_LOCATION;
         assembly {
@@ -1630,6 +1646,21 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
 
         // Check gas cost limit
         if (maxCost > onboarding.maxGasPerCreation) revert PaymasterHubErrors.GasTooHigh();
+
+        // Check per-account lifetime limit. Unlike the daily counter, this is NOT refunded in postOp on failure:
+        // a failed onboarding op still charges the solidarity fund (_updateOnboardingUsage deducts actualGasCost
+        // regardless of success), so every solidarity-charging attempt must consume the cap — otherwise repeated
+        // failing ops would drain the fund while keeping the count at zero. (Validation state only persists when the
+        // op is actually included on-chain, at which point postOp always runs and charges, so count and spend stay
+        // in lockstep.) maxOnboardingsPerAccount == 0 means unlimited; in that mode we skip counting entirely to avoid
+        // uint8 overflow on heavy senders and to keep already-deployed hubs (where the appended field reads 0) working.
+        if (onboarding.maxOnboardingsPerAccount != 0) {
+            mapping(address => uint8) storage counts = _getOnboardingCountsStorage();
+            if (counts[account] >= onboarding.maxOnboardingsPerAccount) {
+                revert PaymasterHubErrors.OnboardingLimitExceeded();
+            }
+            counts[account]++;
+        }
 
         // Check daily rate limit
         uint32 today = uint32(block.timestamp / 1 days);

@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 /*──────────────────── OpenZeppelin v5.3 Upgradeables ─────────────*/
 import "@openzeppelin-contracts-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/ContextUpgradeable.sol";
 import "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
 
 /*────────────── External Hats interface ─────────────*/
