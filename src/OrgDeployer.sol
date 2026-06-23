@@ -150,7 +150,8 @@ contract OrgDeployer is Initializable {
         IHats hatsV2; // upgrade-safe hats reference (inside ERC-7201 namespace)
         // ZK Email protocol infra (set once per chain via PoaManager). If unset, ZkEmailInvites
         // module deployment is skipped per-org and the feature is gracefully unavailable.
-        address zkEmailVerifier;
+        address zkEmailDomainVerifier; // 3-signal PopRoleClaim verifier (domain claims)
+        address zkEmailEmailVerifier; // 4-signal PopRoleClaimV2 verifier (specific-address claims)
         address zkEmailDkimRegistry;
     }
 
@@ -224,14 +225,16 @@ contract OrgDeployer is Initializable {
         l.universalPasskeyFactory = _universalFactory;
     }
 
-    /// @notice Wire the per-chain ZK Email protocol infra. Once both are non-zero, every new
+    /// @notice Wire the per-chain ZK Email protocol infra. Once all are non-zero, every new
     ///         org gets a ZkEmailInvites proxy alongside its other modules.
-    /// @dev Only callable by PoaManager. Passing address(0) for either field is a no-op for
-    ///      that field; pass both non-zero to enable the feature.
-    function setZkEmailInfrastructure(address verifier, address dkimRegistry) external {
+    /// @dev Only callable by PoaManager. Passing address(0) for any field is a no-op for that field;
+    ///      pass all non-zero to enable the feature. Two verifiers are wired: a 3-signal domain verifier
+    ///      (PopRoleClaim) and a 4-signal specific-address verifier (PopRoleClaimV2, exposes emailHash).
+    function setZkEmailInfrastructure(address domainVerifier, address emailVerifier, address dkimRegistry) external {
         Layout storage l = _layout();
         if (msg.sender != l.poaManager) revert InvalidAddress();
-        if (verifier != address(0)) l.zkEmailVerifier = verifier;
+        if (domainVerifier != address(0)) l.zkEmailDomainVerifier = domainVerifier;
+        if (emailVerifier != address(0)) l.zkEmailEmailVerifier = emailVerifier;
         if (dkimRegistry != address(0)) l.zkEmailDkimRegistry = dkimRegistry;
     }
 
@@ -544,7 +547,8 @@ contract OrgDeployer is Initializable {
                 autoUpgrade: params.autoUpgrade,
                 roleAssignments: moduleRoles,
                 educationHubConfig: params.educationHubConfig,
-                zkEmailVerifier: l.zkEmailVerifier,
+                zkEmailDomainVerifier: l.zkEmailDomainVerifier,
+                zkEmailEmailVerifier: l.zkEmailEmailVerifier,
                 zkEmailDkimRegistry: l.zkEmailDkimRegistry,
                 accountRegistry: params.registryAddr,
                 universalFactory: l.universalPasskeyFactory,
@@ -983,11 +987,11 @@ contract OrgDeployer is Initializable {
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
     {
-        // Count: QuickJoin(6) + TaskManager(16) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 2)
+        // Count: QuickJoin(6) + TaskManager(16) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 4)
         uint256 count = 43;
         if (educationEnabled) count += 4;
         bool zkEmailEnabled = result.zkEmailInvites != address(0);
-        if (zkEmailEnabled) count += 2;
+        if (zkEmailEnabled) count += 4;
 
         targets = new address[](count);
         selectors = new bytes4[](count);
@@ -1024,10 +1028,11 @@ contract OrgDeployer is Initializable {
         }
     }
 
-    /// @dev ZkEmailProof tuple: (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string)
+    /// @dev ZkEmailProof tuple (domain): (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string)
+    ///      ZkEmailProofV2 tuple (email): (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32)
     ///      PasskeyEnrollment tuple: (bytes32,bytes32,bytes32,uint256)
     ///      WebAuthnAuth tuple: (bytes,bytes,uint256,uint256,bytes32,bytes32)
-    ///      v1 is domain-only (per-email claims land in Phase 5), so 2 selectors are whitelisted.
+    ///      4 selectors: domain claim, specific-address claim, and the two passkey register-and-claim variants.
     function _appendZkEmailInvitesRules(
         address[] memory targets,
         bytes4[] memory selectors,
@@ -1035,18 +1040,38 @@ contract OrgDeployer is Initializable {
         address zk,
         uint256 i
     ) private pure returns (uint256) {
-        // Bare claim: Groth16 verify (~250k) + DKIM lookup + hat mint.
-        targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256("claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address)")
-        );
-        gasHints[i] = 800_000;
-        i++;
-        // Combined register + claim: passkey registration + account create + proof verify + hat mint.
+        // Bare domain claim: Groth16 verify (~250k) + DKIM lookup + merkle proof + hat mint.
         targets[i] = zk;
         selectors[i] = bytes4(
             keccak256(
-                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string))"
+                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
+            )
+        );
+        gasHints[i] = 800_000;
+        i++;
+        // Bare specific-address claim (v2 proof carries emailHash).
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "claimRoleByEmail((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),address,uint256[],bytes32[])"
+            )
+        );
+        gasHints[i] = 800_000;
+        i++;
+        // Combined register + domain claim: passkey registration + account create + proof + merkle + mint.
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),uint256[],bytes32[])"
+            )
+        );
+        gasHints[i] = 1_200_000;
+        i++;
+        // Combined register + specific-address claim.
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),uint256[],bytes32[])"
             )
         );
         gasHints[i] = 1_200_000;

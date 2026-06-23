@@ -5,13 +5,14 @@ pragma solidity ^0.8.21;
 /// @notice End-to-end integration test for ZkEmailInvites wiring through OrgDeployer.
 /// @dev Inherits DeployerTest's setUp so we get the full infra (PoaManager, factories,
 ///      PaymasterHub, PasskeyFactory, OrgRegistry, real Hats Protocol fork). On top of
-///      that we register the ZkEmailInvites contract type, wire mock verifier + DKIMRegistry
-///      via setZkEmailInfrastructure, deploy a new org, and assert every wiring point.
+///      that we register the ZkEmailInvites contract type, wire BOTH mock verifiers (domain +
+///      email) + DKIMRegistry via setZkEmailInfrastructure, deploy a new org DORMANT, then
+///      activate a merkle allowlist via the executor and assert a real claim mints the org hat.
 ///
-///      Reworked for the lean v1 surface: the verifier is the Groth16 `verifyProof(uint256[2],
-///      uint256[2][2],uint256[2],uint256[3])` seam (mocked to return true here so we can exercise
-///      a real claim), and proofs are `ZkEmailProof` structs. Only DOMAIN claims are exercisable —
-///      per-email rules are settable scaffolding (Phase 5) but not claimable in v1.
+///      Reworked for the merkle-allowlist surface: two Groth16 verifier seams (3-signal domain
+///      `verifyProof(...,uint256[3])` and 4-signal email `verifyProof(...,uint256[4])`, both mocked
+///      to return true), proofs are `ZkEmailProof` / `ZkEmailProofV2` structs, and the allowlist is a
+///      single merkle root committed via `setActiveAllowlist`. Claims supply a merkle proof per entry.
 
 import "forge-std/Test.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
@@ -19,7 +20,12 @@ import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {DeployerTest} from "./DeployerTest.t.sol";
 
 import {ZkEmailInvites} from "../src/ZkEmailInvites.sol";
-import {IZkEmailGroth16Verifier, ZkEmailProof} from "../src/zkemail/IVerifier.sol";
+import {
+    IZkEmailGroth16Verifier,
+    IZkEmailGroth16VerifierV2,
+    ZkEmailProof,
+    ZkEmailProofV2
+} from "../src/zkemail/IVerifier.sol";
 import {IDKIMRegistry} from "../src/zkemail/IDKIMRegistry.sol";
 
 import {OrgDeployer, ITaskManagerBootstrap} from "../src/OrgDeployer.sol";
@@ -31,9 +37,9 @@ import {PaymasterHub} from "../src/PaymasterHub.sol";
 
 /*──────────────────────────────  Mocks  ──────────────────────────────*/
 
-/// @notice Groth16 verifier stub that always verifies. Lets the org-flow test exercise a real
-///         domain claim end-to-end (and assert hats are minted) without a genuine proof.
-contract MockZkEmailVerifier is IZkEmailGroth16Verifier {
+/// @notice Domain Groth16 verifier stub (3 signals) that always verifies. Lets the org-flow test
+///         exercise a real domain claim end-to-end without a genuine proof.
+contract MockZkEmailDomainVerifier is IZkEmailGroth16Verifier {
     bool public result = true;
 
     function setResult(bool v) external {
@@ -41,6 +47,23 @@ contract MockZkEmailVerifier is IZkEmailGroth16Verifier {
     }
 
     function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[3] calldata)
+        external
+        view
+        returns (bool)
+    {
+        return result;
+    }
+}
+
+/// @notice Email Groth16 verifier stub (4 signals) that always verifies.
+contract MockZkEmailEmailVerifier is IZkEmailGroth16VerifierV2 {
+    bool public result = true;
+
+    function setResult(bool v) external {
+        result = v;
+    }
+
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
         external
         view
         returns (bool)
@@ -66,19 +89,25 @@ contract MockEmailDKIMRegistry is IDKIMRegistry {
 /*──────────────────────────  Tests  ──────────────────────────*/
 
 contract ZkEmailOrgFlowTest is DeployerTest {
-    MockZkEmailVerifier mockVerifier;
+    MockZkEmailDomainVerifier mockDomainVerifier;
+    MockZkEmailEmailVerifier mockEmailVerifier;
     MockEmailDKIMRegistry mockDkim;
 
     bytes32 constant ZK_ORG_ID = keccak256("ZKEMAIL-TEST-ORG");
 
     // Proof fixture constants.
     bytes32 constant KEY_HASH = bytes32(uint256(0xAA));
+    bytes32 constant CID = bytes32(uint256(0xC1D));
+
+    uint8 constant LEAF_DOMAIN = 0;
+    uint8 constant LEAF_EMAIL = 1;
 
     function setUp() public override {
         super.setUp();
 
-        // Mock infra so the verifier always returns true and the DKIM registry accepts any key.
-        mockVerifier = new MockZkEmailVerifier();
+        // Mock infra so both verifiers always return true and the DKIM registry accepts any key.
+        mockDomainVerifier = new MockZkEmailDomainVerifier();
+        mockEmailVerifier = new MockZkEmailEmailVerifier();
         mockDkim = new MockEmailDKIMRegistry();
         // NOTE: the ZkEmailInvites beacon is intentionally NOT registered here. Tests that
         // expect the module to deploy call `_registerZkBeacon()` explicitly (mirroring the
@@ -93,44 +122,69 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         poaManager.addContractType("ZkEmailInvites", address(zkImpl));
     }
 
+    /*──────────── Merkle helpers ────────────*/
+
+    /// @dev OZ StandardMerkleTree leaf (mirrors ZkEmailInvites._leaf).
+    function _leaf(uint8 kind, bytes32 id, uint256[] memory hatIds) internal pure returns (bytes32) {
+        return keccak256(bytes.concat(keccak256(abi.encode(kind, id, hatIds))));
+    }
+
+    function _emptyProof() internal pure returns (bytes32[] memory) {
+        return new bytes32[](0);
+    }
+
     /*──────────── Infra setter ────────────*/
 
     function testSetZkEmailInfrastructure_onlyPoaManager() public {
         vm.expectRevert(); // InvalidAddress (not from poaManager)
-        deployer.setZkEmailInfrastructure(address(mockVerifier), address(mockDkim));
+        deployer.setZkEmailInfrastructure(address(mockDomainVerifier), address(mockEmailVerifier), address(mockDkim));
     }
 
-    function testSetZkEmailInfrastructure_setsBothFields() public {
+    function testSetZkEmailInfrastructure_setsAllThreeFields() public {
         // Wire infra via PoaManager.adminCall
-        vm.prank(poaAdmin);
-        poaManager.adminCall(
-            address(deployer),
-            abi.encodeWithSignature(
-                "setZkEmailInfrastructure(address,address)", address(mockVerifier), address(mockDkim)
-            )
-        );
+        _wireZkInfra();
 
         // Read via raw storage probe — OrgDeployer Layout slot.
         bytes32 layoutSlot = keccak256("poa.orgdeployer.storage");
         // Layout fields used by ZkEmail are after the original 10 fields:
-        //   [0] GovernanceFactory governanceFactory
-        //   [1] AccessFactory accessFactory
-        //   [2] ModulesFactory modulesFactory
-        //   [3] OrgRegistry orgRegistry
-        //   [4] address poaManager
-        //   [5] address hatsTreeSetup
-        //   [6] address paymasterHub
-        //   [7] address universalPasskeyFactory
-        //   [8] uint256 _status
-        //   [9] IHats hatsV2
-        //   [10] address zkEmailVerifier  ← target
-        //   [11] address zkEmailDkimRegistry  ← target
-        bytes32 verifierSlot = bytes32(uint256(layoutSlot) + 10);
-        bytes32 dkimSlot = bytes32(uint256(layoutSlot) + 11);
-        address storedVerifier = address(uint160(uint256(vm.load(address(deployer), verifierSlot))));
-        address storedDkim = address(uint160(uint256(vm.load(address(deployer), dkimSlot))));
-        assertEq(storedVerifier, address(mockVerifier), "verifier slot");
+        //   [0..9]  original fields (factories, registries, status, hatsV2)
+        //   [10] address zkEmailDomainVerifier  ← target
+        //   [11] address zkEmailEmailVerifier   ← target
+        //   [12] address zkEmailDkimRegistry    ← target
+        address storedDomain = _readDeployerSlot(layoutSlot, 10);
+        address storedEmail = _readDeployerSlot(layoutSlot, 11);
+        address storedDkim = _readDeployerSlot(layoutSlot, 12);
+        assertEq(storedDomain, address(mockDomainVerifier), "domain verifier slot");
+        assertEq(storedEmail, address(mockEmailVerifier), "email verifier slot");
         assertEq(storedDkim, address(mockDkim), "dkim slot");
+    }
+
+    function testSetZkEmailInfrastructure_partialUpdatePreservesOtherFields() public {
+        address oldDomain = address(0xCAFE);
+        address oldEmail = address(0xEEEE);
+        address oldDkim = address(0xD1);
+
+        // Wire all three initially
+        vm.prank(poaAdmin);
+        poaManager.adminCall(
+            address(deployer),
+            abi.encodeWithSignature("setZkEmailInfrastructure(address,address,address)", oldDomain, oldEmail, oldDkim)
+        );
+
+        // Update only the domain verifier (pass address(0) for the others → no-op for those fields)
+        address newDomain = address(mockDomainVerifier);
+        vm.prank(poaAdmin);
+        poaManager.adminCall(
+            address(deployer),
+            abi.encodeWithSignature(
+                "setZkEmailInfrastructure(address,address,address)", newDomain, address(0), address(0)
+            )
+        );
+
+        bytes32 layoutSlot = keccak256("poa.orgdeployer.storage");
+        assertEq(_readDeployerSlot(layoutSlot, 10), newDomain, "domain verifier updated");
+        assertEq(_readDeployerSlot(layoutSlot, 11), oldEmail, "email verifier preserved (address(0) no-op)");
+        assertEq(_readDeployerSlot(layoutSlot, 12), oldDkim, "dkim preserved (address(0) no-op)");
     }
 
     /*──────────── Conditional deployment ────────────*/
@@ -158,13 +212,18 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         address registered = orgRegistry.getOrgContract(ZK_ORG_ID, ModuleTypes.ZKEMAIL_INVITES_ID);
         assertEq(registered, result.zkEmailInvites, "registered in OrgRegistry");
 
-        // 3. ZkEmailInvites was initialized with the right dependencies
+        // 3. ZkEmailInvites was initialized with the right dependencies (both verifiers)
         ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
         assertEq(zk.executor(), result.executor, "executor wired");
-        assertEq(address(zk.verifier()), address(mockVerifier), "verifier wired");
+        assertEq(address(zk.domainVerifier()), address(mockDomainVerifier), "domain verifier wired");
+        assertEq(address(zk.emailVerifier()), address(mockEmailVerifier), "email verifier wired");
         assertEq(address(zk.dkimRegistry()), address(mockDkim), "dkim wired");
         assertEq(address(zk.accountRegistry()), accountRegProxy, "account registry wired");
         assertEq(address(zk.universalFactory()), address(universalPasskeyFactory), "factory wired");
+
+        // 4. Deployed DORMANT (no initial root) — every claim reverts AllowlistNotActive until activated.
+        assertEq(zk.merkleRoot(), bytes32(0), "deployed dormant");
+        assertEq(zk.allowlistCid(), bytes32(0), "no cid while dormant");
     }
 
     function testOrgDeploy_withInfra_butEducationDisabled_stillDeploysZkEmail() public {
@@ -182,42 +241,17 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         assertEq(orgRegistry.getOrgContract(ZK_ORG_ID, ModuleTypes.ZKEMAIL_INVITES_ID), result.zkEmailInvites);
     }
 
-    function testSetZkEmailInfrastructure_partialUpdatePreservesOtherField() public {
-        address oldDkim = address(0xD1);
-        address oldVerifier = address(0xCAFE);
-
-        // Wire both initially
-        vm.prank(poaAdmin);
-        poaManager.adminCall(
-            address(deployer),
-            abi.encodeWithSignature("setZkEmailInfrastructure(address,address)", oldVerifier, oldDkim)
-        );
-
-        // Update only the verifier (pass address(0) for dkim → no-op for that field)
-        address newVerifier = address(mockVerifier);
-        vm.prank(poaAdmin);
-        poaManager.adminCall(
-            address(deployer),
-            abi.encodeWithSignature("setZkEmailInfrastructure(address,address)", newVerifier, address(0))
-        );
-
-        bytes32 layoutSlot = keccak256("poa.orgdeployer.storage");
-        address storedVerifier =
-            address(uint160(uint256(vm.load(address(deployer), bytes32(uint256(layoutSlot) + 10)))));
-        address storedDkim = address(uint160(uint256(vm.load(address(deployer), bytes32(uint256(layoutSlot) + 11)))));
-        assertEq(storedVerifier, newVerifier, "verifier was updated");
-        assertEq(storedDkim, oldDkim, "dkim preserved (passed address(0) is a no-op)");
-    }
-
-    function testSetZkEmailInfrastructure_onlyOneAddressSet_doesNotEnableModule() public {
-        // Beacon present so the ONLY missing prerequisite under test is the second infra address.
+    function testSetZkEmailInfrastructure_onlySomeAddressesSet_doesNotEnableModule() public {
+        // Beacon present so the ONLY missing prerequisite under test is a second infra address.
         _registerZkBeacon();
-        // Set verifier only; dkim stays unset. Module should still be skipped because the
-        // ModulesFactory gate requires BOTH (+ accountRegistry).
+        // Set domain verifier only; email verifier + dkim stay unset. Module should still be skipped
+        // because the ModulesFactory gate requires BOTH verifiers + dkim + accountRegistry.
         vm.prank(poaAdmin);
         poaManager.adminCall(
             address(deployer),
-            abi.encodeWithSignature("setZkEmailInfrastructure(address,address)", address(mockVerifier), address(0))
+            abi.encodeWithSignature(
+                "setZkEmailInfrastructure(address,address,address)", address(mockDomainVerifier), address(0), address(0)
+            )
         );
 
         OrgDeployer.DeploymentResult memory result = _deployZkOrg(ZK_ORG_ID);
@@ -273,7 +307,7 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         assertTrue(authorized, "ZkEmailInvites must be authorized hat minter");
     }
 
-    /*──────────── End-to-end claim ────────────*/
+    /*──────────── End-to-end claim (post-deploy activation) ────────────*/
 
     function testEndToEndClaimByDomain_mintsHatViaExecutor() public {
         _registerZkBeacon();
@@ -282,104 +316,55 @@ contract ZkEmailOrgFlowTest is DeployerTest {
 
         ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
 
-        // Pre-register a domain rule via the executor. `setDomainRule` is gated on
-        // _msgSender() == executor address, so we prank as the executor contract address itself.
         uint256 targetHat = orgRegistry.getRoleHat(ZK_ORG_ID, 0); // DEFAULT role hat
         assertTrue(targetHat != 0, "default role hat exists");
 
         uint256[] memory hats = new uint256[](1);
         hats[0] = targetHat;
 
+        // Activate a single-leaf domain allowlist via the executor (governance). `setActiveAllowlist`
+        // is gated on _msgSender() == executor, so prank as the executor contract address itself.
+        bytes32 domainHash = keccak256(bytes("anthropic.com"));
+        bytes32 root = _leaf(LEAF_DOMAIN, domainHash, hats);
         vm.prank(result.executor);
-        zk.setDomainRule("anthropic.com", hats, 0);
+        zk.setActiveAllowlist(root, CID);
 
-        // Build a proof addressed to a fresh claimer
+        // Build a proof addressed to a fresh claimer.
         address claimer = address(0xC0FFEE);
-        ZkEmailProof memory p = _buildProof(claimer, "anthropic.com", bytes32(uint256(0xBEEF)));
+        ZkEmailProof memory p = _buildDomainProof("anthropic.com", bytes32(uint256(0xBEEF)));
 
-        // Claim
         vm.prank(claimer);
-        zk.claimRoleByDomain(p, claimer);
+        zk.claimRoleByDomain(p, claimer, hats, _emptyProof());
 
-        // Confirm the claimer wears the hat now
-        bool isWearer = IHats(SEPOLIA_HATS).isWearerOfHat(claimer, targetHat);
-        assertTrue(isWearer, "claimer wears the role hat");
+        // Confirm the claimer wears the hat now.
+        assertTrue(IHats(SEPOLIA_HATS).isWearerOfHat(claimer, targetHat), "claimer wears the role hat");
 
-        // Nullifier was consumed
+        // Nullifier was consumed.
         assertTrue(zk.isNullifierUsed(p.emailNullifier), "nullifier consumed");
     }
 
-    /*──────────── Deploy-time config (ZkEmailConfig) end-to-end ────────────*/
+    /*──────────── Deploy-time activation (ZkEmailConfig root/cid) end-to-end ────────────*/
 
-    /// @notice The headline test: an org deployer specifies "anthropic.com -> DEFAULT role" in the
-    ///         deploy params, and a user claims that role via a ZK proof — with NO post-deploy
-    ///         governance call. Proves the deploy-time config flows all the way to a working claim.
-    function testOrgDeploy_withZkConfig_domainRule_endToEnd() public {
+    /// @notice An org deployer activates an allowlist AT GENESIS by passing a non-zero
+    ///         `initialRoot` + `initialCid` in the deploy params — and a user claims that role via a
+    ///         ZK proof with NO post-deploy governance call. The tree is built off-chain over the
+    ///         org's genesis hat IDs, so we deploy first to learn the hat, then... rather, the
+    ///         realistic flow is post-deploy activation (above). Here we assert the deploy-time
+    ///         (root, cid) snapshot flows through to the module storage.
+    function testOrgDeploy_withZkConfigRoot_activatesAtGenesis() public {
         _registerZkBeacon();
         _wireZkInfra();
 
-        // rolesBitmap = 1 (bit 0) -> role index 0 (DEFAULT)
-        OrgDeployer.DeploymentResult memory result =
-            _deployZkOrgInner(ZK_ORG_ID, false, true, _zkConfigWithDomain("anthropic.com", 1));
+        bytes32 genesisRoot = bytes32(uint256(0xDEADBEEF));
+        ModulesFactory.ZkEmailConfig memory cfg =
+            ModulesFactory.ZkEmailConfig({enabled: true, initialRoot: genesisRoot, initialCid: CID});
+
+        OrgDeployer.DeploymentResult memory result = _deployZkOrgInner(ZK_ORG_ID, false, true, cfg);
         assertTrue(result.zkEmailInvites != address(0), "module deployed");
 
         ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
-        uint256 role0Hat = orgRegistry.getRoleHat(ZK_ORG_ID, 0);
-
-        // Rule is present immediately — set by OrgDeployer at init, no governance.
-        (uint256[] memory hatIds,, bool exists) = zk.getDomainRule(keccak256(bytes("anthropic.com")));
-        assertTrue(exists, "domain rule preloaded by deploy config");
-        assertEq(hatIds.length, 1);
-        assertEq(hatIds[0], role0Hat, "role-index bitmap resolved to the DEFAULT role hat");
-
-        // Claim end-to-end.
-        address claimer = address(0xC0FFEE);
-        ZkEmailProof memory p = _buildProof(claimer, "anthropic.com", bytes32(uint256(0xBEEF)));
-        vm.prank(claimer);
-        zk.claimRoleByDomain(p, claimer);
-
-        assertTrue(
-            IHats(SEPOLIA_HATS).isWearerOfHat(claimer, role0Hat), "claimer wears DEFAULT hat via deploy-time rule"
-        );
-    }
-
-    /// @notice Per-email rules are settable deploy-time scaffolding (Phase 5) but NOT claimable in
-    ///         v1: the lean circuit omits the email-identity commitment. We assert the rule is
-    ///         preloaded and queryable; there is no `claimRoleByEmail` to exercise.
-    function testOrgDeploy_withZkConfig_emailRule_preloadedButNotClaimable() public {
-        _registerZkBeacon();
-        _wireZkInfra();
-
-        bytes32 salt = bytes32(uint256(0xA11CE));
-        // rolesBitmap = 2 (bit 1) -> role index 1 (EXECUTIVE)
-        OrgDeployer.DeploymentResult memory result =
-            _deployZkOrgInner(ZK_ORG_ID, false, true, _zkConfigWithEmail(salt, 2));
-        ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
-        uint256 role1Hat = orgRegistry.getRoleHat(ZK_ORG_ID, 1);
-
-        (uint256[] memory hatIds,, bool exists, bool claimed) = zk.getEmailRule(salt);
-        assertTrue(exists, "email rule preloaded");
-        assertFalse(claimed, "email rule unclaimed (no claim path in v1)");
-        assertEq(hatIds.length, 1, "one hat resolved from bitmap");
-        assertEq(hatIds[0], role1Hat, "bitmap resolved to EXECUTIVE role hat");
-    }
-
-    function testOrgDeploy_withZkConfig_multiRoleBitmap_resolvesAllHats() public {
-        _registerZkBeacon();
-        _wireZkInfra();
-
-        // rolesBitmap = 3 (bits 0+1) -> roles 0 and 1
-        OrgDeployer.DeploymentResult memory result =
-            _deployZkOrgInner(ZK_ORG_ID, false, true, _zkConfigWithDomain("anthropic.com", 3));
-        ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
-
-        (uint256[] memory hatIds,,) = zk.getDomainRule(keccak256(bytes("anthropic.com")));
-        assertEq(hatIds.length, 2, "two roles resolved from bitmap");
-        uint256 r0 = orgRegistry.getRoleHat(ZK_ORG_ID, 0);
-        uint256 r1 = orgRegistry.getRoleHat(ZK_ORG_ID, 1);
-        bool hasR0 = hatIds[0] == r0 || hatIds[1] == r0;
-        bool hasR1 = hatIds[0] == r1 || hatIds[1] == r1;
-        assertTrue(hasR0 && hasR1, "both role hats present in resolved rule");
+        assertEq(zk.merkleRoot(), genesisRoot, "deploy-time root activated at genesis");
+        assertEq(zk.allowlistCid(), CID, "deploy-time cid set at genesis");
     }
 
     function testOrgDeploy_zkConfigDisabled_skipsEvenWithInfra() public {
@@ -397,29 +382,48 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         _registerZkBeacon();
         _wireZkInfra();
 
-        // Deploy with autoWhitelistContracts = true and assert that both v1 ZkEmailInvites domain
-        // selectors are now allowed rules on PaymasterHub for our org. (Per-email claim selectors
-        // are intentionally NOT whitelisted — those claims land in Phase 5.)
+        // Deploy with autoWhitelistContracts = true and assert that all FOUR ZkEmailInvites claim
+        // selectors are now allowed rules on PaymasterHub for our org. These four selector strings
+        // are copied verbatim from OrgDeployer._appendZkEmailInvitesRules.
         OrgDeployer.DeploymentResult memory result = _deployZkOrgWithPaymaster(ZK_ORG_ID);
 
-        bytes4 selClaim = bytes4(
-            keccak256("claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address)")
-        );
-        bytes4 selRegisterClaim = bytes4(
+        bytes4 selClaimDomain = bytes4(
             keccak256(
-                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string))"
+                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
+            )
+        );
+        bytes4 selClaimEmail = bytes4(
+            keccak256(
+                "claimRoleByEmail((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),address,uint256[],bytes32[])"
+            )
+        );
+        bytes4 selRegisterClaimDomain = bytes4(
+            keccak256(
+                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),uint256[],bytes32[])"
+            )
+        );
+        bytes4 selRegisterClaimEmail = bytes4(
+            keccak256(
+                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),uint256[],bytes32[])"
             )
         );
 
-        PaymasterHub.Rule memory rClaim = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaim);
-        PaymasterHub.Rule memory rRegisterClaim =
-            paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaim);
+        PaymasterHub.Rule memory rClaimDomain = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaimDomain);
+        PaymasterHub.Rule memory rClaimEmail = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaimEmail);
+        PaymasterHub.Rule memory rRegisterDomain =
+            paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimDomain);
+        PaymasterHub.Rule memory rRegisterEmail =
+            paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimEmail);
 
-        assertTrue(rClaim.allowed, "claimRoleByDomain allowed");
-        assertTrue(rRegisterClaim.allowed, "registerAndClaimByDomainWithPasskey allowed");
+        assertTrue(rClaimDomain.allowed, "claimRoleByDomain allowed");
+        assertTrue(rClaimEmail.allowed, "claimRoleByEmail allowed");
+        assertTrue(rRegisterDomain.allowed, "registerAndClaimByDomainWithPasskey allowed");
+        assertTrue(rRegisterEmail.allowed, "registerAndClaimByEmailWithPasskey allowed");
 
-        assertEq(uint256(rClaim.maxCallGasHint), 800_000, "bare claim gas hint");
-        assertEq(uint256(rRegisterClaim.maxCallGasHint), 1_200_000, "combined claim gas hint");
+        assertEq(uint256(rClaimDomain.maxCallGasHint), 800_000, "domain claim gas hint");
+        assertEq(uint256(rClaimEmail.maxCallGasHint), 800_000, "email claim gas hint");
+        assertEq(uint256(rRegisterDomain.maxCallGasHint), 1_200_000, "combined domain claim gas hint");
+        assertEq(uint256(rRegisterEmail.maxCallGasHint), 1_200_000, "combined email claim gas hint");
     }
 
     function testPaymasterRules_unaffected_whenInfraNotWired() public {
@@ -428,54 +432,39 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         assertEq(result.zkEmailInvites, address(0), "ZkEmailInvites not deployed");
 
         // Even if we query for the selector, it should be unset (allowed=false, cap=0).
-        bytes4 selClaim = bytes4(
-            keccak256("claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address)")
+        bytes4 selClaimDomain = bytes4(
+            keccak256(
+                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
+            )
         );
-        PaymasterHub.Rule memory rClaim = paymasterHub.getRule(ZK_ORG_ID, address(0), selClaim);
+        PaymasterHub.Rule memory rClaim = paymasterHub.getRule(ZK_ORG_ID, address(0), selClaimDomain);
         assertFalse(rClaim.allowed, "no rule for address(0)");
         assertEq(uint256(rClaim.maxCallGasHint), 0, "no gas hint");
     }
 
     /*──────────── Helpers ────────────*/
 
+    function _readDeployerSlot(bytes32 layoutSlot, uint256 offset) internal view returns (address) {
+        return address(uint160(uint256(vm.load(address(deployer), bytes32(uint256(layoutSlot) + offset)))));
+    }
+
     function _wireZkInfra() internal {
         vm.prank(poaAdmin);
         poaManager.adminCall(
             address(deployer),
             abi.encodeWithSignature(
-                "setZkEmailInfrastructure(address,address)", address(mockVerifier), address(mockDkim)
+                "setZkEmailInfrastructure(address,address,address)",
+                address(mockDomainVerifier),
+                address(mockEmailVerifier),
+                address(mockDkim)
             )
         );
     }
 
-    /// @dev ZkEmailConfig opted-in with no pre-loaded rules (the common case for these tests).
+    /// @dev ZkEmailConfig opted-in, deployed dormant (no initial root).
     function _enabledZkConfig() internal pure returns (ModulesFactory.ZkEmailConfig memory cfg) {
         cfg.enabled = true;
-        // domainRules / emailRules default to empty arrays.
-    }
-
-    /// @dev ZkEmailConfig with one pre-loaded domain rule (roles selected by index bitmap).
-    function _zkConfigWithDomain(string memory domain, uint256 rolesBitmap)
-        internal
-        pure
-        returns (ModulesFactory.ZkEmailConfig memory cfg)
-    {
-        cfg.enabled = true;
-        cfg.domainRules = new ModulesFactory.ZkEmailDomainRuleInput[](1);
-        cfg.domainRules[0] =
-            ModulesFactory.ZkEmailDomainRuleInput({domain: domain, rolesBitmap: rolesBitmap, expiry: 0});
-    }
-
-    /// @dev ZkEmailConfig with one pre-loaded per-email rule (roles selected by index bitmap).
-    function _zkConfigWithEmail(bytes32 accountSalt, uint256 rolesBitmap)
-        internal
-        pure
-        returns (ModulesFactory.ZkEmailConfig memory cfg)
-    {
-        cfg.enabled = true;
-        cfg.emailRules = new ModulesFactory.ZkEmailEmailRuleInput[](1);
-        cfg.emailRules[0] =
-            ModulesFactory.ZkEmailEmailRuleInput({accountSalt: accountSalt, rolesBitmap: rolesBitmap, expiry: 0});
+        // initialRoot / initialCid default to 0 → module deploys dormant.
     }
 
     function _deployZkOrg(bytes32 orgId) internal returns (OrgDeployer.DeploymentResult memory) {
@@ -552,20 +541,11 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         return result;
     }
 
-    /// @dev Builds a `ZkEmailProof` bound to `claimer`. The Groth16 points are dummy bytes (the
+    /// @dev Builds a `ZkEmailProof` for the domain circuit. The Groth16 points are dummy bytes (the
     ///      mock verifier ignores them); `pubkeyHash` matches the DKIM fixture and `domainName`
     ///      is what the registry binds to that key hash. The claimer address is supplied to the
     ///      claim function as the third public signal, so it is NOT carried in the struct.
-    function _buildProof(
-        address,
-        /*claimer*/
-        string memory domain,
-        bytes32 nullifier
-    )
-        internal
-        pure
-        returns (ZkEmailProof memory p)
-    {
+    function _buildDomainProof(string memory domain, bytes32 nullifier) internal pure returns (ZkEmailProof memory p) {
         p.pA = [uint256(1), uint256(2)];
         p.pB = [[uint256(3), uint256(4)], [uint256(5), uint256(6)]];
         p.pC = [uint256(7), uint256(8)];

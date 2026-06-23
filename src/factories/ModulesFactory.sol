@@ -43,26 +43,17 @@ contract ModulesFactory {
     }
 
     /*──────────────────── ZkEmailInvites Configuration ────────────────────*/
-    /// @notice Per-org opt-in + initial allowlist for ZK Email role invitations.
-    /// @dev Roles are selected by index bitmap (bit N = role N), resolved to hat IDs at deploy
-    ///      via RoleResolver — same convention as taskCreatorRolesBitmap. The module still only
-    ///      deploys if the chain has ZK Email infra wired AND the beacon registered.
-    struct ZkEmailDomainRuleInput {
-        string domain; // e.g. "anthropic.com" (case-insensitive)
-        uint256 rolesBitmap; // bit N set = grant role N's hat
-        uint64 expiry; // 0 = never expires
-    }
-
-    struct ZkEmailEmailRuleInput {
-        bytes32 accountSalt; // Poseidon(emailAddress, accountCode) — computed off-chain
-        uint256 rolesBitmap; // bit N set = grant role N's hat
-        uint64 expiry; // 0 = never expires
-    }
-
+    /// @notice Per-org opt-in + optional deploy-time allowlist activation for ZK Email role invites.
+    /// @dev The allowlist (whole domains + specific emails -> role hat IDs) lives as a JSON file on IPFS,
+    ///      committed on-chain by a single merkle root. A founder may activate it at genesis by passing a
+    ///      non-zero `initialRoot` + `initialCid` (the tree is built off-chain over the org's genesis hat
+    ///      IDs); otherwise the module deploys DORMANT and governance activates it later via
+    ///      `setActiveAllowlist`. The module still only deploys if the chain has ZK Email infra wired AND
+    ///      the beacon registered.
     struct ZkEmailConfig {
         bool enabled; // Whether to deploy ZkEmailInvites for this org
-        ZkEmailDomainRuleInput[] domainRules; // Optional domain rules pre-loaded at deploy
-        ZkEmailEmailRuleInput[] emailRules; // Optional per-email rules pre-loaded at deploy
+        bytes32 initialRoot; // Optional active allowlist merkle root at genesis (0 = dormant)
+        bytes32 initialCid; // IPFS CID digest of the allowlist file `initialRoot` commits to (0 if dormant)
     }
 
     /*──────────────────── Modules Deployment Params ────────────────────*/
@@ -83,7 +74,8 @@ contract ModulesFactory {
         // A per-org ZkEmailInvites proxy is deployed only if zkEmailConfig.enabled AND the chain
         // infra is present (verifier + DKIM + accountRegistry) AND the beacon is registered.
         // Otherwise the module is skipped (backwards-compatible for chains/orgs without it).
-        address zkEmailVerifier;
+        address zkEmailDomainVerifier; // 3-signal PopRoleClaim verifier (domain claims)
+        address zkEmailEmailVerifier; // 4-signal PopRoleClaimV2 verifier (specific-address claims)
         address zkEmailDkimRegistry;
         address accountRegistry; // UniversalAccountRegistry used by ZkEmailInvites combined-claim flow
         address universalFactory; // UniversalPasskeyAccountFactory used by combined-claim flow (may be 0)
@@ -206,8 +198,9 @@ contract ModulesFactory {
         // deploy with `TypeUnknown`. This keeps an optional feature from bricking the core path when
         // infra addresses are wired ahead of the beacon (e.g. on a fresh or satellite chain).
         address zkEmailInvitesBeacon;
-        bool zkEmailEnabled = params.zkEmailConfig.enabled && params.zkEmailVerifier != address(0)
-            && params.zkEmailDkimRegistry != address(0) && params.accountRegistry != address(0)
+        bool zkEmailEnabled = params.zkEmailConfig.enabled && params.zkEmailDomainVerifier != address(0)
+            && params.zkEmailEmailVerifier != address(0) && params.zkEmailDkimRegistry != address(0)
+            && params.accountRegistry != address(0)
             && BeaconDeploymentLib.beaconRegistered(ModuleTypes.ZKEMAIL_INVITES_ID, params.poaManager);
         if (zkEmailEnabled) {
             zkEmailInvitesBeacon = BeaconDeploymentLib.createBeacon(
@@ -277,9 +270,9 @@ contract ModulesFactory {
             IOrgDeployer(params.deployer).batchRegisterContracts(params.orgId, registrations, params.autoUpgrade, false);
         }
 
-        /* 6. Initialize ZkEmailInvites AFTER registration. Its config + rule events thus fire after the
-              module's ContractRegistered, so the subgraph's per-org template catches them (no eth_calls,
-              deploy-time rules indexed). Same tx, before OrgDeployer renounces — see CLAUDE.md. */
+        /* 6. Initialize ZkEmailInvites AFTER registration. Its config + ActiveAllowlistSet events thus fire
+              after the module's ContractRegistered, so the subgraph's per-org template catches them (no
+              eth_calls, deploy-time allowlist indexed). Same tx, before OrgDeployer renounces — see CLAUDE.md. */
         if (zkEmailEnabled) {
             _initZkEmailInvites(params, result.zkEmailInvites);
         }
@@ -287,51 +280,19 @@ contract ModulesFactory {
         return result;
     }
 
-    /// @dev Resolves the ZkEmailConfig role-index bitmaps to hat IDs and initializes the (already
-    ///      deployed + registered) ZkEmailInvites proxy. Separate function so the rule arrays stay off
-    ///      deployModules' stack under via_ir.
+    /// @dev Initializes the (already deployed + registered) ZkEmailInvites proxy: both verifiers, the DKIM
+    ///      registry, the account-abstraction wiring, and any deploy-time active allowlist (root + cid).
     function _initZkEmailInvites(ModulesParams memory params, address proxy) private {
-        (ZkEmailInvites.InitDomainRule[] memory domainRules, ZkEmailInvites.InitEmailRule[] memory emailRules) =
-            _buildZkInitRules(params);
         ZkEmailInvites(proxy)
             .initialize(
                 params.executor,
-                params.zkEmailVerifier,
+                params.zkEmailDomainVerifier,
+                params.zkEmailEmailVerifier,
                 params.zkEmailDkimRegistry,
                 params.accountRegistry,
                 params.universalFactory,
-                domainRules,
-                emailRules
+                params.zkEmailConfig.initialRoot,
+                params.zkEmailConfig.initialCid
             );
-    }
-
-    /// @dev Resolves the role-index bitmaps in the ZkEmailConfig to concrete hat IDs and builds the
-    ///      deploy-time rule arrays consumed by ZkEmailInvites.initialize. Extracted to its own
-    ///      function to keep deployModules under the via_ir stack-depth limit.
-    function _buildZkInitRules(ModulesParams memory params)
-        private
-        view
-        returns (ZkEmailInvites.InitDomainRule[] memory domainRules, ZkEmailInvites.InitEmailRule[] memory emailRules)
-    {
-        OrgRegistry registry = OrgRegistry(params.orgRegistry);
-        ZkEmailConfig memory cfg = params.zkEmailConfig;
-
-        domainRules = new ZkEmailInvites.InitDomainRule[](cfg.domainRules.length);
-        for (uint256 i; i < cfg.domainRules.length; ++i) {
-            domainRules[i] = ZkEmailInvites.InitDomainRule({
-                domain: cfg.domainRules[i].domain,
-                hatIds: RoleResolver.resolveRoleBitmap(registry, params.orgId, cfg.domainRules[i].rolesBitmap),
-                expiry: cfg.domainRules[i].expiry
-            });
-        }
-
-        emailRules = new ZkEmailInvites.InitEmailRule[](cfg.emailRules.length);
-        for (uint256 i; i < cfg.emailRules.length; ++i) {
-            emailRules[i] = ZkEmailInvites.InitEmailRule({
-                emailHash: cfg.emailRules[i].accountSalt,
-                hatIds: RoleResolver.resolveRoleBitmap(registry, params.orgId, cfg.emailRules[i].rolesBitmap),
-                expiry: cfg.emailRules[i].expiry
-            });
-        }
     }
 }

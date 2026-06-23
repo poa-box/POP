@@ -65,6 +65,34 @@ const main = async () => {
   if (commandIndex < 0) die('command prefix not found in signed header (subject not signed?)');
 
   inputs.commandIndex = String(commandIndex);
+
+  // 5b. (v2) locate the From-field window + the email address within it.
+  const find = (needleBytes, from = 0) => {
+    for (let i = from; i + needleBytes.length <= header.length; i++) {
+      let ok = true;
+      for (let j = 0; j < needleBytes.length; j++) if (header[i + j] !== needleBytes[j]) { ok = false; break; }
+      if (ok) return i;
+    }
+    return -1;
+  };
+  const bytesOf = (s) => [...s].map((c) => c.charCodeAt(0));
+  const EMAIL = `claimer@${DOMAIN}`;
+  const fromIdx = find(bytesOf('from:'));
+  const emailIdx = find(bytesOf(EMAIL));
+  if (fromIdx < 0) die('from field not found in signed header');
+  if (emailIdx < 0) die('from email not found in signed header');
+  // FromAddrRegex anchors to (\r\n|^)from: — window starts at the preceding CRLF, or 0 if From is first.
+  let fromWindowIndex;
+  if (fromIdx === 0) fromWindowIndex = 0;
+  else if (header[fromIdx - 2] === 13 && header[fromIdx - 1] === 10) fromWindowIndex = fromIdx - 2;
+  else die('from field not preceded by CRLF (unexpected canonicalization)');
+  const FROM_WINDOW = 256;
+  if (emailIdx < fromWindowIndex || emailIdx + EMAIL.length > fromWindowIndex + FROM_WINDOW) {
+    die('from email not within the 256-byte window');
+  }
+  inputs.fromWindowIndex = String(fromWindowIndex);
+  inputs.emailIndexInWindow = String(emailIdx - fromWindowIndex);
+
   fs.writeFileSync('build/input.json', JSON.stringify(inputs));
   fs.writeFileSync('build/test-key.json', JSON.stringify(
     { domain: DOMAIN, selector: SELECTOR, claimer: CLAIMER, privateKeyPem: privPem, pubSpkiB64: pubB64 }, null, 2));

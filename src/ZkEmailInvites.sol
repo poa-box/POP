@@ -7,14 +7,19 @@ import {ContextUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/
 import {
     ReentrancyGuardUpgradeable
 } from "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
+import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 /*───────────────────────── POP libs / interface stubs ───────────────────────*/
 import {ValidationLib} from "./libs/ValidationLib.sol";
-import {HatManager} from "./libs/HatManager.sol";
 import {WebAuthnLib} from "./libs/WebAuthnLib.sol";
 
 /*───────────────────────── ZK Email surface ────────────────────────*/
-import {IZkEmailGroth16Verifier, ZkEmailProof} from "./zkemail/IVerifier.sol";
+import {
+    IZkEmailGroth16Verifier,
+    IZkEmailGroth16VerifierV2,
+    ZkEmailProof,
+    ZkEmailProofV2
+} from "./zkemail/IVerifier.sol";
 import {IDKIMRegistry} from "./zkemail/IDKIMRegistry.sol";
 
 interface IExecutorHatMinter {
@@ -42,27 +47,33 @@ interface IUniversalPasskeyAccountFactory {
 
 /**
  * @title  ZkEmailInvites
- * @notice Per-org module that lets an executor pre-authorize whole email domains to claim role hats
- *         by submitting a DKIM-backed ZK Email proof on-chain — generated entirely client-side.
- * @dev    Verification model (the `PopRoleClaim` Groth16 circuit, 3 public signals):
- *           1. `pubkeyHash`     — Poseidon hash of the sender's DKIM RSA pubkey. The on-chain
- *              `IDKIMRegistry` maps an allowlisted domain -> this hash, so the domain need not be
- *              extracted in-circuit: the submitter passes `proof.domainName` and the registry binds
- *              it to `pubkeyHash` (`isKeyHashValid`). A forged domain string fails that check.
- *           2. `emailNullifier` — `poseidon(poseidon(signature))`; per-org replay guard.
- *           3. `claimerAddress` — parsed in-circuit from the signed command
- *              "Claim POP role for 0x<addr>" and supplied on-chain as the third public signal
- *              (`uint256(uint160(claimer))`). This binds a proof to exactly one recipient, so a
- *              claim is permissionless to submit (gasless via PaymasterHub from a fresh
- *              `PasskeyAccount`, or as a plain EOA tx) yet can only ever mint to the bound address.
+ * @notice Per-org module that lets members claim role hats by proving control of their email entirely
+ *         client-side (ZK), gated by an org "allowed emails" allowlist that lives on IPFS and is
+ *         committed on-chain by a single merkle root. Whole DOMAINS and SPECIFIC addresses are both
+ *         supported. Verification is 100% on-chain — no relayer/oracle.
  *
- *         Per-email rules (`setEmailRule`) are retained as forward-compatible admin scaffolding but
- *         are NOT yet claimable: a strict per-email allowlist needs an in-circuit email-identity
- *         commitment, which the lean v1 circuit deliberately omits (Phase 5). Only domain rules are
- *         claimable today.
+ * @dev    Allowlist = a JSON file on IPFS (domains + specific emails -> role hat IDs). Its merkle root
+ *         + CID are the on-chain `merkleRoot`/`allowlistCid` (set by the executor = governance, or at
+ *         deploy). A claim carries a merkle proof for the claimer's entry; the contract verifies:
+ *           - the Groth16 email proof (domain circuit: 3 signals; specific-email circuit: 4 signals,
+ *             the 4th being `emailHash`, a commitment to the From address),
+ *           - the DKIM key for the sending domain (`PoaDKIMRegistry.isKeyHashValid`),
+ *           - the merkle proof that `(kind, identifier, hatIds)` is in the active allowlist root,
+ *           - a single-use nullifier,
+ *         then mints `hatIds` to the in-circuit-bound claimer. Two-phase authority: a metadata admin
+ *         *stages* an allowlist in the org metadata (off-chain); the executor *activates* it here via
+ *         `setActiveAllowlist` (governance), or the founder activates at deploy.
  *
- *         Same UX as the passkey QuickJoin: claim selectors are auto-whitelisted in `PaymasterHub`,
- *         so a freshly-deployed `PasskeyAccount` can claim a role gaslessly via ERC-4337.
+ *         Leaf encoding matches OpenZeppelin `StandardMerkleTree` / `PaymentManager`:
+ *         `keccak256(bytes.concat(keccak256(abi.encode(uint8 kind, bytes32 id, uint256[] hatIds))))`
+ *         with `kind 0 = domain (id = keccak256(lower(domain)))`, `kind 1 = email (id = emailHash)`.
+ *
+ *         Dormant until a root is set (`merkleRoot == 0` -> every claim reverts), so a deployed-but-
+ *         unactivated module is inert and existing org flows are unaffected.
+ *
+ *         NOTE (ERC-7201): this namespaced `Layout` was reshaped pre-mainnet (no production proxy holds
+ *         the prior layout; Test6 re-initializes). After the first mainnet deploy this struct is
+ *         APPEND-ONLY forever — never reorder/remove fields.
  */
 contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpgradeable {
     using ValidationLib for address;
@@ -72,15 +83,16 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     error InvalidProof();
     error InvalidDKIMKey();
     error NullifierAlreadyUsed();
-    error DomainNotAllowed();
-    error RuleExpired();
+    error AllowlistNotActive();
+    error NotInAllowlist();
     error EmptyHats();
-    error EmptyDomain();
     error ZeroClaimer();
     error PasskeyFactoryNotSet();
 
     /* ───────── Constants ────── */
     bytes4 public constant MODULE_ID = bytes4(keccak256("ZkEmailInvites"));
+    uint8 private constant LEAF_DOMAIN = 0;
+    uint8 private constant LEAF_EMAIL = 1;
 
     /* ───────── Passkey enrollment (mirrors QuickJoin shape) ───────── */
     struct PasskeyEnrollment {
@@ -90,46 +102,17 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         uint256 salt;
     }
 
-    /* ───────── Rule structs ───────── */
-    struct DomainRule {
-        uint256[] hatIds;
-        uint64 expiry; // 0 = never expires
-        bool exists;
-    }
-
-    struct EmailRule {
-        uint256[] hatIds;
-        uint64 expiry;
-        bool exists;
-        bool claimed; // one-shot (Phase 5: claim path)
-    }
-
-    /* ───────── Deploy-time rule inputs (set atomically in `initialize`) ───────── */
-    /// @dev Hat IDs are pre-resolved by the caller (ModulesFactory resolves role-index bitmaps
-    ///      to hat IDs). These let an org pre-load its allowlist at deploy time so no follow-up
-    ///      governance call is needed before the first claim.
-    struct InitDomainRule {
-        string domain;
-        uint256[] hatIds;
-        uint64 expiry;
-    }
-
-    struct InitEmailRule {
-        bytes32 emailHash; // commitment consumed by the Phase-5 per-email circuit
-        uint256[] hatIds;
-        uint64 expiry;
-    }
-
     /* ───────── ERC-7201 Storage ──────── */
     /// @custom:storage-location erc7201:poa.zkemailinvites.storage
     struct Layout {
         address executor;
-        IZkEmailGroth16Verifier verifier;
+        IZkEmailGroth16Verifier domainVerifier; // 3-signal (PopRoleClaim)
+        IZkEmailGroth16VerifierV2 emailVerifier; // 4-signal (PopRoleClaimV2)
         IDKIMRegistry dkimRegistry;
         IUniversalAccountRegistry accountRegistry;
         IUniversalPasskeyAccountFactory universalFactory;
-        mapping(bytes32 domainHash => DomainRule) domainRules;
-        mapping(bytes32 emailHash => EmailRule) emailRules;
+        bytes32 merkleRoot; // active allowlist root (0 = dormant)
+        bytes32 allowlistCid; // active allowlist IPFS CID digest (bytes32 of the CIDv0)
         mapping(bytes32 nullifier => bool) usedNullifiers;
     }
 
@@ -143,11 +126,9 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     }
 
     /* ───────── Events ───────── */
-    event DomainRuleSet(bytes32 indexed domainHash, uint256[] hatIds, uint64 expiry);
-    event DomainRuleRemoved(bytes32 indexed domainHash);
-    event EmailRuleSet(bytes32 indexed emailHash, uint256[] hatIds, uint64 expiry);
-    event EmailRuleRemoved(bytes32 indexed emailHash);
+    event ActiveAllowlistSet(bytes32 indexed merkleRoot, bytes32 indexed allowlistCid);
     event RoleClaimedByDomain(address indexed claimer, bytes32 indexed domainHash, uint256[] hatIds, bytes32 nullifier);
+    event RoleClaimedByEmail(address indexed claimer, bytes32 indexed emailHash, uint256[] hatIds, bytes32 nullifier);
     event RegisteredAndClaimedByDomain(
         address indexed account,
         bytes32 indexed credentialId,
@@ -155,7 +136,15 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         bytes32 indexed domainHash,
         uint256[] hatIds
     );
-    event VerifierUpdated(address indexed verifier);
+    event RegisteredAndClaimedByEmail(
+        address indexed account,
+        bytes32 indexed credentialId,
+        string username,
+        bytes32 indexed emailHash,
+        uint256[] hatIds
+    );
+    event DomainVerifierUpdated(address indexed verifier);
+    event EmailVerifierUpdated(address indexed verifier);
     event DKIMRegistryUpdated(address indexed registry);
     event AccountRegistryUpdated(address indexed registry);
     event UniversalFactoryUpdated(address indexed factory);
@@ -166,19 +155,21 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     }
 
     /* ───────── Initialiser ───── */
-    /// @param domainRules_ Optional domain rules to pre-load (empty = none; add later via governance).
-    /// @param emailRules_  Optional per-email rules to pre-load (empty = none; not claimable until Phase 5).
+    /// @param initialRoot Optional active allowlist root at deploy (0 = dormant; activate later via governance).
+    /// @param initialCid  IPFS CID digest of the allowlist file `initialRoot` commits to (0 if dormant).
     function initialize(
         address executor_,
-        address verifier_,
+        address domainVerifier_,
+        address emailVerifier_,
         address dkimRegistry_,
         address accountRegistry_,
         address universalFactory_,
-        InitDomainRule[] calldata domainRules_,
-        InitEmailRule[] calldata emailRules_
+        bytes32 initialRoot,
+        bytes32 initialCid
     ) external initializer {
         executor_.requireNonZeroAddress();
-        verifier_.requireNonZeroAddress();
+        domainVerifier_.requireNonZeroAddress();
+        emailVerifier_.requireNonZeroAddress();
         dkimRegistry_.requireNonZeroAddress();
         accountRegistry_.requireNonZeroAddress();
         // universalFactory MAY be address(0) at init — matches QuickJoin's late-bind pattern.
@@ -188,25 +179,24 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
 
         Layout storage l = _layout();
         l.executor = executor_;
-        l.verifier = IZkEmailGroth16Verifier(verifier_);
+        l.domainVerifier = IZkEmailGroth16Verifier(domainVerifier_);
+        l.emailVerifier = IZkEmailGroth16VerifierV2(emailVerifier_);
         l.dkimRegistry = IDKIMRegistry(dkimRegistry_);
         l.accountRegistry = IUniversalAccountRegistry(accountRegistry_);
         l.universalFactory = IUniversalPasskeyAccountFactory(universalFactory_);
 
-        // Emit the initial wiring as events (mirrors the setters) so indexers can observe config
-        // from event logs rather than on-chain reads. (Init rules already emit below.)
-        emit VerifierUpdated(verifier_);
+        // Emit the initial wiring as events (mirrors the setters) so indexers read config from logs.
+        emit DomainVerifierUpdated(domainVerifier_);
+        emit EmailVerifierUpdated(emailVerifier_);
         emit DKIMRegistryUpdated(dkimRegistry_);
         emit AccountRegistryUpdated(accountRegistry_);
         emit UniversalFactoryUpdated(universalFactory_);
 
-        // Pre-load any deploy-time rules. Same validation as the executor-gated setters —
-        // a malformed rule (empty domain / empty hats) reverts the whole deployment (loud).
-        for (uint256 i; i < domainRules_.length; ++i) {
-            _writeDomainRule(domainRules_[i].domain, domainRules_[i].hatIds, domainRules_[i].expiry);
-        }
-        for (uint256 i; i < emailRules_.length; ++i) {
-            _writeEmailRule(emailRules_[i].emailHash, emailRules_[i].hatIds, emailRules_[i].expiry);
+        // Optional deploy-time activation (founder configures email-join at genesis).
+        if (initialRoot != bytes32(0)) {
+            l.merkleRoot = initialRoot;
+            l.allowlistCid = initialCid;
+            emit ActiveAllowlistSet(initialRoot, initialCid);
         }
     }
 
@@ -216,32 +206,28 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         _;
     }
 
-    /* ───────── Admin: rule management (executor-gated) ─────── */
-    function setDomainRule(string calldata domain, uint256[] calldata hatIds, uint64 expiry) external onlyExecutor {
-        _writeDomainRule(domain, hatIds, expiry);
+    /* ───────── Admin (executor-gated = governance) ─────── */
+
+    /// @notice Activate (or rotate) the org's allowlist. `root` commits to the allowlist JSON at `cid`.
+    /// @dev    Set `root == 0` to dormant the module. This is the governance "activate" step; the
+    ///         *proposed* allowlist is staged off-chain in the org metadata by a metadata admin.
+    function setActiveAllowlist(bytes32 root, bytes32 cid) external onlyExecutor {
+        Layout storage l = _layout();
+        l.merkleRoot = root;
+        l.allowlistCid = cid;
+        emit ActiveAllowlistSet(root, cid);
     }
 
-    function removeDomainRule(string calldata domain) external onlyExecutor {
-        bytes32 dh = keccak256(bytes(_lower(domain)));
-        delete _layout().domainRules[dh];
-        emit DomainRuleRemoved(dh);
-    }
-
-    /// @dev Per-email rules are forward-compat scaffolding: settable now, claimable in Phase 5 once a
-    ///      per-email circuit exposes an email-identity commitment matching `emailHash`.
-    function setEmailRule(bytes32 emailHash, uint256[] calldata hatIds, uint64 expiry) external onlyExecutor {
-        _writeEmailRule(emailHash, hatIds, expiry);
-    }
-
-    function removeEmailRule(bytes32 emailHash) external onlyExecutor {
-        delete _layout().emailRules[emailHash];
-        emit EmailRuleRemoved(emailHash);
-    }
-
-    function setVerifier(address v) external onlyExecutor {
+    function setDomainVerifier(address v) external onlyExecutor {
         v.requireNonZeroAddress();
-        _layout().verifier = IZkEmailGroth16Verifier(v);
-        emit VerifierUpdated(v);
+        _layout().domainVerifier = IZkEmailGroth16Verifier(v);
+        emit DomainVerifierUpdated(v);
+    }
+
+    function setEmailVerifier(address v) external onlyExecutor {
+        v.requireNonZeroAddress();
+        _layout().emailVerifier = IZkEmailGroth16VerifierV2(v);
+        emit EmailVerifierUpdated(v);
     }
 
     function setDKIMRegistry(address d) external onlyExecutor {
@@ -261,41 +247,136 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         emit UniversalFactoryUpdated(f);
     }
 
-    /* ───────── User: bare claim path (user already has an account) ─────── */
+    /* ───────── User: bare claim paths (user already has an account) ─────── */
 
-    /// @notice Claim hats under a pre-registered domain rule.
-    /// @param proof   ZK Email proof. `proof.domainName` matches an admin-registered domain rule and
-    ///                must be the domain whose DKIM key hash is `proof.pubkeyHash`.
-    /// @param claimer Address that receives the hats. Must equal the address bound in-circuit (the
-    ///                third public signal), else the Groth16 check fails.
-    function claimRoleByDomain(ZkEmailProof calldata proof, address claimer) external nonReentrant {
-        bytes32 dh = _verifyProofCommon(proof, claimer);
-        uint256[] storage hatIds = _consumeDomainRule(dh);
-        IExecutorHatMinter(_layout().executor).mintHatsForUser(claimer, hatIds);
+    /// @notice Claim role hats for a whole-domain allowlist entry.
+    /// @param proof      Domain ZK Email proof (binds `claimer` as signal[2]).
+    /// @param claimer    Recipient (must equal the in-circuit-bound address).
+    /// @param hatIds     The hat IDs this allowlist entry grants (must match the merkle leaf).
+    /// @param merkleProof Proof that `(domain, hatIds)` is in the active allowlist root.
+    function claimRoleByDomain(
+        ZkEmailProof calldata proof,
+        address claimer,
+        uint256[] calldata hatIds,
+        bytes32[] calldata merkleProof
+    ) external nonReentrant {
+        bytes32 dh = _claimDomain(proof, claimer, hatIds, merkleProof);
         emit RoleClaimedByDomain(claimer, dh, hatIds, proof.emailNullifier);
     }
 
-    /* ───────── User: combined register + claim path (first-time onboarding) ─────── */
+    /// @notice Claim role hats for a SPECIFIC-address allowlist entry (uses the v2 circuit's `emailHash`).
+    function claimRoleByEmail(
+        ZkEmailProofV2 calldata proof,
+        address claimer,
+        uint256[] calldata hatIds,
+        bytes32[] calldata merkleProof
+    ) external nonReentrant {
+        _claimEmail(proof, claimer, hatIds, merkleProof);
+        emit RoleClaimedByEmail(claimer, proof.emailHash, hatIds, proof.emailNullifier);
+    }
 
-    /// @notice Atomic onboarding: register username via WebAuthn sig + deploy `PasskeyAccount`
-    ///         (idempotent if already deployed) + verify email proof + mint domain-rule hats.
-    /// @dev    The email proof must be bound to the resulting `account` (in-circuit address signal).
+    /* ───────── User: combined register + claim paths (first-time passkey onboarding) ─────── */
+
     function registerAndClaimByDomainWithPasskey(
         PasskeyEnrollment calldata passkey,
         string calldata username,
         uint256 deadline,
         uint256 nonce,
         WebAuthnLib.WebAuthnAuth calldata auth,
-        ZkEmailProof calldata proof
+        ZkEmailProof calldata proof,
+        uint256[] calldata hatIds,
+        bytes32[] calldata merkleProof
     ) external nonReentrant returns (address account) {
         account = _registerAndCreateAccount(passkey, username, deadline, nonce, auth);
-        bytes32 dh = _verifyProofCommon(proof, account);
-        uint256[] storage hatIds = _consumeDomainRule(dh);
-        IExecutorHatMinter(_layout().executor).mintHatsForUser(account, hatIds);
+        bytes32 dh = _claimDomain(proof, account, hatIds, merkleProof);
         emit RegisteredAndClaimedByDomain(account, passkey.credentialId, username, dh, hatIds);
     }
 
+    function registerAndClaimByEmailWithPasskey(
+        PasskeyEnrollment calldata passkey,
+        string calldata username,
+        uint256 deadline,
+        uint256 nonce,
+        WebAuthnLib.WebAuthnAuth calldata auth,
+        ZkEmailProofV2 calldata proof,
+        uint256[] calldata hatIds,
+        bytes32[] calldata merkleProof
+    ) external nonReentrant returns (address account) {
+        account = _registerAndCreateAccount(passkey, username, deadline, nonce, auth);
+        _claimEmail(proof, account, hatIds, merkleProof);
+        emit RegisteredAndClaimedByEmail(account, passkey.credentialId, username, proof.emailHash, hatIds);
+    }
+
     /* ───────── Internals ─────── */
+    function _claimDomain(
+        ZkEmailProof calldata proof,
+        address claimer,
+        uint256[] calldata hatIds,
+        bytes32[] calldata merkleProof
+    ) private returns (bytes32 dh) {
+        Layout storage l = _layout();
+        dh = _commonPreChecks(l, claimer, proof.emailNullifier, proof.domainName, proof.pubkeyHash, hatIds.length);
+
+        uint256[3] memory signals;
+        signals[0] = uint256(proof.pubkeyHash);
+        signals[1] = uint256(proof.emailNullifier);
+        signals[2] = uint256(uint160(claimer));
+        if (!l.domainVerifier.verifyProof(proof.pA, proof.pB, proof.pC, signals)) revert InvalidProof();
+
+        _verifyLeaf(l.merkleRoot, _leaf(LEAF_DOMAIN, dh, hatIds), merkleProof);
+        l.usedNullifiers[proof.emailNullifier] = true;
+        IExecutorHatMinter(l.executor).mintHatsForUser(claimer, hatIds);
+    }
+
+    function _claimEmail(
+        ZkEmailProofV2 calldata proof,
+        address claimer,
+        uint256[] calldata hatIds,
+        bytes32[] calldata merkleProof
+    ) private {
+        Layout storage l = _layout();
+        // Domain still bound (anti-forgery: a real signing domain), but identity is `emailHash`.
+        _commonPreChecks(l, claimer, proof.emailNullifier, proof.domainName, proof.pubkeyHash, hatIds.length);
+
+        uint256[4] memory signals;
+        signals[0] = uint256(proof.pubkeyHash);
+        signals[1] = uint256(proof.emailNullifier);
+        signals[2] = uint256(uint160(claimer));
+        signals[3] = uint256(proof.emailHash);
+        if (!l.emailVerifier.verifyProof(proof.pA, proof.pB, proof.pC, signals)) revert InvalidProof();
+
+        _verifyLeaf(l.merkleRoot, _leaf(LEAF_EMAIL, proof.emailHash, hatIds), merkleProof);
+        l.usedNullifiers[proof.emailNullifier] = true;
+        IExecutorHatMinter(l.executor).mintHatsForUser(claimer, hatIds);
+    }
+
+    /// @dev Cheap, shared pre-checks: non-zero claimer + hats, active allowlist, fresh nullifier, valid
+    ///      DKIM key for the claimed domain. Returns the domain hash.
+    function _commonPreChecks(
+        Layout storage l,
+        address claimer,
+        bytes32 nullifier,
+        string calldata domainName,
+        bytes32 pubkeyHash,
+        uint256 hatCount
+    ) private view returns (bytes32 dh) {
+        if (claimer == address(0)) revert ZeroClaimer();
+        if (hatCount == 0) revert EmptyHats();
+        if (l.merkleRoot == bytes32(0)) revert AllowlistNotActive();
+        if (l.usedNullifiers[nullifier]) revert NullifierAlreadyUsed();
+        dh = keccak256(bytes(_lower(domainName)));
+        if (!l.dkimRegistry.isKeyHashValid(dh, pubkeyHash)) revert InvalidDKIMKey();
+    }
+
+    /// @dev OZ StandardMerkleTree leaf: double-keccak of abi.encode(kind, id, hatIds).
+    function _leaf(uint8 kind, bytes32 id, uint256[] calldata hatIds) private pure returns (bytes32) {
+        return keccak256(bytes.concat(keccak256(abi.encode(kind, id, hatIds))));
+    }
+
+    function _verifyLeaf(bytes32 root, bytes32 leaf, bytes32[] calldata merkleProof) private pure {
+        if (!MerkleProof.verifyCalldata(merkleProof, root, leaf)) revert NotInAllowlist();
+    }
+
     function _registerAndCreateAccount(
         PasskeyEnrollment calldata passkey,
         string calldata username,
@@ -322,63 +403,6 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
     }
 
-    /// @dev Verifies a claim: nullifier-fresh, DKIM key valid for the claimed domain, and the Groth16
-    ///      proof binds `claimer` (signal[2]). Marks the nullifier used. Returns the domain hash.
-    function _verifyProofCommon(ZkEmailProof calldata proof, address claimer) private returns (bytes32 dh) {
-        if (claimer == address(0)) revert ZeroClaimer();
-        Layout storage l = _layout();
-        if (l.usedNullifiers[proof.emailNullifier]) revert NullifierAlreadyUsed();
-
-        dh = keccak256(bytes(_lower(proof.domainName)));
-        if (!l.dkimRegistry.isKeyHashValid(dh, proof.pubkeyHash)) revert InvalidDKIMKey();
-
-        uint256[3] memory signals;
-        signals[0] = uint256(proof.pubkeyHash);
-        signals[1] = uint256(proof.emailNullifier);
-        signals[2] = uint256(uint160(claimer));
-        if (!l.verifier.verifyProof(proof.pA, proof.pB, proof.pC, signals)) revert InvalidProof();
-
-        l.usedNullifiers[proof.emailNullifier] = true;
-    }
-
-    function _consumeDomainRule(bytes32 dh) private view returns (uint256[] storage) {
-        DomainRule storage rule = _layout().domainRules[dh];
-        if (!rule.exists) revert DomainNotAllowed();
-        if (rule.expiry != 0 && block.timestamp > rule.expiry) revert RuleExpired();
-        return rule.hatIds;
-    }
-
-    /// @dev Shared writer for domain rules. Used by the executor-gated `setDomainRule` and by
-    ///      `initialize` (deploy-time pre-load). `memory` params so both calldata and
-    ///      in-memory (init) callers can reuse it.
-    function _writeDomainRule(string memory domain, uint256[] memory hatIds, uint64 expiry) private {
-        if (bytes(domain).length == 0) revert EmptyDomain();
-        if (hatIds.length == 0) revert EmptyHats();
-        bytes32 dh = keccak256(bytes(_lower(domain)));
-        DomainRule storage r = _layout().domainRules[dh];
-        HatManager.clearHatArray(r.hatIds);
-        for (uint256 i; i < hatIds.length; ++i) {
-            HatManager.setHatInArray(r.hatIds, hatIds[i], true);
-        }
-        r.expiry = expiry;
-        r.exists = true;
-        emit DomainRuleSet(dh, hatIds, expiry);
-    }
-
-    /// @dev Shared writer for email rules. Resets `claimed` so re-issuing an invite is allowed.
-    function _writeEmailRule(bytes32 emailHash, uint256[] memory hatIds, uint64 expiry) private {
-        if (hatIds.length == 0) revert EmptyHats();
-        EmailRule storage r = _layout().emailRules[emailHash];
-        HatManager.clearHatArray(r.hatIds);
-        for (uint256 i; i < hatIds.length; ++i) {
-            HatManager.setHatInArray(r.hatIds, hatIds[i], true);
-        }
-        r.expiry = expiry;
-        r.exists = true;
-        r.claimed = false;
-        emit EmailRuleSet(emailHash, hatIds, expiry);
-    }
-
     /// @dev ASCII lowercase — domain names are ASCII per RFC 1035.
     function _lower(string memory s) private pure returns (string memory) {
         bytes memory b = bytes(s);
@@ -395,8 +419,12 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         return _layout().executor;
     }
 
-    function verifier() external view returns (IZkEmailGroth16Verifier) {
-        return _layout().verifier;
+    function domainVerifier() external view returns (IZkEmailGroth16Verifier) {
+        return _layout().domainVerifier;
+    }
+
+    function emailVerifier() external view returns (IZkEmailGroth16VerifierV2) {
+        return _layout().emailVerifier;
     }
 
     function dkimRegistry() external view returns (IDKIMRegistry) {
@@ -411,22 +439,12 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         return _layout().universalFactory;
     }
 
-    function getDomainRule(bytes32 domainHash)
-        external
-        view
-        returns (uint256[] memory hatIds, uint64 expiry, bool exists)
-    {
-        DomainRule storage r = _layout().domainRules[domainHash];
-        return (HatManager.getHatArray(r.hatIds), r.expiry, r.exists);
+    function merkleRoot() external view returns (bytes32) {
+        return _layout().merkleRoot;
     }
 
-    function getEmailRule(bytes32 emailHash)
-        external
-        view
-        returns (uint256[] memory hatIds, uint64 expiry, bool exists, bool claimed)
-    {
-        EmailRule storage r = _layout().emailRules[emailHash];
-        return (HatManager.getHatArray(r.hatIds), r.expiry, r.exists, r.claimed);
+    function allowlistCid() external view returns (bytes32) {
+        return _layout().allowlistCid;
     }
 
     function isNullifierUsed(bytes32 n) external view returns (bool) {

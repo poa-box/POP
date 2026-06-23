@@ -7,7 +7,7 @@ import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/Upgradeabl
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
-import {ZkEmailProof, IZkEmailGroth16Verifier} from "../../src/zkemail/IVerifier.sol";
+import {ZkEmailProof, IZkEmailGroth16Verifier, IZkEmailGroth16VerifierV2} from "../../src/zkemail/IVerifier.sol";
 import {IDKIMRegistry} from "../../src/zkemail/IDKIMRegistry.sol";
 import {SwitchableBeacon} from "../../src/SwitchableBeacon.sol";
 import {IExecutor, Executor} from "../../src/Executor.sol";
@@ -23,17 +23,25 @@ import {HybridVoting} from "../../src/HybridVoting.sol";
  *
  *   1. Deploy a ZkEmailInvites proxy for Test6 UNINITIALIZED — so the vote can
  *      register it BEFORE initializing it (see below).      [Hudson broadcast]
- *   2. Whitelist the 2 domain claim selectors on the Gnosis PaymasterHub so claims are
+ *   2. Whitelist the 4 claim selectors on the Gnosis PaymasterHub so claims are
  *      gasless, via Satellite.adminCall (same path as the createTasksBatch /
  *      setFolders retro-fixes).                             [Hudson broadcast]
  *   3. ONE governance vote, in order: register the proxy in OrgRegistry
  *      (ContractRegistered -> the subgraph's per-org template is created), then
- *      initialize it (the rule + config events the template now catches), then
- *      authorize it as a hat minter.                        [governance vote]
+ *      initialize it (the config events the template now catches), then authorize
+ *      it as a hat minter, then activate the org's allowlist root + cid.
+ *                                                            [governance vote]
  *
  * Registering before initializing is what lets the subgraph index the deploy-time
- * rules/config without eth_calls (init events follow ContractRegistered). New orgs
+ * config without eth_calls (init events follow ContractRegistered). New orgs
  * get this for free in ModulesFactory; existing orgs do it via the step-3 batch.
+ *
+ * Allowlist model: the org's "allowed emails" (whole domains + specific addresses ->
+ * role hat IDs) live as a JSON file on IPFS, committed on-chain by a single merkle
+ * root (OZ StandardMerkleTree). `initialize` may bake a root in (or pass 0 = dormant);
+ * `setActiveAllowlist(root, cid)` activates/rotates it via governance. A claim carries
+ * the merkle proof for the claimer's leaf. THIS SIM uses a single-leaf allowlist
+ * (root == leaf, empty merkle proof) — the simplest valid proof.
  *
  * Why step 3 needs governance (and an Executor upgrade): Test6's executor has
  * renounced ownership (owner() == 0), so the only authorized caller of its admin
@@ -55,10 +63,12 @@ import {HybridVoting} from "../../src/HybridVoting.sol";
  *     script/zkemail/IntegrateZkEmailTest6.s.sol:SimIntegrateZkEmailTest6 --fork-url gnosis -vvv
  *
  *   # Broadcast (after DeployZkEmailInfra + UpgradeProtocolForZkEmail; pass the deployed addresses via env):
- *   ZK_VERIFIER=0x.. ZK_DKIM_REGISTRY=0x.. ZK_BEACON=0x.. source .env && FOUNDRY_PROFILE=production forge script \
+ *   ZK_DOMAIN_VERIFIER=0x.. ZK_EMAIL_VERIFIER=0x.. ZK_DKIM_REGISTRY=0x.. ZK_BEACON=0x.. \
+ *   source .env && FOUNDRY_PROFILE=production forge script \
  *     script/zkemail/IntegrateZkEmailTest6.s.sol:BroadcastDeployAndWhitelistTest6 --rpc-url gnosis --broadcast --slow
  *   # then, after UpgradeExecutorForZkEmail, a creator-hat holder runs:
- *   ZKEMAIL_PROXY=0x... source .env && FOUNDRY_PROFILE=production forge script \
+ *   ZKEMAIL_PROXY=0x... ZKEMAIL_BEACON=0x... ZK_ROOT=0x... ZK_CID=0x... \
+ *   source .env && FOUNDRY_PROFILE=production forge script \
  *     script/zkemail/IntegrateZkEmailTest6.s.sol:BroadcastGovProposalTest6 --rpc-url gnosis --broadcast
  * ============================================================================
  */
@@ -98,6 +108,16 @@ contract SimMockVerifier is IZkEmailGroth16Verifier {
     }
 }
 
+contract SimMockVerifierV2 is IZkEmailGroth16VerifierV2 {
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
+        external
+        pure
+        returns (bool)
+    {
+        return true;
+    }
+}
+
 contract SimMockDKIM is IDKIMRegistry {
     function isKeyHashValid(bytes32, bytes32) external pure returns (bool) {
         return true;
@@ -129,7 +149,7 @@ abstract contract Test6Base is Script {
     address internal constant TEST6_ELIGIBILITY = 0xf01F2bDd5C86E7B676117cB0d6E2c07aa36E8c8B;
     address internal constant TEST6_ACCOUNT_REGISTRY = 0x55F72CEB09cBC1fAAED734b6505b99b0a1DFA1cA;
     // OrgRegistry (owned by the OrgDeployer). Registering the proxy here BEFORE initialize lets the
-    // subgraph's per-org template (created on ContractRegistered) catch initialize's config + rule events.
+    // subgraph's per-org template (created on ContractRegistered) catch initialize's config events.
     address internal constant TEST6_ORG_REGISTRY = 0x3744b372abc41589226313F2bB1dB3aCAa22A854;
     bytes32 internal constant ZKEMAIL_INVITES_ID = keccak256("ZkEmailInvites");
     // Member role hat (entry-level) — the role granted to anyone proving the invite domain.
@@ -140,13 +160,22 @@ abstract contract Test6Base is Script {
 
     /* ── Invite policy: who can auto-claim, and which role ── */
     string internal constant INVITE_DOMAIN = "gmail.com"; // test/example domain — set the real one per-org
+    // Off-chain allowlist file IPFS CID digest (placeholder for the sim).
+    bytes32 internal constant SIM_ALLOWLIST_CID = bytes32(uint256(0xC1D));
+
+    uint8 internal constant LEAF_DOMAIN = 0;
+    uint8 internal constant LEAF_EMAIL = 1;
 
     /* ── ZK Email infra addresses — supplied via env (from the deploy/upgrade steps): ──
-     *   ZK_VERIFIER, ZK_DKIM_REGISTRY  ← DeployZkEmailInfra:BroadcastDeployInfraGnosis output
-     *   ZK_BEACON                       ← PoaManager.getBeaconById("ZkEmailInvites") after UpgradeProtocolForZkEmail
+     *   ZK_DOMAIN_VERIFIER, ZK_EMAIL_VERIFIER, ZK_DKIM_REGISTRY ← DeployZkEmailInfra output
+     *   ZK_BEACON                                               ← PoaManager.getBeaconById("ZkEmailInvites")
      * vm.envAddress reverts if unset, which is the desired "must be filled" guard for broadcast. */
-    function _zkVerifier() internal view returns (address) {
-        return vm.envAddress("ZK_VERIFIER");
+    function _zkDomainVerifier() internal view returns (address) {
+        return vm.envAddress("ZK_DOMAIN_VERIFIER");
+    }
+
+    function _zkEmailVerifier() internal view returns (address) {
+        return vm.envAddress("ZK_EMAIL_VERIFIER");
     }
 
     function _zkDkimRegistry() internal view returns (address) {
@@ -157,57 +186,87 @@ abstract contract Test6Base is Script {
         return vm.envAddress("ZK_BEACON");
     }
 
-    /* ── Selectors (must match ZkEmailInvites external signatures exactly) ── */
-    bytes4 internal constant SEL_CLAIM_DOMAIN =
-        bytes4(keccak256("claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address)"));
+    /* ── Selectors (must match ZkEmailInvites external signatures exactly; copied from
+     *    OrgDeployer._appendZkEmailInvitesRules so a per-org retrofit matches new-org deploys). ── */
+    bytes4 internal constant SEL_CLAIM_DOMAIN = bytes4(
+        keccak256(
+            "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
+        )
+    );
+    bytes4 internal constant SEL_CLAIM_EMAIL = bytes4(
+        keccak256(
+            "claimRoleByEmail((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),address,uint256[],bytes32[])"
+        )
+    );
     bytes4 internal constant SEL_REG_CLAIM_DOMAIN = bytes4(
         keccak256(
-            "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string))"
+            "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),uint256[],bytes32[])"
+        )
+    );
+    bytes4 internal constant SEL_REG_CLAIM_EMAIL = bytes4(
+        keccak256(
+            "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),uint256[],bytes32[])"
         )
     );
 
-    /// @dev One domain rule: INVITE_DOMAIN -> Member hat, never expires.
-    function _initDomainRules() internal pure returns (ZkEmailInvites.InitDomainRule[] memory r) {
-        uint256[] memory hats = new uint256[](1);
+    /// @dev OZ StandardMerkleTree leaf: double-keccak of abi.encode(kind, id, hatIds). Matches
+    ///      ZkEmailInvites._leaf and PaymentManager. A SINGLE-leaf allowlist has root == leaf and
+    ///      verifies with an empty merkle proof.
+    function _leaf(uint8 kind, bytes32 id, uint256[] memory hatIds) internal pure returns (bytes32) {
+        return keccak256(bytes.concat(keccak256(abi.encode(kind, id, hatIds))));
+    }
+
+    function _memberHats() internal pure returns (uint256[] memory hats) {
+        hats = new uint256[](1);
         hats[0] = TEST6_MEMBER_HAT;
-        r = new ZkEmailInvites.InitDomainRule[](1);
-        r[0] = ZkEmailInvites.InitDomainRule({domain: INVITE_DOMAIN, hatIds: hats, expiry: 0});
     }
 
-    function _noEmailRules() internal pure returns (ZkEmailInvites.InitEmailRule[] memory) {
-        return new ZkEmailInvites.InitEmailRule[](0);
+    /// @dev Single-leaf domain allowlist root: INVITE_DOMAIN -> Member hat.
+    function _domainRoot() internal pure returns (bytes32) {
+        return _leaf(LEAF_DOMAIN, keccak256(bytes(INVITE_DOMAIN)), _memberHats());
     }
 
-    /// @dev Build the Satellite -> PaymasterHub.setRulesBatch calldata for the proxy's 2 domain selectors.
+    /// @dev Build the Satellite -> PaymasterHub.setRulesBatch calldata for the proxy's 4 claim selectors.
     function _paymasterInner(address proxy) internal pure returns (bytes memory) {
-        address[] memory targets = new address[](2);
-        bytes4[] memory sels = new bytes4[](2);
-        bool[] memory allowed = new bool[](2);
-        uint32[] memory hints = new uint32[](2);
-        for (uint256 i; i < 2; ++i) {
+        address[] memory targets = new address[](4);
+        bytes4[] memory sels = new bytes4[](4);
+        bool[] memory allowed = new bool[](4);
+        uint32[] memory hints = new uint32[](4);
+        for (uint256 i; i < 4; ++i) {
             targets[i] = proxy;
             allowed[i] = true;
         }
         sels[0] = SEL_CLAIM_DOMAIN;
         hints[0] = 800_000;
-        sels[1] = SEL_REG_CLAIM_DOMAIN;
-        hints[1] = 1_200_000;
+        sels[1] = SEL_CLAIM_EMAIL;
+        hints[1] = 800_000;
+        sels[2] = SEL_REG_CLAIM_DOMAIN;
+        hints[2] = 1_200_000;
+        sels[3] = SEL_REG_CLAIM_EMAIL;
+        hints[3] = 1_200_000;
         return abi.encodeWithSignature(
             "setRulesBatch(bytes32,address[],bytes4[],bool[],uint32[])", TEST6_ORG, targets, sels, allowed, hints
         );
     }
 
-    function _initData(address verifier, address dkim) internal pure returns (bytes memory) {
+    /// @dev initialize calldata: two verifiers + DKIM + AA wiring + dormant allowlist (root/cid = 0).
+    ///      The active root is set separately via setActiveAllowlist (governance step 3).
+    function _initData(address domainVerifier, address emailVerifier, address dkim)
+        internal
+        pure
+        returns (bytes memory)
+    {
         return abi.encodeCall(
             ZkEmailInvites.initialize,
             (
                 TEST6_EXECUTOR,
-                verifier,
+                domainVerifier,
+                emailVerifier,
                 dkim,
                 TEST6_ACCOUNT_REGISTRY,
                 UNIVERSAL_FACTORY,
-                _initDomainRules(),
-                _noEmailRules()
+                bytes32(0), // initialRoot (dormant; governance activates via setActiveAllowlist)
+                bytes32(0) // initialCid
             )
         );
     }
@@ -220,12 +279,13 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
         console.log("\n=== SIM: Integrate ZkEmailInvites into Test6 (Gnosis fork) ===");
         require(ISatellite(GNOSIS_SATELLITE).owner() == HUDSON, "Satellite owner != Hudson");
 
-        // 1. Deploy mock verifier + DKIM (the real ones land in slice 3).
-        address verifier = address(new SimMockVerifier());
+        // 1. Deploy mock verifiers + DKIM (the real ones land in the deploy slice).
+        address domainVerifier = address(new SimMockVerifier());
+        address emailVerifier = address(new SimMockVerifierV2());
         address dkim = address(new SimMockDKIM());
 
         // 2. Deploy the ZkEmailInvites proxy UNINITIALIZED, register it in Test6's OrgRegistry (as the
-        //    executor), THEN initialize — so initialize's config + rule events fire AFTER ContractRegistered
+        //    executor), THEN initialize — so initialize's config events fire AFTER ContractRegistered
         //    and the subgraph's per-org template (created on ContractRegistered) catches them. No eth_calls.
         ZkEmailInvites impl = new ZkEmailInvites();
         // Local beacon for the sim (broadcast uses a SwitchableBeacon mirroring the protocol beacon).
@@ -239,20 +299,22 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
             );
         proxy.initialize(
             TEST6_EXECUTOR,
-            verifier,
+            domainVerifier,
+            emailVerifier,
             dkim,
             TEST6_ACCOUNT_REGISTRY,
             UNIVERSAL_FACTORY,
-            _initDomainRules(),
-            _noEmailRules()
+            bytes32(0),
+            bytes32(0)
         );
 
         require(proxy.executor() == TEST6_EXECUTOR, "executor not wired");
-        (uint256[] memory hatIds,, bool exists) = proxy.getDomainRule(keccak256(bytes(INVITE_DOMAIN)));
-        require(exists && hatIds.length == 1 && hatIds[0] == TEST6_MEMBER_HAT, "domain rule not preloaded");
+        require(address(proxy.domainVerifier()) == domainVerifier, "domain verifier not wired");
+        require(address(proxy.emailVerifier()) == emailVerifier, "email verifier not wired");
+        require(proxy.merkleRoot() == bytes32(0), "should be dormant before activation");
         console.log("  Proxy deployed (uninit) -> registered in OrgRegistry -> initialized:", address(proxy));
 
-        // 3. Whitelist the 4 selectors via the REAL Satellite.adminCall (pranked as Hudson).
+        // 3. Whitelist the 4 claim selectors via the REAL Satellite.adminCall (pranked as Hudson).
         require(!IPaymasterHubRule(GNOSIS_PM).getRule(TEST6_ORG, address(proxy), SEL_CLAIM_DOMAIN).allowed, "pre-set?");
         vm.prank(HUDSON);
         ISatellite(GNOSIS_SATELLITE).adminCall(GNOSIS_PM, _paymasterInner(address(proxy)));
@@ -264,9 +326,13 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
                 == 1_200_000,
             "register+claim rule not set"
         );
-        console.log("  Paymaster: both domain selectors whitelisted via Satellite.adminCall");
+        require(
+            IPaymasterHubRule(GNOSIS_PM).getRule(TEST6_ORG, address(proxy), SEL_CLAIM_EMAIL).allowed,
+            "email claim rule not set"
+        );
+        console.log("  Paymaster: all 4 claim selectors whitelisted via Satellite.adminCall");
 
-        // 4. Authorize the proxy as a hat minter — the REAL governance path (no vm.store):
+        // 4. Authorize the proxy as a hat minter AND activate the allowlist — the REAL governance path:
         //    (a) upgrade the Executor beacon (path A) so a vote can self-target the admin selector;
         //        Test6's executor follows in Mirror mode. (Deploy impl BEFORE prank — `new` would
         //        otherwise consume the prank, leaving upgradeBeaconDirect with the default sender.)
@@ -274,30 +340,39 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
         vm.prank(HUDSON);
         ISatellite(GNOSIS_SATELLITE).upgradeBeaconDirect("Executor", newExec, "v-zkemail-1");
         //    (b) drive executor.execute(batch) as the allowedCaller (HybridVoting) — exactly what
-        //        announceWinner does — with the batch self-targeting setHatMinterAuthorization.
-        IExecutor.Call[] memory authBatch = new IExecutor.Call[](1);
+        //        announceWinner does — with the batch self-targeting setHatMinterAuthorization and
+        //        calling setActiveAllowlist on the proxy (single-leaf domain root).
+        IExecutor.Call[] memory authBatch = new IExecutor.Call[](2);
         authBatch[0] = IExecutor.Call({
             target: TEST6_EXECUTOR,
             value: 0,
             data: abi.encodeWithSignature("setHatMinterAuthorization(address,bool)", address(proxy), true)
+        });
+        authBatch[1] = IExecutor.Call({
+            target: address(proxy),
+            value: 0,
+            data: abi.encodeCall(ZkEmailInvites.setActiveAllowlist, (_domainRoot(), SIM_ALLOWLIST_CID))
         });
         vm.prank(TEST6_HV);
         IExecutor(TEST6_EXECUTOR).execute(1, authBatch);
         bytes32 minterSlot =
             keccak256(abi.encode(address(proxy), bytes32(uint256(keccak256("poa.executor.storage")) + 2)));
         require(uint256(vm.load(TEST6_EXECUTOR, minterSlot)) == 1, "minter not authorized via governance");
-        console.log("  Authorized proxy as hat minter via REAL governance (Executor upgrade + execute)");
+        require(proxy.merkleRoot() == _domainRoot(), "allowlist root not activated via governance");
+        console.log("  Authorized minter + activated allowlist via REAL governance (Executor upgrade + execute)");
 
         // 5. Make a fresh claimer eligible for the Member hat (EligibilityModule superAdmin == executor).
         address claimer = makeAddr("zk-test6-claimer");
         vm.prank(TEST6_EXECUTOR);
         IEligibility(TEST6_ELIGIBILITY).setWearerEligibility(claimer, TEST6_MEMBER_HAT, true, true);
 
-        // 6. Claim end-to-end against the REAL Test6 executor + REAL Hats.
+        // 6. Claim end-to-end against the REAL Test6 executor + REAL Hats. Single-leaf allowlist ->
+        //    the merkle proof is an empty array (MerkleProof.verify([], root, leaf) == (leaf == root)).
         require(!IHatsLike(HATS).isWearerOfHat(claimer, TEST6_MEMBER_HAT), "already wears hat");
         ZkEmailProof memory p = _proof(claimer);
+        bytes32[] memory emptyProof = new bytes32[](0);
         vm.prank(claimer);
-        proxy.claimRoleByDomain(p, claimer);
+        proxy.claimRoleByDomain(p, claimer, _memberHats(), emptyProof);
 
         require(IHatsLike(HATS).isWearerOfHat(claimer, TEST6_MEMBER_HAT), "claimer did not receive Member hat");
         require(proxy.isNullifierUsed(p.emailNullifier), "nullifier not consumed");
@@ -319,8 +394,8 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
 
 /* ════════════════════════════ BROADCASTS ════════════════════════════ */
 
-/// @notice Step 1+2 (Hudson): deploy the Test6 proxy (rules baked in) + whitelist paymaster selectors.
-/// @dev Requires the slice-3 infra addresses above to be filled. The proxy's SwitchableBeacon mirrors
+/// @notice Step 1+2 (Hudson): deploy the Test6 proxy (uninitialized) + whitelist paymaster selectors.
+/// @dev Requires the deploy-slice infra addresses above to be filled. The proxy's SwitchableBeacon mirrors
 ///      the protocol ZkEmailInvites beacon and is owned by Test6's executor (org-governed upgrades).
 contract BroadcastDeployAndWhitelistTest6 is Test6Base {
     function run() public {
@@ -345,28 +420,34 @@ contract BroadcastDeployAndWhitelistTest6 is Test6Base {
         console.log("NEXT (after Executor upgrade): run BroadcastGovProposalTest6 with");
         console.log("  ZKEMAIL_PROXY=", address(proxy));
         console.log("  ZKEMAIL_BEACON=", address(sb));
-        console.log("  (one vote registers + initializes + authorizes the proxy)");
+        console.log("  ZK_ROOT=<allowlist merkle root>  ZK_CID=<allowlist IPFS CID digest>");
+        console.log("  (one vote registers + initializes + authorizes + activates the allowlist)");
     }
 }
 
-/// @notice Step 3 (governance): create the proposal authorizing the proxy as a hat minter.
+/// @notice Step 3 (governance): create the proposal that registers, initializes, authorizes the proxy as
+///         a hat minter, and activates the org's allowlist.
 /// @dev Sender must wear a Test6 creator hat. REQUIRES the Executor beacon upgrade that lets a
 ///      governance batch self-target admin selectors (see header). Members vote; on announceWinner
-///      the executor lands setHatMinterAuthorization(proxy, true).
+///      the executor lands the batch.
 contract BroadcastGovProposalTest6 is Test6Base {
     uint32 internal constant DURATION_MINUTES = 30;
 
     function run() public {
         address proxy = vm.envAddress("ZKEMAIL_PROXY");
         address beacon = vm.envAddress("ZKEMAIL_BEACON");
-        address verifier = _zkVerifier();
+        address domainVerifier = _zkDomainVerifier();
+        address emailVerifier = _zkEmailVerifier();
         address dkim = _zkDkimRegistry();
+        bytes32 root = vm.envBytes32("ZK_ROOT"); // allowlist merkle root (off-chain StandardMerkleTree)
+        bytes32 cid = vm.envBytes32("ZK_CID"); // IPFS CID digest of the allowlist file
         uint256 key = vm.envUint("PRIVATE_KEY");
 
         // One vote does it all, in order: (1) register the proxy in OrgRegistry -> ContractRegistered
-        // creates the subgraph's per-org template; (2) initialize -> config + rule events the template
-        // now catches; (3) authorize the minter (self-targets the executor -> needs the Executor upgrade).
-        IExecutor.Call[] memory batch = new IExecutor.Call[](3);
+        // creates the subgraph's per-org template; (2) initialize -> config events the template now
+        // catches; (3) authorize the minter (self-targets the executor -> needs the Executor upgrade);
+        // (4) activate the allowlist root + cid.
+        IExecutor.Call[] memory batch = new IExecutor.Call[](4);
         batch[0] = IExecutor.Call({
             target: TEST6_ORG_REGISTRY,
             value: 0,
@@ -381,11 +462,14 @@ contract BroadcastGovProposalTest6 is Test6Base {
                 false
             )
         });
-        batch[1] = IExecutor.Call({target: proxy, value: 0, data: _initData(verifier, dkim)});
+        batch[1] = IExecutor.Call({target: proxy, value: 0, data: _initData(domainVerifier, emailVerifier, dkim)});
         batch[2] = IExecutor.Call({
             target: TEST6_EXECUTOR,
             value: 0,
             data: abi.encodeWithSignature("setHatMinterAuthorization(address,bool)", proxy, true)
+        });
+        batch[3] = IExecutor.Call({
+            target: proxy, value: 0, data: abi.encodeCall(ZkEmailInvites.setActiveAllowlist, (root, cid))
         });
         IExecutor.Call[][] memory batches = new IExecutor.Call[][](1);
         batches[0] = batch;
@@ -394,7 +478,7 @@ contract BroadcastGovProposalTest6 is Test6Base {
         vm.startBroadcast(key);
         HybridVoting(TEST6_HV)
             .createProposal(
-                bytes("Authorize ZkEmailInvites as hat minter"),
+                bytes("Authorize ZkEmailInvites + activate allowlist"),
                 bytes32(0),
                 DURATION_MINUTES,
                 1,

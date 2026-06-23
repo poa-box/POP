@@ -29,6 +29,33 @@ itself would verify.
 
 Circuit size: **717,888 non-linear constraints** (fits a `2^20` Powers-of-Tau).
 
+## v2 — specific-address circuit (`PopRoleClaimV2.circom`)
+
+`PopRoleClaimV2` is a superset of `PopRoleClaim` that additionally commits to the **sender's From email
+address**, so the on-chain allowlist can gate on a *specific address* (e.g. `alice@gmail.com`), not just a
+whole domain. It powers `ZkEmailInvites.claimRoleByEmail`; domain claims keep using the lighter v1 circuit
+via `claimRoleByDomain` (two verifiers, two claim paths). Its verifier is vendored at
+[`src/zkemail/vendor/Groth16VerifierV2.sol`](../src/zkemail/vendor/Groth16VerifierV2.sol).
+
+### Public signals (`uint[4]`)
+Signals 0–2 are byte-identical to v1; a 4th is appended:
+
+| idx | signal      | meaning |
+|-----|-------------|---------|
+| 3   | `emailHash` | `Poseidon(packBytes(lowercase(fromAddress), 192))` — a commitment to the sender's From address. Used as the merkle-leaf identity for specific-address allowlist entries. The off-chain allowlist builder (frontend / `gen-inputs.mjs`) must compute it identically (lowercase + zero-pad to 192 bytes + same packing + Poseidon). |
+
+The From address is extracted with zk-email's `FromAddrRegex`, run over a **256-byte window** around the
+`From:` field (prover-supplied `fromWindowIndex` + `emailIndexInWindow`) rather than the full header —
+this windowing cuts the regex cost ~4×, keeping the circuit at **~985k non-linear / ~1.20M total
+constraints** (fits a `2^21` Powers-of-Tau; the bigger setup is the only reason specific-address proving
+is heavier than domain proving). Soundness: `FromAddrRegex` anchors to a line-start `from:`, the unique
+DKIM-signed From field, so a match can only land on the real sender address — the window just has to
+contain it.
+
+> The v1 circuit (domain) sets up against `2^20` (~390 MB zkey, ~17 s in-browser); v2 (specific-address)
+> against `2^21` (~800 MB zkey, ~40 s). Both verifiers are deployed; `ZkEmailInvites` routes each claim
+> type to the right one. The `2^21` ptau is `powersOfTau28_hez_final_21.ptau`.
+
 ## Toolchain
 
 - `circom` **2.2.3** (build from source: `git clone https://github.com/iden3/circom && cargo build --release`)

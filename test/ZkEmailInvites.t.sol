@@ -11,15 +11,20 @@ import {
     IUniversalPasskeyAccountFactory,
     IExecutorHatMinter
 } from "../src/ZkEmailInvites.sol";
-import {IZkEmailGroth16Verifier, ZkEmailProof} from "../src/zkemail/IVerifier.sol";
+import {
+    IZkEmailGroth16Verifier,
+    IZkEmailGroth16VerifierV2,
+    ZkEmailProof,
+    ZkEmailProofV2
+} from "../src/zkemail/IVerifier.sol";
 import {IDKIMRegistry} from "../src/zkemail/IDKIMRegistry.sol";
 import {WebAuthnLib} from "../src/libs/WebAuthnLib.sol";
 
 /*──────────────────────────────  Mocks  ──────────────────────────────*/
 
-/// @notice Stand-in for the snarkjs `Groth16Verifier`. Ignores the proof points entirely and
-///         returns a settable `result` (default true) so tests can toggle proof validity.
-contract MockZkEmailVerifier is IZkEmailGroth16Verifier {
+/// @notice Stand-in for the snarkjs `Groth16Verifier` (domain circuit, 3 signals). Ignores the proof
+///         points entirely and returns a settable `result` (default true) so tests can toggle validity.
+contract MockDomainVerifier is IZkEmailGroth16Verifier {
     bool public result = true;
 
     function setResult(bool v) external {
@@ -27,6 +32,23 @@ contract MockZkEmailVerifier is IZkEmailGroth16Verifier {
     }
 
     function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[3] calldata)
+        external
+        view
+        returns (bool)
+    {
+        return result;
+    }
+}
+
+/// @notice Stand-in for the snarkjs `Groth16VerifierV2` (specific-email circuit, 4 signals).
+contract MockEmailVerifier is IZkEmailGroth16VerifierV2 {
+    bool public result = true;
+
+    function setResult(bool v) external {
+        result = v;
+    }
+
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
         external
         view
         returns (bool)
@@ -133,19 +155,29 @@ contract ReentrancyExecutor is IExecutorHatMinter {
     ZkEmailInvites public zk;
     ZkEmailProof internal _proof;
     address public claimer;
+    uint256[] internal _hatIds;
+    bytes32[] internal _merkleProof;
     bool public attempted;
 
-    function arm(ZkEmailInvites _zk, ZkEmailProof memory p, address _claimer) external {
+    function arm(
+        ZkEmailInvites _zk,
+        ZkEmailProof memory p,
+        address _claimer,
+        uint256[] memory hatIds,
+        bytes32[] memory merkleProof
+    ) external {
         zk = _zk;
         _proof = p;
         claimer = _claimer;
+        _hatIds = hatIds;
+        _merkleProof = merkleProof;
     }
 
     function mintHatsForUser(address, uint256[] calldata) external {
         if (attempted) return;
         attempted = true;
         // Recurse — should be blocked by nonReentrant
-        zk.claimRoleByDomain(_proof, claimer);
+        zk.claimRoleByDomain(_proof, claimer, _hatIds, _merkleProof);
     }
 }
 
@@ -153,7 +185,8 @@ contract ReentrancyExecutor is IExecutorHatMinter {
 
 contract ZkEmailInvitesTest is Test {
     ZkEmailInvites zk;
-    MockZkEmailVerifier verifier;
+    MockDomainVerifier domainVerifier;
+    MockEmailVerifier emailVerifier;
     MockDKIMRegistry dkim;
     MockAccountRegistry acctRegistry;
     MockUniversalFactory factory;
@@ -168,41 +201,79 @@ contract ZkEmailInvitesTest is Test {
     bytes32 constant KEY_HASH = bytes32(uint256(0xAA));
     bytes32 constant EMAIL_HASH_ALICE = bytes32(uint256(0xA11CE));
     bytes32 constant EMAIL_HASH_BOB = bytes32(uint256(0xB0B));
+    bytes32 constant CID = bytes32(uint256(0xC1D));
 
+    uint8 constant LEAF_DOMAIN = 0;
+    uint8 constant LEAF_EMAIL = 1;
+
+    event ActiveAllowlistSet(bytes32 indexed merkleRoot, bytes32 indexed allowlistCid);
     event RoleClaimedByDomain(address indexed claimer, bytes32 indexed domainHash, uint256[] hatIds, bytes32 nullifier);
-    event DomainRuleSet(bytes32 indexed domainHash, uint256[] hatIds, uint64 expiry);
-    event DomainRuleRemoved(bytes32 indexed domainHash);
-    event EmailRuleSet(bytes32 indexed emailHash, uint256[] hatIds, uint64 expiry);
-    event EmailRuleRemoved(bytes32 indexed emailHash);
-    event VerifierUpdated(address indexed verifier);
+    event RoleClaimedByEmail(address indexed claimer, bytes32 indexed emailHash, uint256[] hatIds, bytes32 nullifier);
+    event DomainVerifierUpdated(address indexed verifier);
+    event EmailVerifierUpdated(address indexed verifier);
     event DKIMRegistryUpdated(address indexed registry);
     event AccountRegistryUpdated(address indexed registry);
     event UniversalFactoryUpdated(address indexed factory);
 
     function setUp() public {
-        verifier = new MockZkEmailVerifier();
+        domainVerifier = new MockDomainVerifier();
+        emailVerifier = new MockEmailVerifier();
         dkim = new MockDKIMRegistry();
         acctRegistry = new MockAccountRegistry();
         factory = new MockUniversalFactory();
         executorMock = new MockExecutor();
         executorAddr = address(executorMock);
 
+        zk = _deployInitProxy(bytes32(0), bytes32(0));
+    }
+
+    /*────────── Deploy helpers ──────────*/
+
+    /// @dev Deploy an uninitialized ZkEmailInvites proxy.
+    function _deployUninitProxy() internal returns (ZkEmailInvites zkp) {
         ZkEmailInvites impl = new ZkEmailInvites();
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
-        zk = ZkEmailInvites(address(new BeaconProxy(address(beacon), "")));
+        zkp = ZkEmailInvites(address(new BeaconProxy(address(beacon), "")));
+    }
 
-        zk.initialize(
+    /// @dev Deploy + initialize a proxy with both mock verifiers and the given (root, cid).
+    function _deployInitProxy(bytes32 root, bytes32 cid) internal returns (ZkEmailInvites zkp) {
+        zkp = _deployUninitProxy();
+        zkp.initialize(
             executorAddr,
-            address(verifier),
+            address(domainVerifier),
+            address(emailVerifier),
             address(dkim),
             address(acctRegistry),
             address(factory),
-            _noDomainRules(),
-            _noEmailRules()
+            root,
+            cid
         );
     }
 
-    /*────────── Helpers ──────────*/
+    /*────────── Merkle helpers ──────────*/
+
+    /// @dev OZ StandardMerkleTree leaf: double-keccak of abi.encode(kind, id, hatIds). Mirrors
+    ///      `ZkEmailInvites._leaf`.
+    function _leaf(uint8 kind, bytes32 id, uint256[] memory hatIds) internal pure returns (bytes32) {
+        return keccak256(bytes.concat(keccak256(abi.encode(kind, id, hatIds))));
+    }
+
+    /// @dev OZ MerkleProof pair-hash: keccak of the sorted 32-byte pair.
+    function _pair(bytes32 a, bytes32 b) internal pure returns (bytes32) {
+        return a < b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
+    }
+
+    function _emptyProof() internal pure returns (bytes32[] memory) {
+        return new bytes32[](0);
+    }
+
+    function _proofOf(bytes32 sibling) internal pure returns (bytes32[] memory p) {
+        p = new bytes32[](1);
+        p[0] = sibling;
+    }
+
+    /*────────── Fixture helpers ──────────*/
 
     function _hatIds(uint256 a) internal pure returns (uint256[] memory ids) {
         ids = new uint256[](1);
@@ -215,11 +286,9 @@ contract ZkEmailInvitesTest is Test {
         ids[1] = b;
     }
 
-    /// @dev Builds a `ZkEmailProof`. The mock verifier ignores `pA/pB/pC`, so they stay zero;
-    ///      only `pubkeyHash`, `emailNullifier`, and `domainName` carry meaning. The claimer is
-    ///      NOT in the struct — it is bound by being public-signal[2] of the proof, which the mock
-    ///      ignores, so any `claimer` arg succeeds against the (default-true) mock.
-    function _makeProof(bytes32 nullifier) internal view returns (ZkEmailProof memory p) {
+    /// @dev Builds a `ZkEmailProof`. The mock verifier ignores `pA/pB/pC`, so they stay zero; only
+    ///      `pubkeyHash`, `emailNullifier`, and `domainName` carry meaning here.
+    function _makeProof(bytes32 nullifier) internal pure returns (ZkEmailProof memory p) {
         return _makeProof(nullifier, DOMAIN);
     }
 
@@ -227,17 +296,13 @@ contract ZkEmailInvitesTest is Test {
         p.pubkeyHash = KEY_HASH;
         p.emailNullifier = nullifier;
         p.domainName = domain;
-        // pA / pB / pC left as zeros — the mock verifier ignores them.
     }
 
-    function _setDomain(uint256[] memory ids, uint64 expiry) internal {
-        vm.prank(executorAddr);
-        zk.setDomainRule(DOMAIN, ids, expiry);
-    }
-
-    function _setEmail(bytes32 emailHash, uint256[] memory ids, uint64 expiry) internal {
-        vm.prank(executorAddr);
-        zk.setEmailRule(emailHash, ids, expiry);
+    function _makeProofV2(bytes32 nullifier, bytes32 emailHash) internal pure returns (ZkEmailProofV2 memory p) {
+        p.pubkeyHash = KEY_HASH;
+        p.emailNullifier = nullifier;
+        p.domainName = DOMAIN;
+        p.emailHash = emailHash;
     }
 
     function _enroll() internal pure returns (ZkEmailInvites.PasskeyEnrollment memory e) {
@@ -251,55 +316,24 @@ contract ZkEmailInvitesTest is Test {
         // zero-valued struct; mock registry doesn't verify
     }
 
-    function _noDomainRules() internal pure returns (ZkEmailInvites.InitDomainRule[] memory) {
-        return new ZkEmailInvites.InitDomainRule[](0);
+    /// @dev Activate a single-leaf domain allowlist (root == the only leaf, empty merkle proofs).
+    function _activateSingleDomain(uint256[] memory hatIds) internal returns (bytes32 root) {
+        root = _leaf(LEAF_DOMAIN, DOMAIN_HASH, hatIds);
+        vm.prank(executorAddr);
+        zk.setActiveAllowlist(root, CID);
     }
 
-    function _noEmailRules() internal pure returns (ZkEmailInvites.InitEmailRule[] memory) {
-        return new ZkEmailInvites.InitEmailRule[](0);
-    }
-
-    /// @dev Deploy an uninitialized ZkEmailInvites proxy (so initialize can be called/tested directly).
-    function _deployUninitProxy() internal returns (ZkEmailInvites zkp) {
-        ZkEmailInvites impl = new ZkEmailInvites();
-        UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
-        zkp = ZkEmailInvites(address(new BeaconProxy(address(beacon), "")));
-    }
-
-    /// @dev Deploy a fresh ZkEmailInvites proxy initialized with the given deploy-time rules.
-    function _freshProxyWithRules(
-        ZkEmailInvites.InitDomainRule[] memory dRules,
-        ZkEmailInvites.InitEmailRule[] memory eRules
-    ) internal returns (ZkEmailInvites zkp) {
-        zkp = _deployUninitProxy();
-        zkp.initialize(
-            executorAddr, address(verifier), address(dkim), address(acctRegistry), address(factory), dRules, eRules
-        );
-    }
-
-    function _oneDomainRule(string memory domain, uint256[] memory hatIds, uint64 expiry)
-        internal
-        pure
-        returns (ZkEmailInvites.InitDomainRule[] memory r)
-    {
-        r = new ZkEmailInvites.InitDomainRule[](1);
-        r[0] = ZkEmailInvites.InitDomainRule({domain: domain, hatIds: hatIds, expiry: expiry});
-    }
-
-    function _oneEmailRule(bytes32 emailHash, uint256[] memory hatIds, uint64 expiry)
-        internal
-        pure
-        returns (ZkEmailInvites.InitEmailRule[] memory r)
-    {
-        r = new ZkEmailInvites.InitEmailRule[](1);
-        r[0] = ZkEmailInvites.InitEmailRule({emailHash: emailHash, hatIds: hatIds, expiry: expiry});
+    /// @dev Activate a single-leaf email allowlist.
+    function _activateSingleEmail(bytes32 emailHash, uint256[] memory hatIds) internal returns (bytes32 root) {
+        root = _leaf(LEAF_EMAIL, emailHash, hatIds);
+        vm.prank(executorAddr);
+        zk.setActiveAllowlist(root, CID);
     }
 
     /*────────── Storage slot guard ──────────*/
 
-    /// @dev Confirms that the contract reads/writes at `keccak256("poa.zkemailinvites.storage")`.
-    ///      `executor` is the first field of `Layout` — if anyone reorders the struct or renames
-    ///      the slot string, this test catches it before it ships.
+    /// @dev Confirms the contract reads/writes at `keccak256("poa.zkemailinvites.storage")` with
+    ///      `executor` as field 0.
     function testStorageSlot_isExpected() public view {
         bytes32 slot = keccak256("poa.zkemailinvites.storage");
         bytes32 stored = vm.load(address(zk), slot);
@@ -312,12 +346,13 @@ contract ZkEmailInvitesTest is Test {
         vm.expectRevert();
         zk.initialize(
             executorAddr,
-            address(verifier),
+            address(domainVerifier),
+            address(emailVerifier),
             address(dkim),
             address(acctRegistry),
             address(factory),
-            _noDomainRules(),
-            _noEmailRules()
+            bytes32(0),
+            bytes32(0)
         );
     }
 
@@ -326,134 +361,71 @@ contract ZkEmailInvitesTest is Test {
         vm.expectRevert();
         impl.initialize(
             executorAddr,
-            address(verifier),
+            address(domainVerifier),
+            address(emailVerifier),
             address(dkim),
             address(acctRegistry),
             address(factory),
-            _noDomainRules(),
-            _noEmailRules()
+            bytes32(0),
+            bytes32(0)
         );
     }
 
-    /*────────── Deploy-time rules (initialize with rules) ──────────*/
-
-    function testInitializeWithDomainRule_immediatelyClaimable() public {
-        // A proxy initialized with a domain rule is claimable with NO follow-up governance call.
-        ZkEmailInvites zkp = _freshProxyWithRules(_oneDomainRule(DOMAIN, _hatIds(42), 0), _noEmailRules());
-
-        (uint256[] memory hatIds, uint64 expiry, bool exists) = zkp.getDomainRule(DOMAIN_HASH);
-        assertTrue(exists, "rule preloaded at init");
-        assertEq(expiry, 0);
-        assertEq(hatIds.length, 1);
-        assertEq(hatIds[0], 42);
-
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        vm.prank(user);
-        zkp.claimRoleByDomain(p, user);
-
-        assertEq(executorMock.mintCount(), 1, "claim works immediately after deploy");
-        (address mintedTo, uint256[] memory minted) = executorMock.mintAt(0);
-        assertEq(mintedTo, user);
-        assertEq(minted[0], 42);
+    function testInitializeWiresVerifiersAndDeps() public view {
+        assertEq(address(zk.executor()), executorAddr);
+        assertEq(address(zk.domainVerifier()), address(domainVerifier));
+        assertEq(address(zk.emailVerifier()), address(emailVerifier));
+        assertEq(address(zk.dkimRegistry()), address(dkim));
+        assertEq(address(zk.accountRegistry()), address(acctRegistry));
+        assertEq(address(zk.universalFactory()), address(factory));
+        // Dormant by default — no root.
+        assertEq(zk.merkleRoot(), bytes32(0));
+        assertEq(zk.allowlistCid(), bytes32(0));
     }
 
-    /// @dev Email rules can be PRE-LOADED at init (admin scaffolding) but are NOT claimable in v1.
-    function testInitializeWithEmailRule_setButNotClaimable() public {
-        ZkEmailInvites zkp = _freshProxyWithRules(_noDomainRules(), _oneEmailRule(EMAIL_HASH_ALICE, _hatIds(7), 0));
-
-        (uint256[] memory hatIds, uint64 expiry, bool exists, bool claimed) = zkp.getEmailRule(EMAIL_HASH_ALICE);
-        assertTrue(exists, "email rule preloaded");
-        assertFalse(claimed);
-        assertEq(expiry, 0);
-        assertEq(hatIds.length, 1);
-        assertEq(hatIds[0], 7);
+    function testInitializeWithRoot_setsActiveAllowlist() public {
+        bytes32 root = bytes32(uint256(0xDEAD));
+        ZkEmailInvites zkp = _deployInitProxy(root, CID);
+        assertEq(zkp.merkleRoot(), root);
+        assertEq(zkp.allowlistCid(), CID);
     }
 
-    function testInitializeWithBothRuleTypes() public {
-        ZkEmailInvites.InitDomainRule[] memory d = _oneDomainRule(DOMAIN, _hatIds(1), 0);
-        ZkEmailInvites.InitEmailRule[] memory e = _oneEmailRule(EMAIL_HASH_BOB, _hatIds(2), 0);
-        ZkEmailInvites zkp = _freshProxyWithRules(d, e);
+    /*────────── setActiveAllowlist ──────────*/
 
-        (,, bool dExists) = zkp.getDomainRule(DOMAIN_HASH);
-        (,, bool eExists,) = zkp.getEmailRule(EMAIL_HASH_BOB);
-        assertTrue(dExists && eExists, "both rule types preloaded");
-    }
-
-    function testInitializeWithMultiHatDomainRule() public {
-        ZkEmailInvites zkp = _freshProxyWithRules(_oneDomainRule(DOMAIN, _hatIds(11, 22), 0), _noEmailRules());
-        (uint256[] memory hatIds,,) = zkp.getDomainRule(DOMAIN_HASH);
-        assertEq(hatIds.length, 2);
-        assertEq(hatIds[0], 11);
-        assertEq(hatIds[1], 22);
-    }
-
-    function testInitializeWithNoRules_nothingClaimable() public {
-        ZkEmailInvites zkp = _freshProxyWithRules(_noDomainRules(), _noEmailRules());
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        vm.prank(user);
-        vm.expectRevert(ZkEmailInvites.DomainNotAllowed.selector);
-        zkp.claimRoleByDomain(p, user);
-    }
-
-    function testInitializeRevertsOnEmptyDomainInRule() public {
-        ZkEmailInvites zkp = _deployUninitProxy();
-        vm.expectRevert(ZkEmailInvites.EmptyDomain.selector);
-        zkp.initialize(
-            executorAddr,
-            address(verifier),
-            address(dkim),
-            address(acctRegistry),
-            address(factory),
-            _oneDomainRule("", _hatIds(1), 0),
-            _noEmailRules()
-        );
-    }
-
-    function testInitializeRevertsOnEmptyHatsInRule() public {
-        uint256[] memory empty = new uint256[](0);
-        ZkEmailInvites zkp = _deployUninitProxy();
-        vm.expectRevert(ZkEmailInvites.EmptyHats.selector);
-        zkp.initialize(
-            executorAddr,
-            address(verifier),
-            address(dkim),
-            address(acctRegistry),
-            address(factory),
-            _oneDomainRule(DOMAIN, empty, 0),
-            _noEmailRules()
-        );
-    }
-
-    function testInitializeRevertsOnEmptyHatsInEmailRule() public {
-        uint256[] memory empty = new uint256[](0);
-        ZkEmailInvites zkp = _deployUninitProxy();
-        vm.expectRevert(ZkEmailInvites.EmptyHats.selector);
-        zkp.initialize(
-            executorAddr,
-            address(verifier),
-            address(dkim),
-            address(acctRegistry),
-            address(factory),
-            _noDomainRules(),
-            _oneEmailRule(EMAIL_HASH_ALICE, empty, 0)
-        );
-    }
-
-    /*────────── Admin gating ──────────*/
-
-    function testSetDomainRule_onlyExecutor() public {
+    function testSetActiveAllowlist_onlyExecutor() public {
         vm.expectRevert(ZkEmailInvites.Unauthorized.selector);
-        zk.setDomainRule(DOMAIN, _hatIds(1), 0);
+        zk.setActiveAllowlist(bytes32(uint256(1)), CID);
     }
 
-    function testSetEmailRule_onlyExecutor() public {
-        vm.expectRevert(ZkEmailInvites.Unauthorized.selector);
-        zk.setEmailRule(EMAIL_HASH_ALICE, _hatIds(1), 0);
+    function testSetActiveAllowlist_storesAndEmits() public {
+        bytes32 root = bytes32(uint256(0xABCDEF));
+        vm.expectEmit(true, true, false, false);
+        emit ActiveAllowlistSet(root, CID);
+        vm.prank(executorAddr);
+        zk.setActiveAllowlist(root, CID);
+
+        assertEq(zk.merkleRoot(), root);
+        assertEq(zk.allowlistCid(), CID);
     }
 
-    function testSetVerifier_onlyExecutor() public {
+    function testSetActiveAllowlist_canDormant() public {
+        vm.prank(executorAddr);
+        zk.setActiveAllowlist(bytes32(uint256(1)), CID);
+        vm.prank(executorAddr);
+        zk.setActiveAllowlist(bytes32(0), bytes32(0));
+        assertEq(zk.merkleRoot(), bytes32(0));
+    }
+
+    /*────────── Setter gating ──────────*/
+
+    function testSetDomainVerifier_onlyExecutor() public {
         vm.expectRevert(ZkEmailInvites.Unauthorized.selector);
-        zk.setVerifier(address(0xBEEF));
+        zk.setDomainVerifier(address(0xBEEF));
+    }
+
+    function testSetEmailVerifier_onlyExecutor() public {
+        vm.expectRevert(ZkEmailInvites.Unauthorized.selector);
+        zk.setEmailVerifier(address(0xBEEF));
     }
 
     function testSetDKIMRegistry_onlyExecutor() public {
@@ -461,120 +433,80 @@ contract ZkEmailInvitesTest is Test {
         zk.setDKIMRegistry(address(0xBEEF));
     }
 
-    function testSetDomainRule_emptyHatsReverts() public {
-        uint256[] memory none = new uint256[](0);
-        vm.prank(executorAddr);
-        vm.expectRevert(ZkEmailInvites.EmptyHats.selector);
-        zk.setDomainRule(DOMAIN, none, 0);
+    function testSetAccountRegistry_onlyExecutor() public {
+        vm.expectRevert(ZkEmailInvites.Unauthorized.selector);
+        zk.setAccountRegistry(address(0xBEEF));
     }
 
-    function testSetDomainRule_emptyDomainReverts() public {
-        vm.prank(executorAddr);
-        vm.expectRevert(ZkEmailInvites.EmptyDomain.selector);
-        zk.setDomainRule("", _hatIds(1), 0);
-    }
-
-    function testSetEmailRule_emptyHatsReverts() public {
-        uint256[] memory none = new uint256[](0);
-        vm.prank(executorAddr);
-        vm.expectRevert(ZkEmailInvites.EmptyHats.selector);
-        zk.setEmailRule(EMAIL_HASH_ALICE, none, 0);
-    }
-
-    /*────────── Admin: email-rule set/get/remove (no claim path in v1) ──────────*/
-
-    function testSetEmailRule_storesAndEmits() public {
-        uint256[] memory ids = _hatIds(7, 8);
-        vm.expectEmit(true, false, false, true);
-        emit EmailRuleSet(EMAIL_HASH_ALICE, ids, uint64(0));
-        vm.prank(executorAddr);
-        zk.setEmailRule(EMAIL_HASH_ALICE, ids, 0);
-
-        (uint256[] memory hatIds, uint64 expiry, bool exists, bool claimed) = zk.getEmailRule(EMAIL_HASH_ALICE);
-        assertTrue(exists, "rule stored");
-        assertFalse(claimed, "never claimed (no claim path in v1)");
-        assertEq(expiry, 0);
-        assertEq(hatIds.length, 2);
-        assertEq(hatIds[0], 7);
-        assertEq(hatIds[1], 8);
-    }
-
-    function testGetEmailRule_unsetReturnsEmpty() public view {
-        (uint256[] memory hatIds, uint64 expiry, bool exists, bool claimed) = zk.getEmailRule(EMAIL_HASH_BOB);
-        assertEq(hatIds.length, 0);
-        assertEq(expiry, 0);
-        assertFalse(exists);
-        assertFalse(claimed);
-    }
-
-    function testRemoveEmailRule() public {
-        _setEmail(EMAIL_HASH_ALICE, _hatIds(1), 0);
-        (,, bool existsBefore,) = zk.getEmailRule(EMAIL_HASH_ALICE);
-        assertTrue(existsBefore);
-
-        vm.expectEmit(true, false, false, false);
-        emit EmailRuleRemoved(EMAIL_HASH_ALICE);
-        vm.prank(executorAddr);
-        zk.removeEmailRule(EMAIL_HASH_ALICE);
-
-        (,, bool existsAfter,) = zk.getEmailRule(EMAIL_HASH_ALICE);
-        assertFalse(existsAfter, "rule removed");
-    }
-
-    function testRemoveDomainRule() public {
-        _setDomain(_hatIds(1), 0);
-        vm.expectEmit(true, false, false, false);
-        emit DomainRuleRemoved(DOMAIN_HASH);
-        vm.prank(executorAddr);
-        zk.removeDomainRule(DOMAIN);
-
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        vm.prank(user);
-        vm.expectRevert(ZkEmailInvites.DomainNotAllowed.selector);
-        zk.claimRoleByDomain(p, user);
+    function testSetUniversalFactory_onlyExecutor() public {
+        vm.expectRevert(ZkEmailInvites.Unauthorized.selector);
+        zk.setUniversalFactory(address(0xBEEF));
     }
 
     function testSetters_updateAddressesAndEmit() public {
         address newAddr = address(0xABCD);
 
         vm.expectEmit(true, false, false, false);
-        emit VerifierUpdated(newAddr);
+        emit DomainVerifierUpdated(newAddr);
         vm.prank(executorAddr);
-        zk.setVerifier(newAddr);
+        zk.setDomainVerifier(newAddr);
+        assertEq(address(zk.domainVerifier()), newAddr);
+
+        vm.expectEmit(true, false, false, false);
+        emit EmailVerifierUpdated(newAddr);
+        vm.prank(executorAddr);
+        zk.setEmailVerifier(newAddr);
+        assertEq(address(zk.emailVerifier()), newAddr);
 
         vm.expectEmit(true, false, false, false);
         emit DKIMRegistryUpdated(newAddr);
         vm.prank(executorAddr);
         zk.setDKIMRegistry(newAddr);
+        assertEq(address(zk.dkimRegistry()), newAddr);
 
         vm.expectEmit(true, false, false, false);
         emit AccountRegistryUpdated(newAddr);
         vm.prank(executorAddr);
         zk.setAccountRegistry(newAddr);
+        assertEq(address(zk.accountRegistry()), newAddr);
 
         vm.expectEmit(true, false, false, false);
         emit UniversalFactoryUpdated(newAddr);
         vm.prank(executorAddr);
         zk.setUniversalFactory(newAddr);
+        assertEq(address(zk.universalFactory()), newAddr);
     }
 
-    function testVerifierGetter_reflectsType() public view {
-        assertEq(address(zk.verifier()), address(verifier));
+    /*────────── Dormant module ──────────*/
+
+    function testClaimRoleByDomain_dormantReverts() public {
+        // No allowlist active → AllowlistNotActive.
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.AllowlistNotActive.selector);
+        zk.claimRoleByDomain(p, user, _hatIds(1), _emptyProof());
+    }
+
+    function testClaimRoleByEmail_dormantReverts() public {
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE);
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.AllowlistNotActive.selector);
+        zk.claimRoleByEmail(p, user, _hatIds(1), _emptyProof());
     }
 
     /*────────── claimRoleByDomain ──────────*/
 
     function testClaimRoleByDomain_success() public {
-        _setDomain(_hatIds(42), 0);
+        uint256[] memory hats = _hatIds(42);
+        _activateSingleDomain(hats);
 
         ZkEmailProof memory p = _makeProof(bytes32(uint256(0x1111)));
 
-        uint256[] memory expectedHats = _hatIds(42);
         vm.expectEmit(true, true, false, true);
-        emit RoleClaimedByDomain(user, DOMAIN_HASH, expectedHats, p.emailNullifier);
+        emit RoleClaimedByDomain(user, DOMAIN_HASH, hats, p.emailNullifier);
 
         vm.prank(user);
-        zk.claimRoleByDomain(p, user);
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
 
         assertTrue(zk.isNullifierUsed(p.emailNullifier));
         assertEq(executorMock.mintCount(), 1);
@@ -584,144 +516,231 @@ contract ZkEmailInvitesTest is Test {
         assertEq(mintedHats[0], 42);
     }
 
-    function testClaimRoleByDomain_revertOnUnknownDomain() public {
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        vm.prank(user);
-        vm.expectRevert(ZkEmailInvites.DomainNotAllowed.selector);
-        zk.claimRoleByDomain(p, user);
-    }
-
-    function testClaimRoleByDomain_revertOnExpiredRule() public {
-        _setDomain(_hatIds(1), uint64(block.timestamp + 1 hours));
-        vm.warp(block.timestamp + 1 hours + 1);
+    function testClaimRoleByDomain_multiHat() public {
+        uint256[] memory hats = _hatIds(100, 200);
+        _activateSingleDomain(hats);
 
         ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
         vm.prank(user);
-        vm.expectRevert(ZkEmailInvites.RuleExpired.selector);
-        zk.claimRoleByDomain(p, user);
-    }
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
 
-    function testClaimRoleByDomain_revertOnNullifierReuse() public {
-        _setDomain(_hatIds(1), 0);
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        vm.prank(user);
-        zk.claimRoleByDomain(p, user);
-
-        // Same nullifier in a fresh proof — second attempt blocks at the nullifier check.
-        ZkEmailProof memory p2 = _makeProof(bytes32(uint256(1)));
-        vm.prank(user);
-        vm.expectRevert(ZkEmailInvites.NullifierAlreadyUsed.selector);
-        zk.claimRoleByDomain(p2, user);
-    }
-
-    function testClaimRoleByDomain_revertOnInvalidDKIM() public {
-        _setDomain(_hatIds(1), 0);
-        dkim.setResult(false);
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        vm.prank(user);
-        vm.expectRevert(ZkEmailInvites.InvalidDKIMKey.selector);
-        zk.claimRoleByDomain(p, user);
-    }
-
-    function testClaimRoleByDomain_revertOnInvalidProof() public {
-        _setDomain(_hatIds(1), 0);
-        verifier.setResult(false);
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        vm.prank(user);
-        vm.expectRevert(ZkEmailInvites.InvalidProof.selector);
-        zk.claimRoleByDomain(p, user);
+        (address mintedTo, uint256[] memory minted) = executorMock.mintAt(0);
+        assertEq(mintedTo, user);
+        assertEq(minted.length, 2);
+        assertEq(minted[0], 100);
+        assertEq(minted[1], 200);
     }
 
     function testClaimRoleByDomain_normalizesCase() public {
-        // Domain rule registered with mixed case; proof reports lowercase — should match.
-        vm.prank(executorAddr);
-        zk.setDomainRule("ANTHROPIC.com", _hatIds(7), 0);
+        // Leaf is keyed on keccak(lower(domain)). Proof reports a mixed-case domain that lowercases
+        // to the same hash, so the leaf (and thus merkle proof) still match.
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleDomain(hats);
 
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)), "ANTHROPIC.com");
         vm.prank(user);
-        zk.claimRoleByDomain(p, user);
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
         assertEq(executorMock.mintCount(), 1);
     }
 
-    function testClaimRoleByDomain_revertOnZeroClaimer() public {
-        _setDomain(_hatIds(1), 0);
-        // Explicit ZeroClaimer guard fires before any proof work.
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        vm.expectRevert(ZkEmailInvites.ZeroClaimer.selector);
-        zk.claimRoleByDomain(p, address(0));
-    }
-
-    function testClaimRoleByDomain_permissionless() public {
-        // Anyone may submit a proof on behalf of the address it's bound to (signal[2]).
-        // The relayer pays gas; the bound `claimer` receives the hat.
-        _setDomain(_hatIds(42), 0);
+    function testClaimRoleByDomain_permissionlessRelayer() public {
+        uint256[] memory hats = _hatIds(42);
+        _activateSingleDomain(hats);
         ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
 
         address relayer = address(0xBEEF);
         vm.prank(relayer);
-        zk.claimRoleByDomain(p, user); // relayer submits, user receives
+        zk.claimRoleByDomain(p, user, hats, _emptyProof()); // relayer submits, user receives
 
         (address mintedTo,) = executorMock.mintAt(0);
         assertEq(mintedTo, user, "hat minted to bound claimer, not relayer");
     }
 
-    function testClaimRoleByDomain_multiHatRule() public {
-        _setDomain(_hatIds(100, 200), 0);
+    function testClaimRoleByDomain_revertNotInAllowlist_wrongHats() public {
+        // Activate for hats [42] but claim with hats [99] → leaf differs → not in allowlist.
+        _activateSingleDomain(_hatIds(42));
 
         ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
         vm.prank(user);
-        zk.claimRoleByDomain(p, user);
-
-        (address mintedTo, uint256[] memory hats) = executorMock.mintAt(0);
-        assertEq(mintedTo, user);
-        assertEq(hats.length, 2, "both hats minted in one call");
-        assertEq(hats[0], 100);
-        assertEq(hats[1], 200);
+        vm.expectRevert(ZkEmailInvites.NotInAllowlist.selector);
+        zk.claimRoleByDomain(p, user, _hatIds(99), _emptyProof());
     }
 
-    function testClaimRoleByDomain_differentNullifiersBothClaim() public {
-        // Two distinct emails (distinct nullifiers) under the same domain both mint — the only
-        // replay guard in v1 is the nullifier, not a per-claimer / per-email flag.
-        _setDomain(_hatIds(1), 0);
-
-        ZkEmailProof memory p1 = _makeProof(bytes32(uint256(0xAAA)));
-        vm.prank(user);
-        zk.claimRoleByDomain(p1, user);
-
-        ZkEmailProof memory p2 = _makeProof(bytes32(uint256(0xBBB)));
-        vm.prank(user);
-        zk.claimRoleByDomain(p2, user);
-
-        assertEq(executorMock.mintCount(), 2, "distinct nullifiers each claim");
-    }
-
-    function testOverwriteDomainRule_replacesHats() public {
-        _setDomain(_hatIds(1), 0);
+    function testClaimRoleByDomain_revertNotInAllowlist_badProof() public {
+        // 2-leaf tree [A, B]; claim leaf A but supply the WRONG sibling so the proof fails.
+        uint256[] memory hatsA = _hatIds(1);
+        bytes32 leafA = _leaf(LEAF_DOMAIN, DOMAIN_HASH, hatsA);
+        bytes32 leafB = _leaf(LEAF_DOMAIN, keccak256(bytes("other.com")), _hatIds(2));
+        bytes32 root = _pair(leafA, leafB);
         vm.prank(executorAddr);
-        zk.setDomainRule(DOMAIN, _hatIds(99), 0);
+        zk.setActiveAllowlist(root, CID);
 
-        // A claim under the same domain gets the NEW hat list.
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        // Wrong sibling (zero) → MerkleProof.verify fails.
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.NotInAllowlist.selector);
+        zk.claimRoleByDomain(p, user, hatsA, _proofOf(bytes32(0)));
+    }
+
+    function testClaimRoleByDomain_twoLeafTree_validProofSucceeds() public {
+        // 2-leaf tree [A, B]; claim leaf A with the correct sibling B.
+        uint256[] memory hatsA = _hatIds(1);
+        bytes32 leafA = _leaf(LEAF_DOMAIN, DOMAIN_HASH, hatsA);
+        bytes32 leafB = _leaf(LEAF_DOMAIN, keccak256(bytes("other.com")), _hatIds(2));
+        bytes32 root = _pair(leafA, leafB);
+        vm.prank(executorAddr);
+        zk.setActiveAllowlist(root, CID);
+
         ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
         vm.prank(user);
-        zk.claimRoleByDomain(p, user);
+        zk.claimRoleByDomain(p, user, hatsA, _proofOf(leafB));
+        assertEq(executorMock.mintCount(), 1);
+    }
 
-        (, uint256[] memory hats) = executorMock.mintAt(0);
-        assertEq(hats.length, 1);
-        assertEq(hats[0], 99, "new rule hat applied");
+    function testClaimRoleByDomain_revertNullifierReuse() public {
+        uint256[] memory hats = _hatIds(1);
+        _activateSingleDomain(hats);
+
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
+
+        ZkEmailProof memory p2 = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.NullifierAlreadyUsed.selector);
+        zk.claimRoleByDomain(p2, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByDomain_revertInvalidDKIM() public {
+        uint256[] memory hats = _hatIds(1);
+        _activateSingleDomain(hats);
+        dkim.setResult(false);
+
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.InvalidDKIMKey.selector);
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByDomain_revertInvalidProof() public {
+        uint256[] memory hats = _hatIds(1);
+        _activateSingleDomain(hats);
+        domainVerifier.setResult(false);
+
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.InvalidProof.selector);
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByDomain_revertZeroClaimer() public {
+        uint256[] memory hats = _hatIds(1);
+        _activateSingleDomain(hats);
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.expectRevert(ZkEmailInvites.ZeroClaimer.selector);
+        zk.claimRoleByDomain(p, address(0), hats, _emptyProof());
+    }
+
+    function testClaimRoleByDomain_revertEmptyHats() public {
+        uint256[] memory hats = _hatIds(1);
+        _activateSingleDomain(hats);
+        uint256[] memory none = new uint256[](0);
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.EmptyHats.selector);
+        zk.claimRoleByDomain(p, user, none, _emptyProof());
+    }
+
+    /*────────── claimRoleByEmail ──────────*/
+
+    function testClaimRoleByEmail_success() public {
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(0x2222)), EMAIL_HASH_ALICE);
+
+        vm.expectEmit(true, true, false, true);
+        emit RoleClaimedByEmail(user, EMAIL_HASH_ALICE, hats, p.emailNullifier);
+
+        vm.prank(user);
+        zk.claimRoleByEmail(p, user, hats, _emptyProof());
+
+        assertTrue(zk.isNullifierUsed(p.emailNullifier));
+        assertEq(executorMock.mintCount(), 1);
+        (address mintedTo, uint256[] memory mintedHats) = executorMock.mintAt(0);
+        assertEq(mintedTo, user);
+        assertEq(mintedHats[0], 7);
+    }
+
+    function testClaimRoleByEmail_revertNotInAllowlist_wrongEmailHash() public {
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+
+        // Proof carries BOB's emailHash → leaf differs from the ALICE-keyed root.
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_BOB);
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.NotInAllowlist.selector);
+        zk.claimRoleByEmail(p, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByEmail_revertNullifierReuse() public {
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE);
+        vm.prank(user);
+        zk.claimRoleByEmail(p, user, hats, _emptyProof());
+
+        ZkEmailProofV2 memory p2 = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE);
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.NullifierAlreadyUsed.selector);
+        zk.claimRoleByEmail(p2, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByEmail_revertInvalidProof() public {
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+        emailVerifier.setResult(false);
+
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE);
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.InvalidProof.selector);
+        zk.claimRoleByEmail(p, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByEmail_revertInvalidDKIM() public {
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+        dkim.setResult(false);
+
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE);
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.InvalidDKIMKey.selector);
+        zk.claimRoleByEmail(p, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByEmail_revertZeroClaimer() public {
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE);
+        vm.expectRevert(ZkEmailInvites.ZeroClaimer.selector);
+        zk.claimRoleByEmail(p, address(0), hats, _emptyProof());
     }
 
     /*────────── Combined register + claim — domain ──────────*/
 
     function testRegisterAndClaimByDomainWithPasskey_success() public {
-        _setDomain(_hatIds(11, 12), 0);
+        uint256[] memory hats = _hatIds(11, 12);
+        _activateSingleDomain(hats);
 
         ZkEmailInvites.PasskeyEnrollment memory passkey = _enroll();
         address expectedAccount = address(uint160(uint256(keccak256(abi.encode("acct", passkey.credentialId)))));
 
         ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
 
-        address result =
-            zk.registerAndClaimByDomainWithPasskey(passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p);
+        address result = zk.registerAndClaimByDomainWithPasskey(
+            passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p, hats, _emptyProof()
+        );
 
         assertEq(result, expectedAccount);
         assertEq(acctRegistry.callCount(), 1);
@@ -729,79 +748,97 @@ contract ZkEmailInvitesTest is Test {
         assertEq(factory.callCount(), 1);
         assertTrue(zk.isNullifierUsed(p.emailNullifier));
         assertEq(executorMock.mintCount(), 1);
-        (address mintedTo, uint256[] memory hats) = executorMock.mintAt(0);
+        (address mintedTo, uint256[] memory minted) = executorMock.mintAt(0);
         assertEq(mintedTo, expectedAccount);
-        assertEq(hats.length, 2);
+        assertEq(minted.length, 2);
     }
 
     function testRegisterAndClaimByDomainWithPasskey_revertWhenFactoryUnset() public {
-        // Unbind the factory.
         vm.prank(executorAddr);
         zk.setUniversalFactory(address(0));
 
-        _setDomain(_hatIds(1), 0);
+        uint256[] memory hats = _hatIds(1);
+        _activateSingleDomain(hats);
         ZkEmailInvites.PasskeyEnrollment memory passkey = _enroll();
         ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
 
         vm.expectRevert(ZkEmailInvites.PasskeyFactoryNotSet.selector);
-        zk.registerAndClaimByDomainWithPasskey(passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p);
+        zk.registerAndClaimByDomainWithPasskey(
+            passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p, hats, _emptyProof()
+        );
     }
 
-    function testRegisterAndClaimByDomainWithPasskey_revertWhenRegistryRejectsSig() public {
-        _setDomain(_hatIds(1), 0);
+    function testRegisterAndClaimByDomainWithPasskey_revertWhenRegistryRejects() public {
+        uint256[] memory hats = _hatIds(1);
+        _activateSingleDomain(hats);
         acctRegistry.setShouldRevert(true);
 
         ZkEmailInvites.PasskeyEnrollment memory passkey = _enroll();
         ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
 
         vm.expectRevert(); // bubbles "MockRegistry: rejected"
-        zk.registerAndClaimByDomainWithPasskey(passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p);
+        zk.registerAndClaimByDomainWithPasskey(
+            passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p, hats, _emptyProof()
+        );
 
-        // Nothing should have happened post-revert.
         assertEq(factory.callCount(), 0);
         assertEq(executorMock.mintCount(), 0);
         assertFalse(zk.isNullifierUsed(p.emailNullifier));
     }
 
-    function testRegisterAndClaimByDomainWithPasskey_revertOnUnknownDomain() public {
-        // No domain rule set — register+create succeed but the claim hits DomainNotAllowed, so the
-        // whole tx reverts atomically (no mint).
+    /*────────── Combined register + claim — email ──────────*/
+
+    function testRegisterAndClaimByEmailWithPasskey_success() public {
+        uint256[] memory hats = _hatIds(21);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+
         ZkEmailInvites.PasskeyEnrollment memory passkey = _enroll();
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        address expectedAccount = address(uint160(uint256(keccak256(abi.encode("acct", passkey.credentialId)))));
 
-        vm.expectRevert(ZkEmailInvites.DomainNotAllowed.selector);
-        zk.registerAndClaimByDomainWithPasskey(passkey, "alice", block.timestamp + 1 hours, 0, _emptyAuth(), p);
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE);
 
-        assertEq(executorMock.mintCount(), 0);
+        address result = zk.registerAndClaimByEmailWithPasskey(
+            passkey, "bob", block.timestamp + 1 hours, 0, _emptyAuth(), p, hats, _emptyProof()
+        );
+
+        assertEq(result, expectedAccount);
+        assertEq(acctRegistry.callCount(), 1);
+        assertEq(factory.callCount(), 1);
+        assertTrue(zk.isNullifierUsed(p.emailNullifier));
+        (address mintedTo, uint256[] memory minted) = executorMock.mintAt(0);
+        assertEq(mintedTo, expectedAccount);
+        assertEq(minted[0], 21);
     }
 
     /*────────── Reentrancy ──────────*/
 
     function testReentrancy_isBlocked() public {
-        // Re-init zk with a malicious executor that calls back in.
+        // Spin up a fresh proxy whose executor is a malicious re-entrant minter.
         ZkEmailInvites impl = new ZkEmailInvites();
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
         ZkEmailInvites attacker = ZkEmailInvites(address(new BeaconProxy(address(beacon), "")));
         ReentrancyExecutor rx = new ReentrancyExecutor();
         attacker.initialize(
             address(rx),
-            address(verifier),
+            address(domainVerifier),
+            address(emailVerifier),
             address(dkim),
             address(acctRegistry),
             address(factory),
-            _noDomainRules(),
-            _noEmailRules()
+            bytes32(0),
+            bytes32(0)
         );
 
-        uint256[] memory ids = _hatIds(1);
+        uint256[] memory hats = _hatIds(1);
+        bytes32 root = _leaf(LEAF_DOMAIN, DOMAIN_HASH, hats);
         vm.prank(address(rx));
-        attacker.setDomainRule(DOMAIN, ids, 0);
+        attacker.setActiveAllowlist(root, CID);
 
         ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
-        rx.arm(attacker, p, user);
+        rx.arm(attacker, p, user, hats, _emptyProof());
 
         vm.prank(user);
         vm.expectRevert(); // ReentrancyGuardUpgradeable: ReentrancyGuardReentrantCall
-        attacker.claimRoleByDomain(p, user);
+        attacker.claimRoleByDomain(p, user, hats, _emptyProof());
     }
 }

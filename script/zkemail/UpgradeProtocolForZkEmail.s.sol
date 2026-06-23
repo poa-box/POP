@@ -84,7 +84,7 @@ abstract contract UpgradeBase is Script {
 
     // OrgDeployer.Layout: governanceFactory(0), accessFactory(1), modulesFactory(2), orgRegistry(3),
     // poaManager(4), hatsTreeSetup(5), paymasterHub(6), universalPasskeyFactory(7), _status(8),
-    // hatsV2(9), zkEmailVerifier(10), zkEmailDkimRegistry(11).
+    // hatsV2(9), zkEmailDomainVerifier(10), zkEmailEmailVerifier(11), zkEmailDkimRegistry(12).
     bytes32 internal constant OD_SLOT = keccak256("poa.orgdeployer.storage");
 
     function _modulesFactorySlot() internal pure returns (bytes32) {
@@ -95,8 +95,12 @@ abstract contract UpgradeBase is Script {
         return bytes32(uint256(OD_SLOT) + 4);
     }
 
-    function _verifierSlot() internal pure returns (bytes32) {
+    function _domainVerifierSlot() internal pure returns (bytes32) {
         return bytes32(uint256(OD_SLOT) + 10);
+    }
+
+    function _emailVerifierSlot() internal pure returns (bytes32) {
+        return bytes32(uint256(OD_SLOT) + 11);
     }
 
     function _deployNewImpls()
@@ -173,9 +177,21 @@ contract SimUpgradeGnosis is UpgradeBase {
         ISatellite(GNOSIS_SATELLITE)
             .adminCall(
                 GNOSIS_ORG_DEPLOYER,
-                abi.encodeWithSignature("setZkEmailInfrastructure(address,address)", address(0xA11CE), address(0xDC1))
+                abi.encodeWithSignature(
+                    "setZkEmailInfrastructure(address,address,address)",
+                    address(0xA11CE),
+                    address(0xE11A11),
+                    address(0xDC1)
+                )
             );
-        require(_readAddr(GNOSIS_ORG_DEPLOYER, _verifierSlot()) == address(0xA11CE), "setZkEmailInfrastructure failed");
+        require(
+            _readAddr(GNOSIS_ORG_DEPLOYER, _domainVerifierSlot()) == address(0xA11CE),
+            "setZkEmailInfrastructure domain verifier failed"
+        );
+        require(
+            _readAddr(GNOSIS_ORG_DEPLOYER, _emailVerifierSlot()) == address(0xE11A11),
+            "setZkEmailInfrastructure email verifier failed"
+        );
         console.log("  setZkEmailInfrastructure writes OK (placeholder addrs)");
 
         console.log("PASS: Gnosis protocol upgrade verified end-to-end on fork.");
@@ -202,7 +218,9 @@ contract BroadcastUpgradeGnosis is UpgradeBase {
         require(_readAddr(GNOSIS_ORG_DEPLOYER, _modulesFactorySlot()) == newMF, "repoint did not stick");
         console.log("Gnosis upgraded. new ModulesFactory:", newMF);
         console.log("new OrgDeployer impl:", newOD, " ZkEmailInvites impl:", zkImpl);
-        console.log("NEXT: deploy verifier/DKIM, then adminCall setZkEmailInfrastructure(verifier, dkim).");
+        console.log(
+            "NEXT: deploy verifiers/DKIM, then adminCall setZkEmailInfrastructure(domainVerifier, emailVerifier, dkim)."
+        );
     }
 }
 
@@ -260,9 +278,21 @@ contract SimUpgradeArbitrum is UpgradeBase {
         IHub(ARB_HUB)
             .adminCall(
                 orgDeployer,
-                abi.encodeWithSignature("setZkEmailInfrastructure(address,address)", address(0xA11CE), address(0xDC1))
+                abi.encodeWithSignature(
+                    "setZkEmailInfrastructure(address,address,address)",
+                    address(0xA11CE),
+                    address(0xE11A11),
+                    address(0xDC1)
+                )
             );
-        require(_readAddr(orgDeployer, _verifierSlot()) == address(0xA11CE), "setZkEmailInfrastructure failed");
+        require(
+            _readAddr(orgDeployer, _domainVerifierSlot()) == address(0xA11CE),
+            "setZkEmailInfrastructure domain verifier failed"
+        );
+        require(
+            _readAddr(orgDeployer, _emailVerifierSlot()) == address(0xE11A11),
+            "setZkEmailInfrastructure email verifier failed"
+        );
         console.log("  setZkEmailInfrastructure writes OK (placeholder addrs)");
 
         console.log("PASS: Arbitrum protocol upgrade verified end-to-end on fork.");
@@ -289,6 +319,8 @@ contract BroadcastUpgradeArbitrum is UpgradeBase {
         );
         require(_readAddr(orgDeployer, _modulesFactorySlot()) == newMF, "repoint did not stick");
         console.log("Arbitrum upgraded. new ModulesFactory:", newMF, " OrgDeployer impl:", newOD);
-        console.log("NEXT: deploy verifier/DKIM, then adminCall setZkEmailInfrastructure(verifier, dkim).");
+        console.log(
+            "NEXT: deploy verifiers/DKIM, then adminCall setZkEmailInfrastructure(domainVerifier, emailVerifier, dkim)."
+        );
     }
 }
