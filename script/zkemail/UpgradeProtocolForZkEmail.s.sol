@@ -152,7 +152,7 @@ abstract contract UpgradeBase is Script {
 
 contract Step1_DeployImplsOnGnosis is UpgradeBase {
     function run() public {
-        uint256 key = vm.envUint("PRIVATE_KEY");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         console.log("\n=== Step 1: DD-deploy the 3 impls on Gnosis (so they exist when the relay lands) ===");
         vm.startBroadcast(key);
         (address od, address zk, address mf) = _impls();
@@ -169,7 +169,7 @@ contract Step1_DeployImplsOnGnosis is UpgradeBase {
 
 contract Step2_UpgradeFromArbitrum is UpgradeBase {
     function run() public {
-        uint256 key = vm.envUint("PRIVATE_KEY");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         address sender = vm.addr(key);
         PoaManagerHub hub = PoaManagerHub(payable(ARB_HUB));
         require(hub.owner() == sender, "Sender must own the Hub");

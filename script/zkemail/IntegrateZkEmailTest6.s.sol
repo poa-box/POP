@@ -400,7 +400,7 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
 contract BroadcastDeployAndWhitelistTest6 is Test6Base {
     function run() public {
         address zkBeacon = _zkBeacon();
-        uint256 key = vm.envUint("PRIVATE_KEY");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(vm.addr(key) == HUDSON, "Sender must be Hudson (Satellite owner)");
         require(ISatellite(GNOSIS_SATELLITE).owner() == HUDSON, "Satellite owner mismatch");
 
@@ -441,7 +441,7 @@ contract BroadcastGovProposalTest6 is Test6Base {
         address dkim = _zkDkimRegistry();
         bytes32 root = vm.envBytes32("ZK_ROOT"); // allowlist merkle root (off-chain StandardMerkleTree)
         bytes32 cid = vm.envBytes32("ZK_CID"); // IPFS CID digest of the allowlist file
-        uint256 key = vm.envUint("PRIVATE_KEY");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
 
         // One vote does it all, in order: (1) register the proxy in OrgRegistry -> ContractRegistered
         // creates the subgraph's per-org template; (2) initialize -> config events the template now

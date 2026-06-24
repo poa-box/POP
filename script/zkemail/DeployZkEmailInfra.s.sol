@@ -137,7 +137,7 @@ abstract contract DeployInfraBase is Script {
 
 contract Step1_DeployInfraOnGnosis is DeployInfraBase {
     function run() public {
-        uint256 key = vm.envUint("PRIVATE_KEY");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(vm.addr(key) == HUDSON, "Sender must be Hudson (registry owner)");
         console.log("\n=== Step 1: DD-deploy ZK infra on Gnosis + seed gmail/ku.edu keys ===");
         vm.startBroadcast(key);
@@ -153,7 +153,7 @@ contract Step1_DeployInfraOnGnosis is DeployInfraBase {
 
 contract Step2_DeployInfraFromArbitrum is DeployInfraBase {
     function run() public {
-        uint256 key = vm.envUint("PRIVATE_KEY");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         address sender = vm.addr(key);
         PoaManagerHub hub = PoaManagerHub(payable(ARB_HUB));
         require(hub.owner() == sender, "Sender must own the Hub");

@@ -80,7 +80,7 @@ abstract contract UpgradeExecutorBase is Script {
 
 contract Step1_DeployExecutorOnGnosis is UpgradeExecutorBase {
     function run() public {
-        uint256 key = vm.envUint("PRIVATE_KEY");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         console.log("\n=== Step 1: DD-deploy the Executor impl on Gnosis ===");
         vm.startBroadcast(key);
         address impl = _ddDeployExecutor();
@@ -93,7 +93,7 @@ contract Step1_DeployExecutorOnGnosis is UpgradeExecutorBase {
 
 contract Step2_UpgradeExecutorFromArbitrum is UpgradeExecutorBase {
     function run() public {
-        uint256 key = vm.envUint("PRIVATE_KEY");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         address sender = vm.addr(key);
         PoaManagerHub hub = PoaManagerHub(payable(ARB_HUB));
         require(hub.owner() == sender, "Sender must own the Hub");
