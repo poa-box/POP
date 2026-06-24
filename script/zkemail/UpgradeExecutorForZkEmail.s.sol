@@ -5,40 +5,39 @@ import "forge-std/Script.sol";
 import "forge-std/console.sol";
 
 import {Executor} from "../../src/Executor.sol";
+import {PoaManagerHub} from "../../src/crosschain/PoaManagerHub.sol";
+import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.sol";
 
 /*
  * ============================================================================
- * Upgrade the Executor beacon for ZK Email (per chain)  —  SECURITY-CRITICAL
+ * Upgrade the Executor beacon for ZK Email — CROSS-CHAIN  —  SECURITY-CRITICAL
  * ============================================================================
  *
- * Upgrades the protocol "Executor" beacon to an impl that lets a governance batch self-target
- * EXACTLY ONE admin function — setHatMinterAuthorization — so existing orgs (whose Executor
- * ownership is already renounced) can authorize ZkEmailInvites as a hat minter via a normal vote.
- * Every other self-targeting call still reverts TargetSelf; the change is otherwise behavior-
- * preserving and adds no storage (logic-only upgrade).
+ * Upgrades the protocol "Executor" beacon (on BOTH Arbitrum hub + Gnosis satellite, via one Hyperlane
+ * dispatch) to an impl that lets a governance batch self-target EXACTLY ONE admin function —
+ * setHatMinterAuthorization — so existing orgs (whose Executor ownership is already renounced) can
+ * authorize ZkEmailInvites as a hat minter via a normal vote. Every other self-targeting call still
+ * reverts TargetSelf; the change is otherwise behavior-preserving and adds no storage (logic-only).
  *
- * Blast radius: this is the most security-critical contract in the system and every org's executor
- * follows this beacon in Mirror mode. Verified on-chain (2026-05-31) that Test6's executor mirrors
- * the protocol Executor beacon, so the upgrade reaches it. Review + sim before broadcasting.
+ * Follows the canonical cross-chain pattern (UpgradeOrgDeployerDeadlineRules.s.sol): the impl is
+ * DD-deployed at the SAME address on both chains, then PoaManagerHub.upgradeBeaconCrossChain upgrades
+ * the Arbitrum beacon locally AND broadcasts to Gnosis.
+ *
+ * Blast radius: this is the most security-critical contract in the system; every org's executor follows
+ * this beacon in Mirror mode. Verified (2026-05-31) Test6's executor mirrors the protocol Executor
+ * beacon, so the upgrade reaches it — Step3 re-asserts that on Gnosis after the relay.
  *
  * Usage:
  *   FOUNDRY_PROFILE=production forge script \
- *     script/zkemail/UpgradeExecutorForZkEmail.s.sol:SimUpgradeExecutorGnosis --fork-url gnosis -vvv
+ *     script/zkemail/UpgradeExecutorForZkEmail.s.sol:SimUpgradeExecutorArbitrum --fork-url arbitrum -vvv
  *
  *   source .env && FOUNDRY_PROFILE=production forge script \
- *     script/zkemail/UpgradeExecutorForZkEmail.s.sol:BroadcastUpgradeExecutorGnosis --rpc-url gnosis --broadcast --slow
+ *     script/zkemail/UpgradeExecutorForZkEmail.s.sol:Step1_DeployExecutorOnGnosis --rpc-url gnosis --broadcast --slow
+ *   source .env && FOUNDRY_PROFILE=production forge script \
+ *     script/zkemail/UpgradeExecutorForZkEmail.s.sol:Step2_UpgradeExecutorFromArbitrum --rpc-url arbitrum --broadcast --slow
+ *   forge script script/zkemail/UpgradeExecutorForZkEmail.s.sol:Step3_VerifyExecutorGnosis --rpc-url gnosis
  * ============================================================================
  */
-
-interface ISatelliteExec {
-    function upgradeBeaconDirect(string calldata typeName, address newImpl, string calldata version) external;
-    function owner() external view returns (address);
-}
-
-interface IHubExec {
-    function upgradeBeaconLocal(string calldata typeName, address newImpl, string calldata version) external;
-    function owner() external view returns (address);
-}
 
 interface IPoaManagerViewExec {
     function getCurrentImplementationById(bytes32 typeId) external view returns (address);
@@ -50,17 +49,15 @@ interface IBeaconImpl {
 
 abstract contract UpgradeExecutorBase is Script {
     address internal constant HUDSON = 0xA6F4D9f44Dd980b7168D829d5f74c2b00a46b2c9;
+    address internal constant DD = 0x4aC8B5ebEb9D8C3dE3180ddF381D552d59e8835a;
 
-    // ── Gnosis (satellite) ──
-    address internal constant GNOSIS_SATELLITE = 0x4Ad70029a9247D369a5bEA92f90840B9ee58eD06;
-    address internal constant GNOSIS_POA_MANAGER = 0x794fD39e75140ee1545B1B022E5486B7c863789b;
-    // Test6 executor (Mirror-mode beacon proxy) — used to prove the upgrade reaches an existing org.
-    address internal constant TEST6_EXECUTOR = 0xA09F1035Ff97d17ccA40048F027c654b66B83183;
-
-    // ── Arbitrum (hub) ──
     address internal constant ARB_HUB = 0xB72840B343654eAfb2CFf7acC4Fc6b59E6c3CC71;
     address internal constant ARB_POA_MANAGER = 0xFF585Fae4A944cD173B19158C6FC5E08980b0815;
+    address internal constant GNOSIS_POA_MANAGER = 0x794fD39e75140ee1545B1B022E5486B7c863789b;
+    // Test6 executor (Mirror-mode beacon proxy) — proves the upgrade reaches an existing org (Gnosis).
+    address internal constant TEST6_EXECUTOR = 0xA09F1035Ff97d17ccA40048F027c654b66B83183;
 
+    uint256 internal constant HYPERLANE_FEE = 0.005 ether;
     string internal constant VERSION = "v-zkemail-1";
     bytes32 internal constant EXECUTOR_ID = keccak256("Executor");
     // ERC-1967 beacon slot: keccak256("eip1967.proxy.beacon") - 1
@@ -69,68 +66,96 @@ abstract contract UpgradeExecutorBase is Script {
     function _beaconOf(address proxy) internal view returns (address) {
         return address(uint160(uint256(vm.load(proxy, BEACON_SLOT))));
     }
-}
 
-contract SimUpgradeExecutorGnosis is UpgradeExecutorBase {
-    function run() public {
-        console.log("\n=== SIM: Upgrade Executor for ZK Email (Gnosis) ===");
-        require(ISatelliteExec(GNOSIS_SATELLITE).owner() == HUDSON, "Satellite owner != Hudson");
-
-        address newImpl = address(new Executor());
-        address before = IPoaManagerViewExec(GNOSIS_POA_MANAGER).getCurrentImplementationById(EXECUTOR_ID);
-        require(before != newImpl, "already on new impl?");
-        console.log("  new Executor impl:", newImpl);
-
-        vm.prank(HUDSON);
-        ISatelliteExec(GNOSIS_SATELLITE).upgradeBeaconDirect("Executor", newImpl, VERSION);
-
-        require(
-            IPoaManagerViewExec(GNOSIS_POA_MANAGER).getCurrentImplementationById(EXECUTOR_ID) == newImpl,
-            "Executor beacon not upgraded"
-        );
-        console.log("  Executor beacon -> new impl OK");
-
-        // Mirror-mode reach: Test6's executor SwitchableBeacon now resolves to the new impl.
-        address test6Beacon = _beaconOf(TEST6_EXECUTOR);
-        require(IBeaconImpl(test6Beacon).implementation() == newImpl, "Test6 executor did not follow beacon");
-        console.log("  Test6 executor SwitchableBeacon (Mirror) -> new impl OK");
-
-        console.log("PASS: Executor upgrade verified on Gnosis fork (reaches existing orgs).");
+    function _ddDeployExecutor() internal returns (address addr) {
+        DeterministicDeployer dd = DeterministicDeployer(DD);
+        bytes32 salt = dd.computeSalt("Executor", VERSION);
+        addr = dd.computeAddress(salt);
+        if (addr.code.length == 0) {
+            address deployed = dd.deploy(salt, type(Executor).creationCode);
+            require(deployed == addr, "DD address mismatch");
+        }
     }
 }
 
-contract BroadcastUpgradeExecutorGnosis is UpgradeExecutorBase {
+contract Step1_DeployExecutorOnGnosis is UpgradeExecutorBase {
     function run() public {
         uint256 key = vm.envUint("PRIVATE_KEY");
-        require(vm.addr(key) == HUDSON, "Sender must be Hudson (Satellite owner)");
-
+        console.log("\n=== Step 1: DD-deploy the Executor impl on Gnosis ===");
         vm.startBroadcast(key);
-        address newImpl = address(new Executor());
-        ISatelliteExec(GNOSIS_SATELLITE).upgradeBeaconDirect("Executor", newImpl, VERSION);
+        address impl = _ddDeployExecutor();
         vm.stopBroadcast();
-
-        require(
-            IPoaManagerViewExec(GNOSIS_POA_MANAGER).getCurrentImplementationById(EXECUTOR_ID) == newImpl,
-            "upgrade did not stick"
-        );
-        console.log("Gnosis Executor upgraded. new impl:", newImpl);
+        require(impl.code.length > 0, "impl has no code");
+        console.log("  Executor impl:", impl);
+        console.log("\nNext: Step2_UpgradeExecutorFromArbitrum");
     }
 }
 
-contract BroadcastUpgradeExecutorArbitrum is UpgradeExecutorBase {
+contract Step2_UpgradeExecutorFromArbitrum is UpgradeExecutorBase {
     function run() public {
         uint256 key = vm.envUint("PRIVATE_KEY");
-        require(vm.addr(key) == HUDSON, "Sender must be Hudson (Hub owner)");
+        address sender = vm.addr(key);
+        PoaManagerHub hub = PoaManagerHub(payable(ARB_HUB));
+        require(hub.owner() == sender, "Sender must own the Hub");
+        require(!hub.paused(), "Hub is paused");
+        require(sender.balance >= HYPERLANE_FEE, "need >= 0.005 ETH on Arbitrum for the Hyperlane msg");
 
+        console.log("\n=== Step 2: deploy Executor impl on Arbitrum + upgrade beacon cross-chain ===");
         vm.startBroadcast(key);
-        address newImpl = address(new Executor());
-        IHubExec(ARB_HUB).upgradeBeaconLocal("Executor", newImpl, VERSION);
+        address impl = _ddDeployExecutor();
+        hub.upgradeBeaconCrossChain{value: HYPERLANE_FEE}("Executor", impl, VERSION);
         vm.stopBroadcast();
 
         require(
-            IPoaManagerViewExec(ARB_POA_MANAGER).getCurrentImplementationById(EXECUTOR_ID) == newImpl,
-            "upgrade did not stick"
+            IPoaManagerViewExec(ARB_POA_MANAGER).getCurrentImplementationById(EXECUTOR_ID) == impl,
+            "arb: Executor beacon not upgraded"
         );
-        console.log("Arbitrum Executor upgraded. new impl:", newImpl);
+        console.log("  Executor impl:", impl);
+        console.log("Arbitrum Executor upgrade: PASS. Wait ~5 min for relay, then Step3_VerifyExecutorGnosis.");
+    }
+}
+
+contract Step3_VerifyExecutorGnosis is UpgradeExecutorBase {
+    function run() public view {
+        DeterministicDeployer dd = DeterministicDeployer(DD);
+        address impl = dd.computeAddress(dd.computeSalt("Executor", VERSION));
+
+        bool beaconOk = IPoaManagerViewExec(GNOSIS_POA_MANAGER).getCurrentImplementationById(EXECUTOR_ID) == impl;
+        bool test6Ok = IBeaconImpl(_beaconOf(TEST6_EXECUTOR)).implementation() == impl;
+
+        console.log("\n=== Verify Gnosis Executor upgrade ===");
+        console.log("  Gnosis Executor beacon -> new impl:        ", beaconOk);
+        console.log("  Test6 executor (Mirror) follows the beacon:", test6Ok);
+        if (beaconOk && test6Ok) {
+            console.log("PASS: Gnosis Executor upgraded; existing orgs can self-authorize the ZkEmail minter.");
+        } else {
+            console.log("WAITING: Hyperlane message not yet relayed (retry in a few min).");
+        }
+    }
+}
+
+/// @notice Fork-sim on Arbitrum: DD-deploy the Executor impl, upgradeBeaconCrossChain as Hudson, and
+///         assert the Arbitrum-local beacon switched. Gnosis relay + Test6 mirror reach are verified by
+///         Step3 after broadcast (the Test6 executor is a Gnosis proxy, not on this fork).
+contract SimUpgradeExecutorArbitrum is UpgradeExecutorBase {
+    function run() public {
+        PoaManagerHub hub = PoaManagerHub(payable(ARB_HUB));
+        console.log("\n=== SIM: Executor upgrade for ZK Email (Arbitrum fork, cross-chain) ===");
+
+        address before = IPoaManagerViewExec(ARB_POA_MANAGER).getCurrentImplementationById(EXECUTOR_ID);
+        vm.deal(HUDSON, 1 ether);
+        vm.startPrank(HUDSON);
+        address impl = _ddDeployExecutor();
+        require(impl != before, "sim: Executor v-zkemail-1 already live");
+        hub.upgradeBeaconCrossChain{value: HYPERLANE_FEE}("Executor", impl, VERSION);
+        vm.stopPrank();
+
+        require(
+            IPoaManagerViewExec(ARB_POA_MANAGER).getCurrentImplementationById(EXECUTOR_ID) == impl,
+            "sim: Executor beacon not upgraded"
+        );
+        console.log("  Executor impl before:", before);
+        console.log("  Executor impl after: ", impl);
+        console.log("PASS: cross-chain Executor upgrade verified on an Arbitrum fork (local hub effect).");
     }
 }
