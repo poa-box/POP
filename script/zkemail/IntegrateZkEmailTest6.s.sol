@@ -136,6 +136,10 @@ interface IOrgRegistryRegister {
     ) external;
 }
 
+interface IPoaManagerView {
+    function getBeaconById(bytes32 typeId) external view returns (address);
+}
+
 abstract contract Test6Base is Script {
     /* ── Verified Test6 + Gnosis addresses (subgraph + cast, 2026-05-29) ── */
     address internal constant HUDSON = 0xA6F4D9f44Dd980b7168D829d5f74c2b00a46b2c9;
@@ -166,24 +170,47 @@ abstract contract Test6Base is Script {
     uint8 internal constant LEAF_DOMAIN = 0;
     uint8 internal constant LEAF_EMAIL = 1;
 
-    /* ── ZK Email infra addresses — supplied via env (from the deploy/upgrade steps): ──
-     *   ZK_DOMAIN_VERIFIER, ZK_EMAIL_VERIFIER, ZK_DKIM_REGISTRY ← DeployZkEmailInfra output
-     *   ZK_BEACON                                               ← PoaManager.getBeaconById("ZkEmailInvites")
-     * vm.envAddress reverts if unset, which is the desired "must be filled" guard for broadcast. */
+    /* ── ZK Email infra addresses — RESOLVED ON-CHAIN from the completed deploy/upgrade steps, so no
+     *    extra env is needed for step 4. Each is env-overridable (ZK_DOMAIN_VERIFIER / ZK_EMAIL_VERIFIER /
+     *    ZK_DKIM_REGISTRY / ZK_BEACON) for testing or a non-standard deploy.
+     *      - verifiers + registry ← OrgDeployer storage (slots 10/11/12, written by setZkEmailInfrastructure)
+     *      - beacon               ← PoaManager.getBeaconById("ZkEmailInvites") (registered in the protocol upgrade) */
+    address internal constant GNOSIS_POA_MANAGER = 0x794fD39e75140ee1545B1B022E5486B7c863789b;
+    address internal constant ORG_DEPLOYER = 0x1Ad59E785E3aec1c53069f78bEcC24EcFE6a5d1c; // same addr both chains
+    bytes32 internal constant OD_SLOT = keccak256("poa.orgdeployer.storage");
+
+    function _odAddr(uint256 slotOffset) internal view returns (address) {
+        return address(uint160(uint256(vm.load(ORG_DEPLOYER, bytes32(uint256(OD_SLOT) + slotOffset)))));
+    }
+
     function _zkDomainVerifier() internal view returns (address) {
-        return vm.envAddress("ZK_DOMAIN_VERIFIER");
+        return vm.envOr("ZK_DOMAIN_VERIFIER", _odAddr(10));
     }
 
     function _zkEmailVerifier() internal view returns (address) {
-        return vm.envAddress("ZK_EMAIL_VERIFIER");
+        return vm.envOr("ZK_EMAIL_VERIFIER", _odAddr(11));
     }
 
     function _zkDkimRegistry() internal view returns (address) {
-        return vm.envAddress("ZK_DKIM_REGISTRY");
+        return vm.envOr("ZK_DKIM_REGISTRY", _odAddr(12));
     }
 
     function _zkBeacon() internal view returns (address) {
-        return vm.envAddress("ZK_BEACON");
+        try vm.envAddress("ZK_BEACON") returns (address b) {
+            return b;
+        } catch {
+            // getBeaconById reverts TypeUnknown() for an unregistered type — map both that and a zero
+            // return to a clear, actionable message (the cross-chain registration can fail; see remediation).
+            try IPoaManagerView(GNOSIS_POA_MANAGER).getBeaconById(ZKEMAIL_INVITES_ID) returns (address b) {
+                require(
+                    b != address(0),
+                    "ZkEmailInvites beacon not registered on Gnosis - run BroadcastRegisterZkBeaconGnosis"
+                );
+                return b;
+            } catch {
+                revert("ZkEmailInvites beacon not registered on Gnosis - run BroadcastRegisterZkBeaconGnosis");
+            }
+        }
     }
 
     /* ── Selectors (must match ZkEmailInvites external signatures exactly; copied from
@@ -338,7 +365,10 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
         //        otherwise consume the prank, leaving upgradeBeaconDirect with the default sender.)
         address newExec = address(new Executor());
         vm.prank(HUDSON);
-        ISatellite(GNOSIS_SATELLITE).upgradeBeaconDirect("Executor", newExec, "v-zkemail-1");
+        // Idempotent: pre-upgrade live state -> this sim performs the path-A upgrade itself; post-upgrade
+        // live state -> upgradeBeaconDirect reverts VersionExists (UpgradeExecutorForZkEmail already
+        // broadcast the self-targeting Executor), so we just proceed against the already-upgraded beacon.
+        try ISatellite(GNOSIS_SATELLITE).upgradeBeaconDirect("Executor", newExec, "v-zkemail-1") {} catch {}
         //    (b) drive executor.execute(batch) as the allowedCaller (HybridVoting) — exactly what
         //        announceWinner does — with the batch self-targeting setHatMinterAuthorization and
         //        calling setActiveAllowlist on the proxy (single-leaf domain root).

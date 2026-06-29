@@ -210,7 +210,75 @@ contract Step3_VerifyGnosis is UpgradeBase {
             console.log("PASS: Gnosis is on the ZkEmailInvites-aware protocol code.");
         } else {
             console.log("WAITING: one or more Hyperlane messages not yet relayed (retry in a few min).");
+            console.log("  If only ZkEmailInvites is missing, the addContractType relay failed (beacon deploy");
+            console.log("  exceeds the Hyperlane handle gas limit) - run BroadcastRegisterZkBeaconGnosis.");
         }
+    }
+}
+
+/* ═════════════════ REMEDIATION — register ZkEmailInvites beacon directly on Gnosis ═════════════════ */
+
+interface ISatelliteRegister {
+    function addContractType(string calldata typeName, address impl) external;
+    function owner() external view returns (address);
+}
+
+/*
+ * The Step2 addContractTypeCrossChain Hyperlane message reverts on Gnosis delivery — deploying a new
+ * UpgradeableBeacon inside the message handler exceeds the relayer's handle gas limit, whereas the cheap
+ * upgradeBeaconCrossChain / adminCallCrossChain (setModulesFactory) messages land fine. Re-dispatching
+ * from the Hub can't fix it (the Arbitrum-local addContractType already ran -> TypeTaken). Per CLAUDE.md,
+ * do it on the destination chain: Satellite.addContractType (Hudson owns the satellite) — no Hyperlane
+ * fee, no relay wait, ample gas. Idempotent: no-ops if the beacon is already registered.
+ *
+ * Sim:       FOUNDRY_PROFILE=production forge script .../UpgradeProtocolForZkEmail.s.sol:SimRegisterZkBeaconGnosis --fork-url gnosis -vvv
+ * Broadcast: source .env && FOUNDRY_PROFILE=production forge script .../UpgradeProtocolForZkEmail.s.sol:BroadcastRegisterZkBeaconGnosis --rpc-url gnosis --broadcast --slow
+ */
+abstract contract RegisterZkBase is UpgradeBase {
+    address internal constant GNOSIS_SATELLITE = 0x4Ad70029a9247D369a5bEA92f90840B9ee58eD06;
+
+    function _zkImpl() internal view returns (address) {
+        DeterministicDeployer dd = DeterministicDeployer(DD);
+        return dd.computeAddress(dd.computeSalt("ZkEmailInvites", VERSION));
+    }
+}
+
+contract SimRegisterZkBeaconGnosis is RegisterZkBase {
+    function run() public {
+        address zk = _zkImpl();
+        require(zk.code.length > 0, "ZkEmailInvites impl not deployed on Gnosis (run Step1 first)");
+        require(_zkBeacon(GNOSIS_POA_MANAGER) == address(0), "already registered on Gnosis (nothing to do)");
+
+        vm.prank(HUDSON);
+        ISatelliteRegister(GNOSIS_SATELLITE).addContractType("ZkEmailInvites", zk);
+
+        address b = _zkBeacon(GNOSIS_POA_MANAGER);
+        require(b != address(0), "registration did not take");
+        console.log("SIM PASS: ZkEmailInvites beacon registered on Gnosis ->", b);
+        console.log("  impl:", zk);
+    }
+}
+
+contract BroadcastRegisterZkBeaconGnosis is RegisterZkBase {
+    function run() public {
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
+        require(vm.addr(key) == HUDSON, "Sender must be Hudson (satellite owner)");
+        require(ISatelliteRegister(GNOSIS_SATELLITE).owner() == HUDSON, "Satellite owner mismatch");
+
+        address zk = _zkImpl();
+        require(zk.code.length > 0, "ZkEmailInvites impl not deployed on Gnosis");
+        if (_zkBeacon(GNOSIS_POA_MANAGER) != address(0)) {
+            console.log("ZkEmailInvites beacon already registered on Gnosis; nothing to do.");
+            return;
+        }
+
+        vm.startBroadcast(key);
+        ISatelliteRegister(GNOSIS_SATELLITE).addContractType("ZkEmailInvites", zk);
+        vm.stopBroadcast();
+
+        address b = _zkBeacon(GNOSIS_POA_MANAGER);
+        require(b != address(0), "registration did not take");
+        console.log("Registered ZkEmailInvites beacon on Gnosis ->", b);
     }
 }
 
