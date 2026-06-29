@@ -227,7 +227,7 @@ interface ISatelliteRegister {
  * The Step2 addContractTypeCrossChain Hyperlane message reverts on Gnosis delivery — deploying a new
  * UpgradeableBeacon inside the message handler exceeds the relayer's handle gas limit, whereas the cheap
  * upgradeBeaconCrossChain / adminCallCrossChain (setModulesFactory) messages land fine. Re-dispatching
- * from the Hub can't fix it (the Arbitrum-local addContractType already ran -> TypeTaken). Per CLAUDE.md,
+ * from the Hub can't fix it (the Arbitrum-local addContractType already ran -> TypeExists). Per CLAUDE.md,
  * do it on the destination chain: Satellite.addContractType (Hudson owns the satellite) — no Hyperlane
  * fee, no relay wait, ample gas. Idempotent: no-ops if the beacon is already registered.
  *
