@@ -138,7 +138,7 @@ string constant DDV_VERSION = "v11";
 string constant DEPLOYER_VERSION = "v16";
 string constant EXECUTOR_VERSION = "v4";
 string constant TOKEN_VERSION = "v5";
-string constant QUICKJOIN_VERSION = "v6"; // WS-D: current-src OrgDeployer step-9b needs QuickJoin.setClaimableHatIds
+string constant QUICKJOIN_VERSION = "v6"; // WS-D: QuickJoin v6 is the shipping impl; OrgDeployer v16 proxies onto it
 
 /// @dev Satellite.upgradeBeaconDirect forwards to PoaManager.upgradeBeacon (onlyOwner=Satellite)
 ///      with the Satellite as msg.sender — the destination-chain emergency upgrade. adminCall is
@@ -588,13 +588,12 @@ contract SimGnosis is GovernanceUpgradeSimBase {
     }
 
     function _bootstrapFreshStack() internal returns (OrgDeployer deployer, OrgRegistry orgRegistry, address uar) {
-        // Precondition (WS-A + WS-D + seed dependency): flip the ParticipationToken (v5),
-        // Executor (v4), OrgDeployer (v16) and QuickJoin (v6) beacons so the fresh current-src
-        // stack is internally consistent. deployFullOrg's step-8 wiring calls
-        // Executor.configureParticipationToken -> ParticipationToken.setTaskManager, and the
-        // current-src OrgDeployer's step-9b seeds QuickJoin's claimable allowlist via
-        // Executor.configureQuickJoinClaimable -> QuickJoin.setClaimableHatIds (needs QuickJoin v6).
-        // In a real broadcast these WS-A/WS-D/seed beacons flip first; here we reproduce it on the fork.
+        // Precondition (WS-A + WS-D): flip the ParticipationToken (v5), Executor (v4),
+        // OrgDeployer (v16) and QuickJoin (v6) beacons so the fresh current-src stack is
+        // internally consistent. deployFullOrg's step-8 wiring calls
+        // Executor.configureParticipationToken -> ParticipationToken.setTaskManager, and fresh orgs
+        // deploy QuickJoin proxies onto the shipping QuickJoin v6 beacon (the H-03 eligibility gate).
+        // In a real broadcast these WS-A/WS-D beacons flip first; here we reproduce it on the fork.
         DeterministicDeployer ddc = DeterministicDeployer(DD);
         _deployAndUpgrade(ddc, "ParticipationToken", TOKEN_VERSION, type(ParticipationToken).creationCode);
         _deployAndUpgrade(ddc, "Executor", EXECUTOR_VERSION, type(Executor).creationCode);

@@ -18,7 +18,6 @@ interface IExecutorAdmin {
     function setHatMinterAuthorization(address minter, bool authorized) external;
     function acceptBeaconOwnership(address beacon) external;
     function configureParticipationToken(address token, address taskManager, address educationHub) external;
-    function configureQuickJoinClaimable(address quickJoin, uint256[] calldata claimableHatIds) external;
     function configureVouching(
         address eligibilityModule,
         uint256 hatId,
@@ -34,10 +33,6 @@ interface IExecutorAdmin {
         bool[] calldata combineWithHierarchyFlags
     ) external;
     function setDefaultEligibility(address eligibilityModule, uint256 hatId, bool eligible, bool standing) external;
-}
-
-interface IQuickJoinReader {
-    function memberHatIds() external view returns (uint256[] memory);
 }
 
 interface IPaymasterHub {
@@ -530,24 +525,6 @@ contract OrgDeployer is Initializable {
 
         /* 9. Authorize QuickJoin to mint hats */
         IExecutorAdmin(result.executor).setHatMinterAuthorization(result.quickJoin, true);
-
-        /* 9b. Seed the QuickJoin claimable-hats allowlist (H-03 / WS-D coordination).
-               WS-D made QuickJoin's H-03 allowlist default to EMPTY = CLOSED, so a freshly
-               deployed org has NO claimable hats via the caller-specified claim paths until it
-               is seeded. Seed it with exactly the org's member-level auto-mint hats
-               (memberHatIds — resolved from quickJoinRolesBitmap at deploy). These are the base
-               role(s) QuickJoin was always meant to grant on join, and are non-privileged by
-               construction (anyone who joins receives them), so seeding them keeps H-03 closed
-               for executive/admin hats (which are never in the join set). Routed through the
-               Executor (owner-gated one-shot) because setClaimableHatIds is onlyExecutor and the
-               Executor is QuickJoin's executor while OrgDeployer still owns it (pre-renounce).
-               An empty member set (quickJoinRolesBitmap == 0) leaves the allowlist closed. */
-        {
-            uint256[] memory seedHatIds = IQuickJoinReader(result.quickJoin).memberHatIds();
-            if (seedHatIds.length > 0) {
-                IExecutorAdmin(result.executor).configureQuickJoinClaimable(result.quickJoin, seedHatIds);
-            }
-        }
 
         /* 10. Link executor to governor */
         IExecutorAdmin(result.executor).setCaller(result.hybridVoting);

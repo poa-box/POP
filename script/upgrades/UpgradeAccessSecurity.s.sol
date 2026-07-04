@@ -18,17 +18,20 @@ import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol"
  * ============================================================================
  *
  * SRC FIXES SHIPPED (all ride the three beacon impls):
- *   H-03(a) — QuickJoin gained a governance-set claimable-hats allowlist (appended to the
- *          ERC-7201 Layout, so existing orgs read it as EMPTY after the upgrade). The three
- *          caller-specified claim paths (claimHatsWithUser / registerAndClaimHats /
- *          registerAndClaimHatsWithPasskey) now require every claimHatId to be on the allowlist.
- *          EMPTY ALLOWLIST = CLOSED — instantly closes H-03 for all live orgs (no hats claimable
- *          via QuickJoin until the org executor calls setClaimableHatIds). The memberHatIds
- *          auto-mint join paths (quickJoinWithUser / registerAndQuickJoin / master-deploy) are
- *          UNAFFECTED — those IDs come from storage, not the caller — so existing onboarding keeps
- *          working. NEW-ORG SEED: seeding the allowlist at deploy needs an OrgDeployer step
- *          (QuickJoin.setClaimableHatIds before executor ownership is renounced); OrgDeployer is
- *          a WS-A file, so this is a COORDINATION ITEM, not shipped here. Secure default holds.
+ *   H-03(a) — QuickJoin's caller-specified claim paths (claimHatsWithUser / registerAndClaimHats /
+ *          registerAndClaimHatsWithPasskey) now REJECT any hat that is OPEN-TO-EVERYONE (default-
+ *          eligible for an arbitrary address) — that is exactly the H-03 self-mint escalation (e.g. the
+ *          org's ELIGIBILITY_ADMIN hat, which is open by default). Openness is detected by probing
+ *          `hats.isEligible(SENTINEL, hatId)` for a fixed domain-separated sentinel that can never be a
+ *          legitimate wearer: if the org's eligibility module reports the sentinel eligible, the hat is
+ *          open → revert HatOpenlyClaimable (FAIL CLOSED: a reverting probe is also rejected). GATED
+ *          role hats (Delegate/Agent, defaults.eligible=false + vouching) pass this gate and are then
+ *          subject to the per-user check inside Hats.mintHat (reverts NotEligible unless the caller was
+ *          actually vouched) — so the main vouched-onboarding flow keeps working with NO allowlist and
+ *          NO deploy-time seeding. This supersedes the earlier allowlist design (which broke vouched
+ *          onboarding for existing orgs). The memberHatIds auto-mint join paths (quickJoinWithUser /
+ *          registerAndQuickJoin / master-deploy) are UNAFFECTED — those IDs come from storage, not the
+ *          caller — and open base roles (Neighbor) are auto-minted there, never claimed.
  *   H-03(b) — org-config JSON templates: privileged/voting roles now ship defaults.eligible=false
  *          + vouching.enabled=true (applied by the existing HatsTreeSetup.batchSetDefaultEligibility
  *          + OrgDeployer.batchConfigureVouching paths). Config-only; no bytecode impact.
@@ -42,15 +45,17 @@ import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol"
  *          matters because the production org-deploy path (HatsTreeSetup.batchSetDefaultEligibility ->
  *          OrgDeployer.batchConfigureVouching) uses ONLY the batch functions — a misconfigured JSON
  *          now fails loudly at deploy instead of silently shipping the bypass.
- *   H-03(c) — QuickJoin: an EMPTY claimHatIds array is now a backward-compatible no-op (registers /
+ *   H-03(c) — QuickJoin: an EMPTY claimHatIds array is a backward-compatible no-op (registers /
  *          creates account without minting, no revert), preserving the pre-upgrade register-only
- *          behavior of registerAndClaimHats*. The allowlist still fully closes any non-empty claim.
+ *          behavior of registerAndClaimHats*. The open-hat gate only inspects non-empty claims.
  *   L-26  — ToggleModule.setEligibilityModule gained a zero-address check, an EligibilityModuleSet
  *          event, and an eligibilityModule() getter.
  *
  * STORAGE:
- *   QuickJoin — appends `uint256[] claimableHatIds` to the END of its ERC-7201 Layout
- *     (slot keccak256("poa.quickjoin.storage")). Existing proxies read it as an empty array.
+ *   QuickJoin — NO storage change. The open-hat gate is stateless (it probes the org's live
+ *     eligibility module at call time via hats.isEligible), so the ERC-7201 Layout
+ *     (slot keccak256("poa.quickjoin.storage")) is byte-for-byte the pre-existing v5 layout —
+ *     upgrade-safe against upgrades/baseline/QuickJoin.sol.
  *   EligibilityModule / ToggleModule — no storage changes (new error/event/getter + a revert guard).
  *   Storage survival on live KUBI (Gnosis) / Poa (Arbitrum) proxies is asserted in the sims below.
  *
@@ -262,11 +267,13 @@ contract SimMockHats {
     }
 }
 
-/// @dev Executor mock: forwards a single call to QuickJoin so the sim can drive setClaimableHatIds.
+/// @dev Executor mock: substitutes for QuickJoin's `executor`, recording the mint request. The H-03
+///      gate under test lives inside QuickJoin (the open-hat rejection) and runs BEFORE this call, so
+///      recording the call is enough to prove a claim passed the gate. The real per-user NotEligible
+///      gate is Hats.mintHat — exercised implicitly because the fresh QuickJoin proxy is wired to the
+///      LIVE Hats contract for the eligibility probe (see _assertH03).
 contract SimMintingExecutor {
     function mintHatsForUser(address user, uint256[] calldata hatIds) external {
-        // no-op minter substitute; the sim asserts on QuickJoin's own revert/allowlist behavior.
-        // Records nothing — presence of a call is enough for the success path.
         for (uint256 i; i < hatIds.length; ++i) {
             minted[user][hatIds[i]] = true;
         }
@@ -374,72 +381,75 @@ abstract contract AccessUpgradeSimBase is Script {
         require(pre.sampleVouchQuorum == post.sampleVouchQuorum, string.concat(tag, ": elig vouch quorum"));
     }
 
-    /*──────── (b) H-03 behavior against the just-upgraded QuickJoin beacon ────────*/
-    /// @dev Deploys a fresh QuickJoin proxy on the upgraded beacon (exact new bytecode), then proves:
-    ///      (1) a user with a username but an EMPTY allowlist cannot claim a privileged hat (revert),
-    ///      (2) the executor allowlists a member hat and the SAME claim then succeeds.
-    function _assertH03(address qjBeacon) internal {
-        SimMockHats hats = new SimMockHats();
+    /*──────── (b) H-03 eligibility gate against the just-upgraded QuickJoin beacon ────────*/
+    /// @dev NEW H-03 model (no allowlist): the caller-specified claim paths reject any hat that is
+    ///      OPEN-TO-EVERYONE (default-eligible for an arbitrary address — the self-mint escalation),
+    ///      and rely on Hats.mintHat's NotEligible for per-user gating of the remaining GATED hats.
+    ///
+    ///      This is proven against the LIVE org's real EligibilityModule: the fresh QuickJoin proxy is
+    ///      wired to the LIVE Hats contract, so `hats.isEligible(SENTINEL, hatId)` routes through the
+    ///      exact production eligibility module. Given:
+    ///        - `openHat`  : an open-to-everyone hat (e.g. the org's ELIGIBILITY_ADMIN hat — the H-03
+    ///                       escalation) for which the eligibility module reports the sentinel eligible;
+    ///        - `gatedHat` : a vouch-gated role hat (e.g. Delegate) for which the sentinel is NOT
+    ///                       eligible;
+    ///      it proves:
+    ///        (b1) claiming `openHat` REVERTS HatOpenlyClaimable (blocked because open),
+    ///        (b2) claiming `gatedHat` is NOT blocked-as-open (the mint proceeds — the mock executor
+    ///             stands in for the real minter; the real per-user NotEligible gate is Hats.mintHat),
+    ///        (b3) an EMPTY claim array is a backward-compatible no-op (registers-only, no revert).
+    function _assertH03(address qjBeacon, address liveHats, uint256 openHat, uint256 gatedHat) internal {
         SimMintingExecutor exec = new SimMintingExecutor();
         SimMockRegistry reg = new SimMockRegistry();
 
         uint256[] memory memberHats = new uint256[](1);
         memberHats[0] = 1;
 
+        // Wire the proxy to the LIVE Hats contract so the eligibility probe is genuine (real module).
         bytes memory init = abi.encodeWithSelector(
-            QuickJoin.initialize.selector, address(exec), address(hats), address(reg), address(exec), memberHats
+            QuickJoin.initialize.selector, address(exec), liveHats, address(reg), address(exec), memberHats
         );
         QuickJoin qj = QuickJoin(address(new BeaconProxy(qjBeacon, init)));
 
         address claimer = makeAddr("ws-d-claimer");
         reg.setUsername(claimer, "alice");
 
-        uint256 privHat = 99_999; // a "privileged" hat, never allowlisted
-        uint256 memberHat = 5; // the hat the executor will allowlist
-
-        // (1) empty allowlist ⇒ claiming a privileged hat reverts HatNotClaimable.
-        uint256[] memory one = new uint256[](1);
-        one[0] = privHat;
+        // (b1) claiming the OPEN hat (ELIGIBILITY_ADMIN — the H-03 self-mint escalation) reverts.
+        uint256[] memory openClaim = new uint256[](1);
+        openClaim[0] = openHat;
         bool reverted;
         vm.prank(claimer);
-        try qj.claimHatsWithUser(one) {}
+        try qj.claimHatsWithUser(openClaim) {}
         catch (bytes memory reason) {
-            reverted = bytes4(reason) == QuickJoin.HatNotClaimable.selector;
+            reverted = bytes4(reason) == QuickJoin.HatOpenlyClaimable.selector;
         }
-        require(reverted, "H-03: empty allowlist must close the claim path");
-        require(qj.claimableHatCount() == 0, "H-03: allowlist must start empty (closed)");
-        console.log("(b1) empty allowlist closes claim path OK");
+        require(reverted, "H-03: open (default-eligible) hat must be blocked from the claim path");
+        require(!exec.minted(claimer, openHat), "H-03: open hat must not be minted");
+        console.log("(b1) OPEN hat (ELIGIBILITY_ADMIN) blocked by the eligibility gate OK");
 
-        // (2) executor allowlists a member hat, then the claim succeeds.
-        uint256[] memory allow = new uint256[](1);
-        allow[0] = memberHat;
-        vm.prank(address(exec)); // executor == the QuickJoin executor in this fresh proxy
-        qj.setClaimableHatIds(allow);
-        require(qj.isClaimableHat(memberHat), "H-03: member hat not allowlisted");
-
-        uint256[] memory claim = new uint256[](1);
-        claim[0] = memberHat;
+        // (b2) claiming the GATED hat (Delegate) is NOT blocked-as-open — it passes the gate and the
+        // mint proceeds. (In production the real Hats.mintHat then gates per-user with NotEligible; here
+        // the mock executor stands in for the minter, so a completed mint == "passed the open-hat gate".)
+        uint256[] memory gatedClaim = new uint256[](1);
+        gatedClaim[0] = gatedHat;
+        bool blockedAsOpen;
         vm.prank(claimer);
-        qj.claimHatsWithUser(claim);
-        require(exec.minted(claimer, memberHat), "H-03: allowlisted claim did not mint");
-        // Privileged hat is STILL closed even after member allowlist.
-        reverted = false;
-        vm.prank(claimer);
-        try qj.claimHatsWithUser(one) {}
+        try qj.claimHatsWithUser(gatedClaim) {}
         catch (bytes memory reason) {
-            reverted = bytes4(reason) == QuickJoin.HatNotClaimable.selector;
+            blockedAsOpen = bytes4(reason) == QuickJoin.HatOpenlyClaimable.selector;
         }
-        require(reverted, "H-03: privileged hat must stay closed after member allowlist");
-        console.log("(b2) executor allowlist opens ONLY the member hat OK");
+        require(!blockedAsOpen, "H-03: gated hat must NOT be rejected as open-to-everyone");
+        require(exec.minted(claimer, gatedHat), "H-03: gated hat passed the gate and should reach the minter");
+        console.log("(b2) GATED hat (Delegate) NOT blocked-as-open; per-user gate is Hats.mintHat OK");
 
-        // (3) Backward-compat: an EMPTY claim array is a no-op (no revert, no mint) — preserves the
-        // pre-upgrade register-only behavior. The allowlist still fully closes non-empty attempts.
+        // (b3) Backward-compat: an EMPTY claim array is a no-op (no revert, no mint) — preserves the
+        // pre-upgrade register-only behavior of the register+claim paths.
         address emptyClaimer = makeAddr("ws-d-empty-claimer");
         reg.setUsername(emptyClaimer, "carol");
         uint256[] memory none = new uint256[](0);
         vm.prank(emptyClaimer);
         qj.claimHatsWithUser(none); // must NOT revert
-        require(!exec.minted(emptyClaimer, memberHat), "H-03: empty claim must mint nothing");
+        require(!exec.minted(emptyClaimer, gatedHat), "H-03: empty claim must mint nothing");
         console.log("(b3) empty claim array is a backward-compatible no-op OK");
     }
 
@@ -579,6 +589,16 @@ contract SimGnosis is AccessUpgradeSimBase {
     address constant ELIG_BEACON = 0x5AB541aAe2653f448a08177ab64383c312e8A8fb;
     address constant TOGGLE_BEACON = 0x87e52D9509F03DF5BD2aA7B84D0dd9caB86E20b2;
 
+    // H-03 live evidence — the "Decentral Park" org on Gnosis (org id
+    // 0x3721271eb827a52a5adf676136d302efe19c34e72f08e080b07b225eecf27d78). Its EligibilityModule
+    // (0xe4a02f20b8282a272879e31479ee070dab07b015) reports the fixed claim-probe sentinel eligible for
+    // the OPEN ELIGIBILITY_ADMIN hat (the H-03 escalation) and NOT eligible for the vouch-gated Delegate
+    // hat — validated on-fork 2026-07-04. The eligibility probe routes through the shared live Hats
+    // contract that every Gnosis org uses.
+    address constant LIVE_HATS = 0x3bc1A0Ad72417f2d411118085256fC53CBdDd137;
+    uint256 constant DPARK_ELIG_ADMIN_HAT = 36180248838692297934744644785522640003358674060733414678036010791600128; // OPEN → must be blocked
+    uint256 constant DPARK_DELEGATE_HAT = 36180248838698575036480031466286475792781881727149517033480474826113024; // GATED → not blocked-as-open
+
     function _poaManager() internal pure override returns (address) {
         return GNOSIS_POA_MANAGER;
     }
@@ -603,11 +623,11 @@ contract SimGnosis is AccessUpgradeSimBase {
         // (a) post-upgrade survival.
         _requireQJSurvived(qjPre, _snapshotQJ(KUBI_QJ), "KUBI-QJ");
         _requireEligSurvived(eligPre, _snapshotElig(KUBI_ELIG, sampleHat), "KUBI-ELIG");
-        require(QuickJoin(KUBI_QJ).claimableHatCount() == 0, "KUBI-QJ: live allowlist must read empty (closed)");
-        console.log("(a) storage survived all three beacon upgrades OK (live allowlist empty = closed)");
+        console.log("(a) storage survived all three beacon upgrades OK");
 
-        // (b) H-03 behavior on a fresh QuickJoin proxy against the upgraded beacon.
-        _assertH03(QJ_BEACON);
+        // (b) H-03 eligibility gate on a fresh QuickJoin proxy (upgraded beacon) wired to the LIVE Hats
+        //     contract, using the real Decentral Park OPEN (ELIGIBILITY_ADMIN) vs GATED (Delegate) hats.
+        _assertH03(QJ_BEACON, LIVE_HATS, DPARK_ELIG_ADMIN_HAT, DPARK_DELEGATE_HAT);
 
         // (c) M-03 behavior on a fresh EligibilityModule proxy against the upgraded beacon.
         _assertM03(ELIG_BEACON);
@@ -644,6 +664,14 @@ contract SimArbitrum is AccessUpgradeSimBase {
     address constant ELIG_BEACON = 0xF02b1a7326688ECa194A6F5c5049B058fC825157;
     address constant TOGGLE_BEACON = 0xAa2Af12401A9d4AdA8485Bb1A757f6d7D3df5B47;
 
+    // H-03 live evidence — the "Poa" org on Arbitrum. Its EligibilityModule reports the fixed
+    // claim-probe sentinel eligible for the OPEN ELIGIBILITY_ADMIN hat (the H-03 escalation) and NOT
+    // eligible for the vouch-gated MEMBER hat — validated on-fork 2026-07-04. Same shared live Hats
+    // contract as Gnosis (CREATE3 → identical address cross-chain).
+    address constant LIVE_HATS = 0x3bc1A0Ad72417f2d411118085256fC53CBdDd137;
+    uint256 constant POA_ELIG_ADMIN_HAT = 2507275451421148831205542941835121291985880676980239649137601590329344; // OPEN → must be blocked
+    uint256 constant POA_MEMBER_HAT = 2507275451427425932940929622598957081409088343396342004582065624842240; // GATED → not blocked-as-open
+
     function _poaManager() internal pure override returns (address) {
         return ARB_POA_MANAGER;
     }
@@ -667,10 +695,9 @@ contract SimArbitrum is AccessUpgradeSimBase {
 
         _requireQJSurvived(qjPre, _snapshotQJ(POA_QJ), "Poa-QJ");
         _requireEligSurvived(eligPre, _snapshotElig(POA_ELIG, sampleHat), "Poa-ELIG");
-        require(QuickJoin(POA_QJ).claimableHatCount() == 0, "Poa-QJ: live allowlist must read empty (closed)");
-        console.log("(a) storage survived all three beacon upgrades OK (live allowlist empty = closed)");
+        console.log("(a) storage survived all three beacon upgrades OK");
 
-        _assertH03(QJ_BEACON);
+        _assertH03(QJ_BEACON, LIVE_HATS, POA_ELIG_ADMIN_HAT, POA_MEMBER_HAT);
         _assertM03(ELIG_BEACON);
         _assertL26(TOGGLE_BEACON);
 

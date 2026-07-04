@@ -323,177 +323,122 @@ contract QuickJoinTest is Test {
 
     event RegisterAndQuickJoined(address indexed user, string username, uint256[] hatIds);
 
-    /* ═══════════════════ H-03: claimable-hats allowlist tests ═══════════════════ */
+    /* ═══════════════════ H-03: open-hat eligibility gate tests ═══════════════════ */
+    //
+    // New H-03 model (no allowlist): the caller-specified claim paths REJECT any hat that is
+    // OPEN-TO-EVERYONE (default-eligible for an arbitrary address — the self-mint escalation, e.g. the
+    // org's ELIGIBILITY_ADMIN hat) and rely on Hats.mintHat's per-user NotEligible for GATED role hats.
+    //
+    // Openness is detected by probing `hats.isEligible(SENTINEL, hatId)`. In this suite the outer
+    // `hats` mock (QuickJoin's l.hats) is driven via `setEligible(SENTINEL, hatId, true)` to mark a hat
+    // OPEN; a hat left unmarked probes as NOT eligible for the sentinel == GATED. Note the claim paths
+    // mint through `mockExecutor`, whose OWN internal MockHats records wearers (mockExecutor.hats()).
 
-    event ClaimableHatIdsUpdated(uint256[] hatIds);
     event HatsClaimed(address indexed user, uint256[] claimHatIds);
     event RegisterAndClaimedHats(address indexed user, string username, uint256[] claimHatIds);
 
-    uint256 constant PRIV_HAT = 999; // a privileged hat NOT on the allowlist
-    uint256 constant CLAIM_HAT = 7; // a hat the executor will allowlist
+    uint256 constant OPEN_HAT = 999; // default-eligible for everyone (e.g. ELIGIBILITY_ADMIN) → blocked
+    uint256 constant GATED_HAT = 7; // vouch-gated role hat → passes the open-hat gate
+
+    // keccak256("poa.quickjoin.claim.probe") truncated to an address — the QuickJoin claim probe sentinel.
+    address constant CLAIM_PROBE = 0x9E9AFD795ed800a00608Cba049D1239d17Acc215;
 
     function _one(uint256 a) internal pure returns (uint256[] memory arr) {
         arr = new uint256[](1);
         arr[0] = a;
     }
 
-    /*──────── setter: gating, event, dedup, zero rejection, getters ────────*/
-
-    function testSetClaimableHatIdsOnlyExecutor() public {
-        vm.expectRevert(QuickJoin.Unauthorized.selector);
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
+    /// @dev Mark a hat OPEN-TO-EVERYONE by making the probe sentinel eligible for it on QuickJoin's Hats.
+    function _markOpen(uint256 hatId) internal {
+        hats.setEligible(CLAIM_PROBE, hatId, true);
     }
 
-    function testSetClaimableHatIdsStoresAndGetters() public {
-        assertEq(qj.claimableHatCount(), 0, "allowlist starts empty (closed)");
-        assertFalse(qj.isClaimableHat(CLAIM_HAT));
+    /*──────── claimHatsWithUser: open hats blocked, gated hats pass the gate ────────*/
 
-        vm.prank(address(mockExecutor));
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
-
-        assertEq(qj.claimableHatCount(), 1);
-        assertTrue(qj.isClaimableHat(CLAIM_HAT));
-        assertFalse(qj.isClaimableHat(PRIV_HAT));
-        uint256[] memory got = qj.claimableHatIds();
-        assertEq(got.length, 1);
-        assertEq(got[0], CLAIM_HAT);
-    }
-
-    function testSetClaimableHatIdsEmitsEvent() public {
-        vm.prank(address(mockExecutor));
-        vm.expectEmit(true, true, true, true);
-        emit ClaimableHatIdsUpdated(_one(CLAIM_HAT));
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
-    }
-
-    function testSetClaimableHatIdsDeduplicates() public {
-        uint256[] memory dup = new uint256[](3);
-        dup[0] = CLAIM_HAT;
-        dup[1] = CLAIM_HAT;
-        dup[2] = 8;
-        vm.prank(address(mockExecutor));
-        qj.setClaimableHatIds(dup);
-        // HatManager de-dups: only 2 distinct entries stored.
-        assertEq(qj.claimableHatCount(), 2);
-        assertTrue(qj.isClaimableHat(CLAIM_HAT));
-        assertTrue(qj.isClaimableHat(8));
-    }
-
-    function testSetClaimableHatIdsRejectsZero() public {
-        vm.prank(address(mockExecutor));
-        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatNotClaimable.selector, uint256(0)));
-        qj.setClaimableHatIds(_one(0));
-    }
-
-    function testSetClaimableHatIdsReplacesPrevious() public {
-        vm.startPrank(address(mockExecutor));
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
-        qj.setClaimableHatIds(_one(8)); // replaces
-        vm.stopPrank();
-        assertFalse(qj.isClaimableHat(CLAIM_HAT), "old allowlist entry cleared");
-        assertTrue(qj.isClaimableHat(8));
-        assertEq(qj.claimableHatCount(), 1);
-    }
-
-    /*──────── claimHatsWithUser: closed by default, opens on allowlist ────────*/
-
-    function testClaimHatsWithUserClosedByDefault() public {
+    function testClaimHatsWithUserBlocksOpenHat() public {
         registry.setUsername(user1, "bob");
-        // Empty allowlist: claiming a privileged hat reverts HatNotClaimable.
+        _markOpen(OPEN_HAT); // OPEN_HAT is default-eligible for everyone → self-mint escalation.
         vm.prank(user1);
-        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatNotClaimable.selector, PRIV_HAT));
-        qj.claimHatsWithUser(_one(PRIV_HAT));
-        assertFalse(mockExecutor.hats().isWearerOfHat(user1, PRIV_HAT), "no hat minted");
+        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatOpenlyClaimable.selector, OPEN_HAT));
+        qj.claimHatsWithUser(_one(OPEN_HAT));
+        assertFalse(mockExecutor.hats().isWearerOfHat(user1, OPEN_HAT), "open hat must not be minted");
+    }
+
+    function testClaimHatsWithUserAllowsGatedHat() public {
+        // GATED_HAT is NOT marked open → the sentinel probes NOT eligible → passes the open-hat gate,
+        // and the mint proceeds (in production Hats.mintHat then gates per-user; here the mock mints).
+        registry.setUsername(user1, "bob");
+        vm.prank(user1);
+        qj.claimHatsWithUser(_one(GATED_HAT));
+        assertTrue(mockExecutor.hats().isWearerOfHat(user1, GATED_HAT), "gated hat passed the gate and minted");
+    }
+
+    function testClaimHatsWithUserFailsClosedOnRevertingProbe() public {
+        // FAIL CLOSED: if the eligibility probe reverts (missing / non-conforming module), the
+        // claim is rejected rather than allowed — a reverting probe must never be read as "gated".
+        registry.setUsername(user1, "bob");
+        hats.setRevertOnEligible(true);
+        vm.prank(user1);
+        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatOpenlyClaimable.selector, GATED_HAT));
+        qj.claimHatsWithUser(_one(GATED_HAT));
+        assertFalse(mockExecutor.hats().isWearerOfHat(user1, GATED_HAT), "no hat minted when probe reverts");
     }
 
     function testClaimHatsWithUserEmptyArrayIsNoOp() public {
         // Backward-compat: an empty claim array is a silent no-op (mints nothing, no revert),
-        // preserving the pre-upgrade behavior. The allowlist only gates non-empty inputs.
+        // preserving the pre-upgrade behavior. The gate only inspects non-empty inputs.
         registry.setUsername(user1, "bob");
         vm.prank(user1);
         qj.claimHatsWithUser(new uint256[](0));
-        assertFalse(mockExecutor.hats().isWearerOfHat(user1, CLAIM_HAT), "no hat minted on empty claim");
-        assertFalse(mockExecutor.hats().isWearerOfHat(user1, PRIV_HAT), "no hat minted on empty claim");
+        assertFalse(mockExecutor.hats().isWearerOfHat(user1, GATED_HAT), "no hat minted on empty claim");
+        assertFalse(mockExecutor.hats().isWearerOfHat(user1, OPEN_HAT), "no hat minted on empty claim");
     }
 
-    function testClaimHatsWithUserSucceedsAfterAllowlist() public {
+    function testClaimHatsWithUserMixedArrayRevertsOnOpenHat() public {
+        // One gated + one open => the whole call reverts (atomic); no partial mint.
         registry.setUsername(user1, "bob");
-
-        // Executor (governance) allowlists a member/claim hat.
-        vm.prank(address(mockExecutor));
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
-
-        // Now the user can claim the allowlisted hat.
-        vm.prank(user1);
-        qj.claimHatsWithUser(_one(CLAIM_HAT));
-        assertTrue(mockExecutor.hats().isWearerOfHat(user1, CLAIM_HAT), "allowlisted hat minted");
-    }
-
-    function testClaimHatsWithUserPrivilegedStillClosedAfterMemberAllowlist() public {
-        registry.setUsername(user1, "bob");
-        vm.prank(address(mockExecutor));
-        qj.setClaimableHatIds(_one(CLAIM_HAT)); // only CLAIM_HAT allowlisted
-
-        // Privileged hat still not claimable.
-        vm.prank(user1);
-        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatNotClaimable.selector, PRIV_HAT));
-        qj.claimHatsWithUser(_one(PRIV_HAT));
-    }
-
-    function testClaimHatsWithUserMixedArrayRevertsOnDisallowed() public {
-        registry.setUsername(user1, "bob");
-        vm.prank(address(mockExecutor));
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
-
-        // One allowlisted + one privileged => whole call reverts (atomic).
+        _markOpen(OPEN_HAT);
         uint256[] memory mixed = new uint256[](2);
-        mixed[0] = CLAIM_HAT;
-        mixed[1] = PRIV_HAT;
+        mixed[0] = GATED_HAT;
+        mixed[1] = OPEN_HAT;
         vm.prank(user1);
-        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatNotClaimable.selector, PRIV_HAT));
+        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatOpenlyClaimable.selector, OPEN_HAT));
         qj.claimHatsWithUser(mixed);
-        assertFalse(mockExecutor.hats().isWearerOfHat(user1, CLAIM_HAT), "no partial mint");
+        assertFalse(mockExecutor.hats().isWearerOfHat(user1, GATED_HAT), "no partial mint");
     }
 
     function testClaimHatsWithUserNoUsernameReverts() public {
-        vm.prank(address(mockExecutor));
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
-        // No username set for user1.
+        // No username set for user1 — the NoUsername check fires before the open-hat gate.
         vm.prank(user1);
         vm.expectRevert(QuickJoin.NoUsername.selector);
-        qj.claimHatsWithUser(_one(CLAIM_HAT));
+        qj.claimHatsWithUser(_one(GATED_HAT));
     }
 
-    /*──────── registerAndClaimHats: closed by default, opens on allowlist ────────*/
+    /*──────── registerAndClaimHats: open hats blocked, gated hats pass ────────*/
 
-    function testRegisterAndClaimHatsClosedByDefault() public {
+    function testRegisterAndClaimHatsBlocksOpenHat() public {
+        _markOpen(OPEN_HAT);
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = hex"00";
-        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatNotClaimable.selector, PRIV_HAT));
-        qj.registerAndClaimHats(user1, "alice", deadline, 0, sig, _one(PRIV_HAT));
-        // Registration must NOT have happened (validation is before register).
-        assertEq(registry.usernames(user1), "", "must not register when claim disallowed");
+        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatOpenlyClaimable.selector, OPEN_HAT));
+        qj.registerAndClaimHats(user1, "alice", deadline, 0, sig, _one(OPEN_HAT));
+        // Registration must NOT have happened (the gate runs before register).
+        assertEq(registry.usernames(user1), "", "must not register when the claim is blocked");
     }
 
-    function testRegisterAndClaimHatsSucceedsAfterAllowlist() public {
-        vm.prank(address(mockExecutor));
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
-
+    function testRegisterAndClaimHatsAllowsGatedHat() public {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = hex"00";
-        qj.registerAndClaimHats(user1, "alice", deadline, 0, sig, _one(CLAIM_HAT));
-
+        qj.registerAndClaimHats(user1, "alice", deadline, 0, sig, _one(GATED_HAT));
         assertEq(registry.usernames(user1), "alice");
-        assertTrue(mockExecutor.hats().isWearerOfHat(user1, CLAIM_HAT));
+        assertTrue(mockExecutor.hats().isWearerOfHat(user1, GATED_HAT));
     }
 
     function testRegisterAndClaimHatsZeroUserRevertsFirst() public {
-        vm.prank(address(mockExecutor));
-        qj.setClaimableHatIds(_one(CLAIM_HAT));
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = hex"00";
         vm.expectRevert(QuickJoin.ZeroUser.selector);
-        qj.registerAndClaimHats(address(0), "alice", deadline, 0, sig, _one(CLAIM_HAT));
+        qj.registerAndClaimHats(address(0), "alice", deadline, 0, sig, _one(GATED_HAT));
     }
 
     function testRegisterAndClaimHatsEmptyArrayRegistersOnlyNoOp() public {
@@ -503,22 +448,20 @@ contract QuickJoinTest is Test {
         bytes memory sig = hex"00";
         qj.registerAndClaimHats(user1, "alice", deadline, 0, sig, new uint256[](0));
         assertEq(registry.usernames(user1), "alice", "username registered on empty claim");
-        assertFalse(mockExecutor.hats().isWearerOfHat(user1, CLAIM_HAT), "no hat minted on empty claim");
+        assertFalse(mockExecutor.hats().isWearerOfHat(user1, GATED_HAT), "no hat minted on empty claim");
     }
 
-    /*──────── memberHat auto-mint paths are UNAFFECTED by the allowlist (empty = still works) ────────*/
+    /*──────── memberHat auto-mint paths are UNAFFECTED by the open-hat gate ────────*/
 
-    function testQuickJoinWithUserUnaffectedByEmptyAllowlist() public {
-        // Allowlist is empty (closed) but the auto-mint join path still mints memberHatIds.
-        assertEq(qj.claimableHatCount(), 0);
+    function testQuickJoinWithUserUnaffectedByOpenHatGate() public {
+        // The auto-mint join path mints memberHatIds directly from storage — never through the gate.
         registry.setUsername(user1, "bob");
         vm.prank(user1);
         qj.quickJoinWithUser();
         assertTrue(mockExecutor.hats().isWearerOfHat(user1, DEFAULT_HAT_ID), "member auto-mint unaffected");
     }
 
-    function testRegisterAndQuickJoinUnaffectedByEmptyAllowlist() public {
-        assertEq(qj.claimableHatCount(), 0);
+    function testRegisterAndQuickJoinUnaffectedByOpenHatGate() public {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = hex"00";
         qj.registerAndQuickJoin(user1, "alice", deadline, 0, sig);

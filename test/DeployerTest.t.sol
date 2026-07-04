@@ -7319,16 +7319,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         address exec = result.executor;
         address qj = result.quickJoin;
 
-        // H-03: the QuickJoin claimable-hats allowlist ships EMPTY (closed) for every fresh org.
-        // The org executor must explicitly allowlist the vouch-gated hats before they can be claimed
-        // via QuickJoin. Seed both role hats here (in production this is an OrgDeployer/governance step).
-        {
-            uint256[] memory allow = new uint256[](2);
-            allow[0] = memberHat;
-            allow[1] = execHat;
-            vm.prank(exec);
-            QuickJoin(qj).setClaimableHatIds(allow);
-        }
+        // H-03 (new model, no allowlist): the MEMBER and EXECUTIVE roles ship defaults.eligible=false
+        // (vouch-gated), so QuickJoin's open-hat gate does NOT block them — the sentinel is not eligible
+        // for a gated hat. A vouched user claims the gated hat directly; per-user gating is Hats.mintHat.
 
         // Deployer wears both hats (bootstrap via HatsTreeSetup)
         _assertWearingHat(orgOwner, execHat, true, "Deployer wears EXECUTIVE");
@@ -7480,121 +7473,5 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         vm.expectRevert(bytes("batchConfigureVouching failed"));
         deployer.deployFullOrg(params);
         vm.stopPrank();
-    }
-
-    /* ─────────── WS-D-SEED: QuickJoin claimable-hats allowlist seeding (H-03 coordination) ─────────── */
-
-    /// @dev Standard 2-role (DEFAULT + EXECUTIVE) deploy returning the full result struct.
-    ///      quickJoinRolesBitmap == 1 (role 0 = DEFAULT) per _buildDefaultRoleAssignments, so the
-    ///      seeded claimable allowlist must contain exactly the DEFAULT hat.
-    function _deploySeedOrg() internal returns (OrgDeployer.DeploymentResult memory result) {
-        vm.startPrank(orgOwner);
-
-        string[] memory names = new string[](2);
-        names[0] = "DEFAULT";
-        names[1] = "EXECUTIVE";
-        string[] memory images = new string[](2);
-        images[0] = "ipfs://default-role-image";
-        images[1] = "ipfs://executive-role-image";
-        bool[] memory voting = new bool[](2);
-        voting[0] = true;
-        voting[1] = true;
-
-        IHybridVotingInit.ClassConfig[] memory classes = _buildLegacyClasses(50, 50, false, 4 ether);
-        address[] memory ddTargets = new address[](0);
-
-        OrgDeployer.DeploymentParams memory params = OrgDeployer.DeploymentParams({
-            orgId: ORG_ID,
-            orgName: "Seed DAO",
-            metadataHash: bytes32(0),
-            registryAddr: accountRegProxy,
-            deployerAddress: orgOwner,
-            deployerUsername: "",
-            regDeadline: 0,
-            regNonce: 0,
-            regSignature: "",
-            autoUpgrade: true,
-            hybridThresholdPct: 50,
-            ddThresholdPct: 50,
-            hybridClasses: classes,
-            ddInitialTargets: ddTargets,
-            roles: _buildSimpleRoleConfigs(names, images, voting),
-            roleAssignments: _buildDefaultRoleAssignments(),
-            metadataAdminRoleIndex: type(uint256).max,
-            passkeyEnabled: false,
-            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
-            bootstrap: _emptyBootstrap(),
-            paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
-        });
-
-        result = deployer.deployFullOrg(params);
-        vm.stopPrank();
-    }
-
-    /// @notice A fresh deployFullOrg seeds QuickJoin's H-03 claimable allowlist with exactly the
-    ///         org's member-level hat(s) — the DEFAULT hat (role 0, the quickJoinRolesBitmap set) —
-    ///         and nothing else. The privileged EXECUTIVE hat (role 1) stays non-claimable.
-    function testDeploySeedsQuickJoinClaimableWithMemberHatOnly() public {
-        OrgDeployer.DeploymentResult memory result = _deploySeedOrg();
-
-        uint256 defaultHat = orgRegistry.getRoleHat(ORG_ID, 0);
-        uint256 executiveHat = orgRegistry.getRoleHat(ORG_ID, 1);
-
-        QuickJoin qj = QuickJoin(result.quickJoin);
-
-        // The seed == the org's auto-mint member set (memberHatIds).
-        uint256[] memory claimable = qj.claimableHatIds();
-        assertEq(claimable.length, 1, "claimable allowlist must contain exactly one hat");
-        assertEq(claimable[0], defaultHat, "seeded hat must be the DEFAULT member hat");
-        assertEq(qj.claimableHatCount(), 1, "claimableHatCount mismatch");
-
-        assertTrue(qj.isClaimableHat(defaultHat), "DEFAULT hat must be claimable");
-        assertFalse(qj.isClaimableHat(executiveHat), "EXECUTIVE hat must NOT be claimable (H-03 stays closed)");
-
-        // Sanity: the seed matches exactly the auto-mint member hats.
-        uint256[] memory memberHats = qj.memberHatIds();
-        assertEq(memberHats.length, claimable.length, "seed length must equal memberHatIds length");
-        assertEq(memberHats[0], claimable[0], "seed must equal memberHatIds");
-    }
-
-    /// @notice A member (username registered, default-eligible) can claim the seeded DEFAULT hat via
-    ///         the caller-specified claim path after a fresh deploy — onboarding works normally.
-    function testSeededMemberCanClaimDefaultHat() public {
-        OrgDeployer.DeploymentResult memory result = _deploySeedOrg();
-        uint256 defaultHat = orgRegistry.getRoleHat(ORG_ID, 0);
-
-        address member = makeAddr("seed-member");
-
-        // Member registers a username (claimHatsWithUser requires one).
-        vm.prank(member);
-        UniversalAccountRegistry(accountRegProxy).registerAccount("seed-member");
-
-        // Member claims the seeded DEFAULT hat through the H-03-gated claim path.
-        uint256[] memory claim = new uint256[](1);
-        claim[0] = defaultHat;
-        vm.prank(member);
-        QuickJoin(result.quickJoin).claimHatsWithUser(claim);
-
-        assertTrue(IHats(SEPOLIA_HATS).isWearerOfHat(member, defaultHat), "member should now wear DEFAULT hat");
-    }
-
-    /// @notice H-03 stays closed after seeding: an attacker cannot claim the non-seeded privileged
-    ///         EXECUTIVE hat via QuickJoin — the allowlist gate reverts before any mint is attempted.
-    function testSeededAllowlistBlocksPrivilegedClaim() public {
-        OrgDeployer.DeploymentResult memory result = _deploySeedOrg();
-        uint256 executiveHat = orgRegistry.getRoleHat(ORG_ID, 1);
-
-        address attacker = makeAddr("seed-attacker");
-        vm.prank(attacker);
-        UniversalAccountRegistry(accountRegProxy).registerAccount("seed-attacker");
-
-        uint256[] memory claim = new uint256[](1);
-        claim[0] = executiveHat;
-        vm.prank(attacker);
-        vm.expectRevert(abi.encodeWithSelector(QuickJoin.HatNotClaimable.selector, executiveHat));
-        QuickJoin(result.quickJoin).claimHatsWithUser(claim);
-
-        assertFalse(IHats(SEPOLIA_HATS).isWearerOfHat(attacker, executiveHat), "attacker must not wear EXECUTIVE hat");
     }
 }
