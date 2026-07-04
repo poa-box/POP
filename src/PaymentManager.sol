@@ -28,6 +28,10 @@ contract PaymentManager is IPaymentManager, Initializable, OwnableUpgradeable, R
     ──────────────────────────────────────────────────────────────────────────*/
 
     /// @notice Merkle-based distribution data
+    /// @dev Distribution structs live as values inside the `distributions` mapping in the
+    ///      ERC-7201 namespaced Layout. Each mapping key allocates its own fresh slot region,
+    ///      so appending a new field to the END of this struct is upgrade-safe: existing
+    ///      distributions read the appended field(s) as zero. NEVER reorder or retype fields.
     struct Distribution {
         address payoutToken; // Token to distribute (address(0) = ETH)
         uint256 totalAmount; // Total amount to distribute
@@ -36,6 +40,8 @@ contract PaymentManager is IPaymentManager, Initializable, OwnableUpgradeable, R
         uint256 totalClaimed; // Running total of claims
         bool finalized; // Whether distribution is closed
         mapping(address => bool) claimed; // Track who has claimed
+        // ── APPENDED (M-08): must stay last; pre-upgrade distributions read this as 0 ──
+        uint256 creationBlock; // Block the distribution was created at (0 for pre-upgrade distributions)
     }
 
     /// @custom:storage-location erc7201:poa.paymentmanager.storage
@@ -158,6 +164,8 @@ contract PaymentManager is IPaymentManager, Initializable, OwnableUpgradeable, R
         dist.checkpointBlock = checkpointBlock;
         dist.merkleRoot = merkleRoot;
         dist.finalized = false;
+        // M-08: anchor the finalize timer to creation, not the (past) checkpoint block.
+        dist.creationBlock = block.number;
 
         emit DistributionCreated(distributionId, payoutToken, amount, checkpointBlock, merkleRoot);
     }
@@ -178,7 +186,11 @@ contract PaymentManager is IPaymentManager, Initializable, OwnableUpgradeable, R
         if (dist.totalAmount == 0) revert DistributionNotFound();
         if (dist.finalized) revert DistributionAlreadyFinalized();
         if (dist.claimed[msg.sender]) revert AlreadyClaimed();
-        if (s.optedOut[msg.sender]) revert OptedOut();
+        // L-19: opt-out is NOT enforced on the claim path. A claimer's membership in this
+        // distribution's merkle tree was fixed at creation; opting out afterwards must not
+        // strand already-allocated funds (finalize would confiscate them to the executor).
+        // Opt-out applies to FUTURE distributions only — it is honored off-chain when the
+        // executor builds the next distribution's merkle tree (see optOut / isOptedOut).
 
         // Verify merkle proof
         bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(msg.sender, claimAmount))));
@@ -232,7 +244,7 @@ contract PaymentManager is IPaymentManager, Initializable, OwnableUpgradeable, R
             if (dist.totalAmount == 0) revert DistributionNotFound();
             if (dist.finalized) revert DistributionAlreadyFinalized();
             if (dist.claimed[msg.sender]) revert AlreadyClaimed();
-            if (s.optedOut[msg.sender]) revert OptedOut();
+            // L-19: opt-out is NOT enforced on the claim path (see claimDistribution).
 
             // Verify merkle proof
             bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(msg.sender, claimAmount))));
@@ -266,13 +278,24 @@ contract PaymentManager is IPaymentManager, Initializable, OwnableUpgradeable, R
      * @notice Finalizes a distribution and returns unclaimed funds
      * @dev Only callable by owner after minimum claim period
      */
-    function finalizeDistribution(uint256 distributionId, uint256 minClaimPeriodBlocks) external override onlyOwner {
+    function finalizeDistribution(uint256 distributionId, uint256 minClaimPeriodBlocks)
+        external
+        override
+        onlyOwner
+        nonReentrant
+    {
         Layout storage s = _layout();
         Distribution storage dist = s.distributions[distributionId];
 
         if (dist.totalAmount == 0) revert DistributionNotFound();
         if (dist.finalized) revert AlreadyFinalized();
-        if (block.number < dist.checkpointBlock + minClaimPeriodBlocks) {
+        // M-08: anchor the claim window to the creation block, not the (arbitrarily-past)
+        // checkpoint block — otherwise `checkpointBlock + minClaimPeriodBlocks` can already be
+        // in the past at creation, letting finalize happen before claimers have any real window.
+        // BACKWARD-COMPAT: distributions created before this upgrade have creationBlock == 0;
+        // fall back to checkpointBlock so those in-flight distributions still finalize sanely.
+        uint256 anchorBlock = dist.creationBlock == 0 ? dist.checkpointBlock : dist.creationBlock;
+        if (block.number < anchorBlock + minClaimPeriodBlocks) {
             revert ClaimPeriodNotExpired();
         }
 

@@ -80,7 +80,8 @@ contract ImplementationRegistry is Initializable, OwnableUpgradeable {
         if (l._impls[tId][vId] != address(0)) revert VersionExists();
 
         // first time this type?
-        if (!l._meta[tId].exists) {
+        bool firstForType = !l._meta[tId].exists;
+        if (firstForType) {
             l._meta[tId].exists = true;
             l.typeIds.push(tId);
         }
@@ -88,9 +89,14 @@ contract ImplementationRegistry is Initializable, OwnableUpgradeable {
         l._impls[tId][vId] = impl;
         l._meta[tId].versions.push(vId);
 
-        if (setLatest) l._meta[tId].latest = vId;
+        // L-58: the very first version of a type MUST become `latest`, even if the caller
+        // passed setLatest=false. Otherwise `latest` stays bytes32(0) and
+        // getLatestImplementation reverts TypeUnknown despite a valid registered impl,
+        // leaving the type unresolvable-by-latest until an explicit setLatestVersion call.
+        bool becameLatest = setLatest || firstForType;
+        if (becameLatest) l._meta[tId].latest = vId;
 
-        emit ImplementationRegistered(tId, typeName, vId, version, impl, setLatest);
+        emit ImplementationRegistered(tId, typeName, vId, version, impl, becameLatest);
     }
 
     function setLatestVersion(string calldata typeName, string calldata version) external onlyOwner {

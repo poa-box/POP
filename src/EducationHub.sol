@@ -16,6 +16,7 @@ import {ValidationLib} from "./libs/ValidationLib.sol";
 interface IParticipationToken is IERC20 {
     function mint(address to, uint256 amount) external;
     function setEducationHub(address eh) external;
+    function educationHub() external view returns (address);
 }
 
 /*────────────────── EducationHub ─────────────────*/
@@ -35,6 +36,7 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     error ModuleExists();
     error ModuleUnknown();
     error AlreadyCompleted();
+    error TokenNotWired();
 
     /*────────── Types ─────────*/
     struct Module {
@@ -164,8 +166,15 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         emit ExecutorSet(newExec);
     }
 
+    /// @notice Point the hub at a new ParticipationToken. Executor-only.
+    /// @dev L-16: completeModule mints via `token.mint`, which the token gates on its
+    ///      `educationHub` being this hub. If setToken were allowed to point at a token that
+    ///      does not authorize this hub as its minter, every completeModule would revert and
+    ///      the module rewards would be silently bricked. Require the reverse wiring to already
+    ///      be in place so the mis-wire is caught here, not at claim time.
     function setToken(address newToken) external onlyExecutor {
         if (newToken == address(0)) revert ZeroAddress();
+        if (IParticipationToken(newToken).educationHub() != address(this)) revert TokenNotWired();
         _layout().token = IParticipationToken(newToken);
         emit TokenSet(newToken);
     }

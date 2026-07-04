@@ -375,7 +375,11 @@ contract PaymentManagerMerkleTest is Test {
         paymentManager.claimDistribution(distributionId, 5 ether, proof);
     }
 
-    function test_RevertClaimDistribution_OptedOut() public {
+    /// @dev L-19: opting out AFTER being allocated in a distribution's merkle tree must NOT
+    ///      block the claim — the funds were already earmarked at creation and blocking the claim
+    ///      would strand them (finalize returns "unclaimed" funds to the executor). Opt-out now
+    ///      applies to FUTURE distributions only (honored off-chain in the next merkle tree).
+    function test_OptedOutUserCanStillClaimAllocatedFunds() public {
         uint256 checkpointBlock = block.number;
         vm.roll(block.number + 1);
 
@@ -384,14 +388,18 @@ contract PaymentManagerMerkleTest is Test {
         vm.prank(executor);
         uint256 distributionId = paymentManager.createDistribution(address(0), 5 ether, leaf, checkpointBlock);
 
-        // Alice opts out
+        // Alice opts out AFTER allocation.
         vm.prank(alice);
         paymentManager.optOut(true);
+        assertTrue(paymentManager.isOptedOut(alice), "opt-out flag must still be recorded");
 
+        // She must still be able to claim her already-allocated funds.
         bytes32[] memory proof = new bytes32[](0);
+        uint256 balBefore = alice.balance;
         vm.prank(alice);
-        vm.expectRevert(IPaymentManager.OptedOut.selector);
         paymentManager.claimDistribution(distributionId, 5 ether, proof);
+        assertEq(alice.balance, balBefore + 5 ether, "opted-out user must still receive allocated funds");
+        assertTrue(paymentManager.hasClaimed(distributionId, alice));
     }
 
     function test_RevertClaimDistribution_DistributionNotFound() public {
