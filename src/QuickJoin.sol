@@ -53,6 +53,7 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     error NoUsername();
     error Unauthorized();
     error PasskeyFactoryNotSet();
+    error HatNotClaimable(uint256 hatId);
 
     /* ───────── Constants ────── */
     bytes4 public constant MODULE_ID = bytes4(keccak256("QuickJoin"));
@@ -66,6 +67,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         address executor;
         uint256[] memberHatIds; // hat IDs to mint when users join
         IUniversalPasskeyAccountFactory universalFactory; // Universal factory for passkey accounts
+        // H-03: governance-controlled allowlist of hat IDs claimable via the caller-specified claim
+        // paths (claimHatsWithUser / registerAndClaimHats*). APPENDED (ERC-7201 append-only):
+        // existing orgs read this as an EMPTY array after the beacon upgrade, which means CLOSED —
+        // no hats are claimable via QuickJoin until the org executor explicitly allowlists them.
+        // Note: the memberHatIds auto-mint paths are unaffected (those IDs come from storage, not
+        // the caller) and keep working for existing orgs.
+        uint256[] claimableHatIds;
     }
 
     /* ───────── Passkey Enrollment Struct ──────── */
@@ -89,6 +97,7 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     event AddressesUpdated(address hats, address registry, address master);
     event ExecutorUpdated(address newExecutor);
     event MemberHatIdsUpdated(uint256[] hatIds);
+    event ClaimableHatIdsUpdated(uint256[] hatIds);
     event QuickJoined(address indexed user, uint256[] hatIds);
     event QuickJoinedByMaster(address indexed master, address indexed user, uint256[] hatIds);
     event UniversalFactoryUpdated(address indexed universalFactory);
@@ -185,6 +194,27 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         emit MemberHatIdsUpdated(memberHatIds_);
     }
 
+    /// @notice Governance-set allowlist of hat IDs that may be claimed via the caller-specified
+    ///         claim paths (claimHatsWithUser / registerAndClaimHats*). Replaces the full set.
+    /// @dev H-03: an EMPTY allowlist means CLOSED — no hats are claimable via QuickJoin. Duplicate
+    ///      IDs in the input are de-duplicated by HatManager.setHatInArray; zero is a legal hat id in
+    ///      Hats Protocol only as the "no hat" sentinel and is never mintable, so it is rejected here
+    ///      to avoid a meaningless entry.
+    function setClaimableHatIds(uint256[] calldata claimableHatIds_) external onlyExecutor {
+        Layout storage l = _layout();
+
+        // Clear existing allowlist using HatManager
+        HatManager.clearHatArray(l.claimableHatIds);
+
+        // Set new allowlist using HatManager (de-duplicates)
+        for (uint256 i = 0; i < claimableHatIds_.length; i++) {
+            if (claimableHatIds_[i] == 0) revert HatNotClaimable(0);
+            HatManager.setHatInArray(l.claimableHatIds, claimableHatIds_[i], true);
+        }
+
+        emit ClaimableHatIdsUpdated(claimableHatIds_);
+    }
+
     function setExecutor(address newExec) external onlyExecutor {
         if (newExec == address(0)) revert InvalidAddress();
         _layout().executor = newExec;
@@ -197,6 +227,25 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     }
 
     /* ───────── Internal helper ─────── */
+
+    /// @dev H-03: validate every caller-specified claim hat id is on the governance allowlist.
+    ///      An empty allowlist (the post-upgrade default for existing orgs) closes ALL claim paths.
+    ///      An EMPTY `claimHatIds` input is a no-op here (returns false); callers skip the mint,
+    ///      preserving the pre-upgrade register-only behavior of the register+claim paths. The
+    ///      allowlist is only consulted for non-empty inputs — which is what actually closes H-03.
+    /// @return hasHats True if at least one (allowlisted) hat was requested and should be minted.
+    function _requireClaimable(uint256[] calldata claimHatIds) private view returns (bool hasHats) {
+        uint256 length = claimHatIds.length;
+        if (length == 0) return false;
+        Layout storage l = _layout();
+        for (uint256 i = 0; i < length; i++) {
+            if (!HatManager.isHatInArray(l.claimableHatIds, claimHatIds[i])) {
+                revert HatNotClaimable(claimHatIds[i]);
+            }
+        }
+        return true;
+    }
+
     function _quickJoin(address user) private nonReentrant {
         if (user == address(0)) revert ZeroUser();
 
@@ -339,7 +388,9 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         string memory existing = l.accountRegistry.getUsername(_msgSender());
         if (bytes(existing).length == 0) revert NoUsername();
 
-        if (claimHatIds.length > 0) {
+        // H-03: only allowlisted hats may be claimed (empty allowlist = closed). An empty
+        // claimHatIds input is a no-op mint (backward-compatible with the pre-upgrade behavior).
+        if (_requireClaimable(claimHatIds)) {
             IExecutorHatMinter(l.executor).mintHatsForUser(_msgSender(), claimHatIds);
         }
 
@@ -363,13 +414,18 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     ) external nonReentrant {
         if (user == address(0)) revert ZeroUser();
 
+        // H-03: only allowlisted hats may be claimed (empty allowlist = closed). An empty
+        // claimHatIds input registers the username without minting (this path historically
+        // doubled as a register-only entrypoint — preserve that).
+        bool hasHats = _requireClaimable(claimHatIds);
+
         Layout storage l = _layout();
 
         // 1. Register username
         l.accountRegistry.registerAccountBySig(user, username, deadline, nonce, signature);
 
-        // 2. Mint claimed hats
-        if (claimHatIds.length > 0) {
+        // 2. Mint claimed hats (skipped for an empty request)
+        if (hasHats) {
             IExecutorHatMinter(l.executor).mintHatsForUser(user, claimHatIds);
         }
 
@@ -395,6 +451,10 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         Layout storage l = _layout();
         if (address(l.universalFactory) == address(0)) revert PasskeyFactoryNotSet();
 
+        // H-03: only allowlisted hats may be claimed (empty allowlist = closed). An empty
+        // claimHatIds input creates the account + registers the username without minting.
+        bool hasHats = _requireClaimable(claimHatIds);
+
         // 1. Register username via passkey sig
         l.accountRegistry
             .registerAccountByPasskeySig(
@@ -412,8 +472,8 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
 
-        // 3. Mint claimed hats
-        if (claimHatIds.length > 0) {
+        // 3. Mint claimed hats (skipped for an empty request)
+        if (hasHats) {
             IExecutorHatMinter(l.executor).mintHatsForUser(account, claimHatIds);
         }
 
@@ -482,6 +542,21 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     /* ───────── Misc view helpers ─────── */
     function memberHatIds() external view returns (uint256[] memory) {
         return HatManager.getHatArray(_layout().memberHatIds);
+    }
+
+    /// @notice The governance-set allowlist of hat IDs claimable via the caller-specified claim paths.
+    function claimableHatIds() external view returns (uint256[] memory) {
+        return HatManager.getHatArray(_layout().claimableHatIds);
+    }
+
+    /// @notice Number of hat IDs on the claimable allowlist (0 = all claim paths closed).
+    function claimableHatCount() external view returns (uint256) {
+        return HatManager.getHatCount(_layout().claimableHatIds);
+    }
+
+    /// @notice Whether `hatId` may be claimed via the caller-specified claim paths.
+    function isClaimableHat(uint256 hatId) external view returns (bool) {
+        return HatManager.isHatInArray(_layout().claimableHatIds, hatId);
     }
 
     function hats() external view returns (IHats) {

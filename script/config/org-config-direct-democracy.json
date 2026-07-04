@@ -10,7 +10,17 @@
     {
       "name": "MEMBER",
       "image": "ipfs://QmDirectDemocracyMember",
-      "canVote": true
+      "canVote": true,
+      "vouching": {
+        "enabled": false,
+        "quorum": 0,
+        "voucherRoleIndex": 0,
+        "combineWithHierarchy": false
+      },
+      "defaults": {
+        "eligible": true,
+        "standing": true
+      }
     }
   ],
   "votingClasses": [

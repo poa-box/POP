@@ -10,22 +10,62 @@
     {
       "name": "MEMBER",
       "image": "ipfs://QmMemberRole",
-      "canVote": true
+      "canVote": true,
+      "vouching": {
+        "enabled": false,
+        "quorum": 0,
+        "voucherRoleIndex": 0,
+        "combineWithHierarchy": false
+      },
+      "defaults": {
+        "eligible": true,
+        "standing": true
+      }
     },
     {
       "name": "COORDINATOR",
       "image": "ipfs://QmCoordinatorRole",
-      "canVote": true
+      "canVote": true,
+      "vouching": {
+        "enabled": true,
+        "quorum": 2,
+        "voucherRoleIndex": 3,
+        "combineWithHierarchy": false
+      },
+      "defaults": {
+        "eligible": false,
+        "standing": true
+      }
     },
     {
       "name": "CONTRIBUTOR",
       "image": "ipfs://QmContributorRole",
-      "canVote": false
+      "canVote": false,
+      "vouching": {
+        "enabled": false,
+        "quorum": 0,
+        "voucherRoleIndex": 0,
+        "combineWithHierarchy": false
+      },
+      "defaults": {
+        "eligible": true,
+        "standing": true
+      }
     },
     {
       "name": "ADMIN",
       "image": "ipfs://QmAdminRole",
-      "canVote": true
+      "canVote": true,
+      "vouching": {
+        "enabled": true,
+        "quorum": 2,
+        "voucherRoleIndex": 3,
+        "combineWithHierarchy": false
+      },
+      "defaults": {
+        "eligible": false,
+        "standing": true
+      }
     }
   ],
   "votingClasses": [

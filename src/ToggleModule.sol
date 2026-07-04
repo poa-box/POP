@@ -44,6 +44,9 @@ contract ToggleModule is Initializable {
     /// @notice Emitted when admin is transferred
     event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
 
+    /// @notice Emitted when the eligibility module address is set
+    event EligibilityModuleSet(address indexed oldModule, address indexed newModule);
+
     /// @notice Emitted when the module is initialized
     event ToggleModuleInitialized(address indexed admin);
 
@@ -129,10 +132,13 @@ contract ToggleModule is Initializable {
      * @param _eligibilityModule The eligibility module address
      */
     function setEligibilityModule(address _eligibilityModule) external {
+        if (_eligibilityModule == address(0)) revert ZeroAddress();
         Layout storage l = _layout();
         // Only allow admin to set this, but don't use the modifier since eligibility module might not be set yet
         if (msg.sender != l.admin) revert NotToggleAdmin();
+        address oldModule = l.eligibilityModule;
         l.eligibilityModule = _eligibilityModule;
+        emit EligibilityModuleSet(oldModule, _eligibilityModule);
     }
 
     /**
@@ -141,6 +147,14 @@ contract ToggleModule is Initializable {
      */
     function admin() external view returns (address) {
         return _layout().admin;
+    }
+
+    /**
+     * @notice Get the current eligibility module address
+     * @return eligibilityModule The eligibility module address that can also toggle hat status
+     */
+    function eligibilityModule() external view returns (address) {
+        return _layout().eligibilityModule;
     }
 
     /**

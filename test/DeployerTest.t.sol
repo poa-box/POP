@@ -542,10 +542,22 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         bool combineWithHierarchy,
         bool setDefaultToFalse
     ) internal {
+        // M-03: a hat may not be simultaneously default-eligible AND vouch-enabled+combineWithHierarchy
+        // (the combination silently bypasses the vouch quorum). _createTestOrg seeds role hats as
+        // defaultEligible=true, so when a combine-vouch config is being enabled we must clear the
+        // default-eligibility FIRST — mirroring the production deploy order (HatsTreeSetup sets
+        // defaults BEFORE OrgDeployer configures vouching, and H-03(b) makes vouch roles default-ineligible).
+        if (setDefaultToFalse) {
+            vm.prank(executor);
+            EligibilityModule(eligibilityModule).setDefaultEligibility(targetHat, false, false);
+        }
+
         vm.prank(executor);
         EligibilityModule(eligibilityModule).configureVouching(targetHat, quorum, membershipHat, combineWithHierarchy);
 
         if (setDefaultToFalse) {
+            // Re-assert default eligibility off after (re)configuring vouching, in case the caller
+            // relies on it being cleared post-config (idempotent; already cleared above).
             vm.prank(executor);
             EligibilityModule(eligibilityModule).setDefaultEligibility(targetHat, false, false);
         }
@@ -1978,13 +1990,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         _assertWearingHat(candidate, setup.defaultRoleHat, true, "Candidate after claiming");
     }
 
-    /// @notice H1 characterization test — locks the vouch-gating boundary and documents the exact misconfiguration
-    ///         the frontend must reject (vouching.enabled && combineWithHierarchy && defaultEligible == true).
-    /// @dev This is a TEST-ONLY guard. There is intentionally NO on-chain contract change for H1: a properly
-    ///      configured vouch-gated role (defaultEligible == false) is already un-self-claimable, and KUBI relies on
-    ///      the combineWithHierarchy semantics, so we do not touch getWearerStatus/claimVouchedHat. The dangerous
-    ///      combo is prevented in the UI (see the frontend role-config validation issue). If a future change ever
-    ///      makes a default-not-eligible vouch-gated hat self-claimable, this test fails.
+    /// @notice H1 / M-03 boundary test — locks the vouch-gating boundary AND now asserts the on-chain guard.
+    /// @dev Historically this documented a misconfiguration (vouching.enabled && combineWithHierarchy &&
+    ///      defaultEligible == true) that only the frontend rejected. Audit M-03 moves that guard on-chain:
+    ///      EligibilityModule.setDefaultEligibility now REVERTS DefaultEligibilityConflictsWithVouch when the
+    ///      target hat has vouching enabled with combineWithHierarchy. Step (3) below asserts the revert.
     function testVouchGatingBoundaryAndComboMisconfig() public {
         TestOrgSetup memory setup = _createTestOrg("Vouch Gating Boundary DAO");
         address stranger = address(0x5151);
@@ -2014,13 +2024,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         EligibilityModule(setup.eligibilityModule).claimVouchedHat(hat);
         _assertWearingHat(stranger, hat, true, "stranger after claim");
 
-        // (3) DOCUMENTED MISCONFIG the frontend must prevent: flipping defaultEligible to TRUE on this
-        //     vouching+combine hat makes a brand-new stranger eligible with ZERO vouches — defeating the quorum.
+        // (3) M-03: the previously-dangerous flip (defaultEligible=true on a vouching+combine hat) is now
+        //     BLOCKED on-chain. It would have made a brand-new stranger eligible with ZERO vouches — defeating
+        //     the quorum — so setDefaultEligibility reverts DefaultEligibilityConflictsWithVouch.
         _assertEligibilityStatus(setup.eligibilityModule, stranger2, hat, false, false, "stranger2 before flip");
         vm.prank(setup.exec);
-        EligibilityModule(setup.eligibilityModule).setDefaultEligibility(hat, true, true); // the dangerous flip
+        vm.expectRevert(EligibilityModule.DefaultEligibilityConflictsWithVouch.selector);
+        EligibilityModule(setup.eligibilityModule).setDefaultEligibility(hat, true, true); // now blocked by M-03
+        // The gate still holds: stranger2 remains ineligible (the flip did not take effect).
         _assertEligibilityStatus(
-            setup.eligibilityModule, stranger2, hat, true, true, "stranger2 eligible with no vouches after flip"
+            setup.eligibilityModule, stranger2, hat, false, false, "stranger2 still gated after blocked flip"
         );
 
         // (4) Open-join path is unaffected: a hat with vouching DISABLED + defaultEligible=true is openly claimable
@@ -3274,7 +3287,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "Should have good standing for MEMBER via Hats contract"
         );
 
-        // Test that super admin can configure vouching
+        // Test that super admin can configure vouching.
+        // M-03: clear default-eligibility first (the role hat is seeded defaultEligible=true), since
+        // vouch-enabled + combineWithHierarchy on a default-eligible hat is now rejected.
+        vm.prank(exec);
+        EligibilityModule(eligibilityModuleAddr).setDefaultEligibility(memberRoleHat, false, false);
         vm.prank(exec);
         EligibilityModule(eligibilityModuleAddr).configureVouching(memberRoleHat, 3, defaultRoleHat, true);
 
@@ -5026,12 +5043,17 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
     function testRoleApplicationAlreadyWearing() public {
         TestOrgSetup memory setup = _createTestOrg("App Wearing DAO");
 
-        // Mint MEMBER hat to voter1 (default eligibility is true)
+        // Give voter1 a wearer-specific eligibility override so they wear memberRoleHat independent of the
+        // hat's default rules — this keeps them a wearer even once we drop the hat's default-eligibility below.
+        vm.prank(setup.exec);
+        EligibilityModule(setup.eligibilityModule).setWearerEligibility(voter1, setup.memberRoleHat, true, true);
         _mintHat(setup.exec, setup.memberRoleHat, voter1);
 
-        // Configure vouching with combineWithHierarchy=true so hierarchy eligibility preserves wearer status
+        // Configure vouching with combineWithHierarchy=true. M-03 forbids combine+defaultEligible, so
+        // _configureVouching(setDefaultToFalse=true) clears the hat's default-eligibility FIRST; voter1
+        // keeps wearing the hat via the wearer-specific override above.
         _configureVouching(
-            setup.eligibilityModule, setup.exec, setup.memberRoleHat, 2, setup.defaultRoleHat, true, false
+            setup.eligibilityModule, setup.exec, setup.memberRoleHat, 2, setup.defaultRoleHat, true, true
         );
 
         // voter1 already wears memberRoleHat, so applying should revert
@@ -7297,6 +7319,17 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         address exec = result.executor;
         address qj = result.quickJoin;
 
+        // H-03: the QuickJoin claimable-hats allowlist ships EMPTY (closed) for every fresh org.
+        // The org executor must explicitly allowlist the vouch-gated hats before they can be claimed
+        // via QuickJoin. Seed both role hats here (in production this is an OrgDeployer/governance step).
+        {
+            uint256[] memory allow = new uint256[](2);
+            allow[0] = memberHat;
+            allow[1] = execHat;
+            vm.prank(exec);
+            QuickJoin(qj).setClaimableHatIds(allow);
+        }
+
         // Deployer wears both hats (bootstrap via HatsTreeSetup)
         _assertWearingHat(orgOwner, execHat, true, "Deployer wears EXECUTIVE");
 
@@ -7338,7 +7371,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         vm.expectRevert();
         QuickJoin(qj).claimHatsWithUser(attackIds);
 
-        // ─── Test 3: Empty claimHatIds succeeds (no-op) ───
+        // ─── Test 3: Empty claimHatIds is a backward-compatible no-op (mints nothing, no revert) ───
+        // H-03 is closed by the allowlist check on non-empty inputs; an empty request must NOT revert
+        // so pre-upgrade register-only callers keep working.
 
         address emptyUser = address(0xE001);
         vm.prank(emptyUser);
@@ -7346,7 +7381,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         uint256[] memory emptyIds = new uint256[](0);
         vm.prank(emptyUser);
-        QuickJoin(qj).claimHatsWithUser(emptyIds);
+        QuickJoin(qj).claimHatsWithUser(emptyIds); // no-op: succeeds, mints nothing
+        _assertWearingHat(emptyUser, memberHat, false, "empty claim mints no member hat");
+        _assertWearingHat(emptyUser, execHat, false, "empty claim mints no exec hat");
 
         // ─── Test 4: Vouched user claims multiple hats at once ───
 
@@ -7367,5 +7404,81 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         _assertWearingHat(multiUser, memberHat, true, "Multi-user wears MEMBER");
         _assertWearingHat(multiUser, execHat, true, "Multi-user wears EXECUTIVE");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  M-03 (deploy path): a misconfigured JSON with defaults.eligible=true AND
+    //  vouching.enabled + combineWithHierarchy MUST fail loudly at deploy rather
+    //  than silently shipping the vouch-quorum bypass. The org-deploy path uses the
+    //  batch entrypoints only (HatsTreeSetup.batchSetDefaultEligibility ->
+    //  OrgDeployer.batchConfigureVouching), so the guard must live there too.
+    // ════════════════════════════════════════════════════════════════════════
+
+    function testDeployRevertsOnDefaultEligibleVouchCombineMisconfig() public {
+        vm.startPrank(orgOwner);
+
+        RoleConfigStructs.RoleConfig[] memory roles = new RoleConfigStructs.RoleConfig[](1);
+        address[] memory noWearers = new address[](0);
+
+        // MISCONFIG: eligible=true while vouching is enabled AND combineWithHierarchy=true.
+        // This is exactly the M-03 silent bypass. It must revert at deploy.
+        roles[0] = RoleConfigStructs.RoleConfig({
+            name: "MEMBER",
+            image: "",
+            metadataCID: bytes32(0),
+            canVote: true,
+            vouching: RoleConfigStructs.RoleVouchingConfig({
+                enabled: true, quorum: 1, voucherRoleIndex: 0, combineWithHierarchy: true
+            }),
+            defaults: RoleConfigStructs.RoleEligibilityDefaults({eligible: true, standing: true}),
+            hierarchy: RoleConfigStructs.RoleHierarchyConfig({adminRoleIndex: type(uint256).max}),
+            distribution: RoleConfigStructs.RoleDistributionConfig({
+                mintToDeployer: true, additionalWearers: noWearers
+            }),
+            hatConfig: RoleConfigStructs.HatConfig({maxSupply: type(uint32).max, mutableHat: true})
+        });
+
+        OrgDeployer.DeploymentParams memory params = OrgDeployer.DeploymentParams({
+            orgId: keccak256("M03-MISCONFIG-ORG"),
+            orgName: "M03 Misconfig DAO",
+            metadataHash: bytes32(0),
+            registryAddr: accountRegProxy,
+            deployerAddress: orgOwner,
+            deployerUsername: "",
+            regDeadline: 0,
+            regNonce: 0,
+            regSignature: "",
+            autoUpgrade: true,
+            hybridThresholdPct: 50,
+            ddThresholdPct: 50,
+            hybridClasses: _buildLegacyClasses(50, 50, false, 4 ether),
+            ddInitialTargets: new address[](0),
+            roles: roles,
+            roleAssignments: OrgDeployer.RoleAssignments({
+                quickJoinRolesBitmap: 1,
+                tokenMemberRolesBitmap: 1,
+                tokenApproverRolesBitmap: 1,
+                taskCreatorRolesBitmap: 1,
+                educationCreatorRolesBitmap: 1,
+                educationMemberRolesBitmap: 1,
+                hybridProposalCreatorRolesBitmap: 1,
+                ddVotingRolesBitmap: 1,
+                ddCreatorRolesBitmap: 1
+            }),
+            metadataAdminRoleIndex: type(uint256).max,
+            passkeyEnabled: false,
+            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
+            bootstrap: _emptyBootstrap(),
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms()
+        });
+
+        // The batchConfigureVouching step (OrgDeployer) hits the reverse-direction M-03 guard because
+        // the hat is already default-eligible from batchSetDefaultEligibility. The Executor wraps the
+        // module call in `require(success, "batchConfigureVouching failed")`, so the deploy reverts
+        // loudly with the wrapper string — the key M-03 property is that the misconfig does NOT deploy.
+        vm.expectRevert(bytes("batchConfigureVouching failed"));
+        deployer.deployFullOrg(params);
+        vm.stopPrank();
     }
 }
