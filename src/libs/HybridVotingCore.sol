@@ -98,7 +98,7 @@ library HybridVotingCore {
                     uint256 delta = (classRawPowers[c] * weight) / 100;
                     if (delta > 0) {
                         uint256 newVal = p.options[ix].classRaw[c] + delta;
-                        require(VotingMath.fitsUint128(newVal), "Class raw overflow");
+                        if (!VotingMath.fitsUint128(newVal)) revert VotingErrors.Overflow(); // L-03
                         p.options[ix].classRaw[c] = uint128(newVal);
                     }
                 }
@@ -144,6 +144,16 @@ library HybridVotingCore {
         if (cls.strategy == HybridVoting.ClassStrategy.DIRECT) {
             return 100; // Direct democracy: 1 person = 100 raw points
         } else if (cls.strategy == HybridVoting.ClassStrategy.ERC20_BAL) {
+            // ────────────────────────── H-06 SECURITY INVARIANT ──────────────────────────
+            // This branch reads a LIVE ERC20 balance at vote time (no snapshot). Any asset
+            // configured for an ERC20_BAL class MUST be non-transferable / soulbound, or a
+            // voter can FLASH-LOAN (or borrow, or momentarily receive) a large balance,
+            // cast a vote with inflated power, and return the tokens in the same block —
+            // buying governance for the cost of a flash-loan fee. The ParticipationToken
+            // live-count is intentional and safe ONLY because PT is soulbound (non-transferable).
+            // Do NOT wire a transferable ERC20 into an ERC20_BAL class. See
+            // GovernanceFactory._updateClassesWithTokenAndHats for the deploy-time counterpart.
+            // ──────────────────────────────────────────────────────────────────────────────
             uint256 balance = IERC20(cls.asset).balanceOf(voter);
             if (balance < cls.minBalance) return 0;
             uint256 power = cls.quadratic ? VotingMath.sqrt(balance) : balance;
@@ -157,6 +167,11 @@ library HybridVotingCore {
         HybridVoting.Layout storage l = _layout();
         HybridVoting.Proposal storage p = l._proposals[id];
         if (p.executed) revert VotingErrors.AlreadyExecuted();
+        // H-05 (issue #140): set `executed` up-front as an in-flight reentrancy lock (the
+        // HybridVoting facade has no nonReentrant modifier, so `executed` is the only guard
+        // during the external executor call). On a *reverting* execution we RESET it to false
+        // below so the finalize stays retryable — the old code left it stuck true, permanently
+        // bricking any proposal whose batch reverted transiently.
         p.executed = true;
 
         // Check if any votes were cast
@@ -220,10 +235,23 @@ library HybridVotingCore {
         IExecutor.Call[] storage batch = p.batches[winner];
         bool didExecute = false;
         if (valid && batch.length > 0) {
+            // L-02: defense-in-depth — never let the winning batch call the voting contract
+            // itself (address(this) is the HybridVoting proxy under delegatecall).
+            uint256 blen = batch.length;
+            for (uint256 j; j < blen;) {
+                if (batch[j].target == address(this)) revert VotingErrors.TargetSelf();
+                unchecked {
+                    ++j;
+                }
+            }
             try l.executor.execute(id, batch) {
                 didExecute = true;
                 emit ProposalExecuted(id, winner, batch.length);
             } catch (bytes memory reason) {
+                // H-05: execution reverted — release the in-flight lock so this finalize can be
+                // retried once the revert cause is fixed. (Reentrancy is impossible here: the
+                // external call already returned control before this branch runs.)
+                p.executed = false;
                 emit ProposalExecutionFailed(id, winner, reason);
             }
         }

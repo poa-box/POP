@@ -45,4 +45,15 @@ contract DirectDemocracyVotingLens {
         quorum = voting.quorum();
         proposalCount = voting.proposalsCount();
     }
+
+    /// @notice Unix timestamp at which voting on proposal `id` closes.
+    /// @dev L-05 parity with HybridVotingLens; backed by DirectDemocracyVoting.proposalEndTimestamp.
+    function getProposalEndTimestamp(DirectDemocracyVoting voting, uint256 id) external view returns (uint64) {
+        return voting.proposalEndTimestamp(id);
+    }
+
+    /// @notice True while proposal `id` is still open for voting (now < endTimestamp).
+    function isProposalActive(DirectDemocracyVoting voting, uint256 id) external view returns (bool) {
+        return block.timestamp < voting.proposalEndTimestamp(id);
+    }
 }

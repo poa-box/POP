@@ -494,7 +494,7 @@ These boundaries are proven by `test/HybridVotingSafeConfig.t.sol`: soulbound tr
 | MAX_CALLS | 20 | Execution batch size |
 | MAX_CLASSES | 8 | Voting constituency limit |
 | MAX_DURATION | 43,200 min | 30 day voting window |
-| MIN_DURATION | 1 min | Testing floor |
+| MIN_DURATION | 10 min | Minimum voting window (enforced) |
 
 ---
 

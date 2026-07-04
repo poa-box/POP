@@ -325,7 +325,18 @@ contract GovernanceFactory {
 
     /**
      * @notice Updates voting classes with token addresses and role hat IDs
-     * @dev Fills in missing token addresses for ERC20_BAL classes
+     * @dev Fills in missing token addresses for ERC20_BAL classes.
+     *
+     *      ┌──────────────────────── H-06 SECURITY INVARIANT ────────────────────────┐
+     *      │ Every ERC20_BAL class reads a LIVE balance at vote time (HybridVotingCore │
+     *      │ ._calculateClassPower). The asset assigned here MUST be non-transferable / │
+     *      │ soulbound. A transferable ERC20 lets a voter flash-loan a huge balance,    │
+     *      │ vote with inflated power, and return it in the same block — a flash-loan   │
+     *      │ governance attack. When `asset == 0` we backfill the org's Participation   │
+     *      │ Token, which is SAFE precisely because PT is soulbound (non-transferable). │
+     *      │ Callers that pass a non-zero `asset` are responsible for guaranteeing that │
+     *      │ token is likewise non-transferable.                                        │
+     *      └────────────────────────────────────────────────────────────────────────────┘
      */
     function _updateClassesWithTokenAndHats(
         IHybridVotingInit.ClassConfig[] memory classes,
@@ -334,7 +345,7 @@ contract GovernanceFactory {
     ) internal pure returns (IHybridVotingInit.ClassConfig[] memory) {
         for (uint256 i = 0; i < classes.length; i++) {
             if (classes[i].strategy == IHybridVotingInit.ClassStrategy.ERC20_BAL) {
-                // Fill in token address if not provided
+                // Fill in token address if not provided (defaults to the soulbound PT — safe).
                 if (classes[i].asset == address(0)) {
                     classes[i].asset = token;
                 }

@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "../src/DirectDemocracyVoting.sol";
+import {DirectDemocracyVotingLens} from "../src/lens/DirectDemocracyVotingLens.sol";
 import "../src/libs/VotingMath.sol";
 import {VotingErrors} from "../src/libs/VotingErrors.sol";
 import {ValidationLib} from "../src/libs/ValidationLib.sol";
@@ -762,5 +763,131 @@ contract DDVotingTest is Test {
         // Second call reverts
         vm.expectRevert(VotingErrors.AlreadyExecuted.selector);
         dd.announceWinner(0);
+    }
+
+    /*////////////////////////////////////////////////////////////
+                        WS-B SECURITY REGRESSION TESTS
+    ////////////////////////////////////////////////////////////*/
+
+    event ProposalExecutionFailed(uint256 indexed id, uint256 indexed winningIdx, bytes reason);
+
+    /// @notice M-14: creating a proposal with more than MAX_POLL_HATS poll hats reverts.
+    function testM14PollHatsCapEnforced() public {
+        uint256 max = dd.MAX_POLL_HATS();
+
+        // Exactly MAX_POLL_HATS is accepted.
+        uint256[] memory okHats = new uint256[](max);
+        for (uint256 i; i < max; ++i) {
+            okHats[i] = i + 1;
+        }
+        _createHatPoll(2, okHats);
+
+        // One more reverts with TooManyPollHats.
+        uint256[] memory tooMany = new uint256[](max + 1);
+        for (uint256 i; i < max + 1; ++i) {
+            tooMany[i] = i + 1;
+        }
+        vm.prank(creator);
+        vm.expectRevert(VotingErrors.TooManyPollHats.selector);
+        dd.createProposal(bytes("Too Many Hats"), bytes32(0), 10, 2, new IExecutor.Call[][](0), tooMany);
+    }
+
+    /// @notice L-02: a batch that targets the voting contract itself is rejected at creation.
+    function testL02SelfTargetBatchRejectedAtCreation() public {
+        // Allow address(dd) as a target so we get past the TargetNotAllowed check and hit TargetSelf.
+        vm.prank(address(exec));
+        dd.setConfig(DirectDemocracyVoting.ConfigKey.TARGET_ALLOWED, abi.encode(address(dd), true));
+
+        IExecutor.Call[][] memory b = new IExecutor.Call[][](1);
+        b[0] = new IExecutor.Call[](1);
+        b[0][0] = IExecutor.Call({target: address(dd), value: 0, data: ""});
+        vm.prank(creator);
+        vm.expectRevert(VotingErrors.TargetSelf.selector);
+        dd.createProposal(bytes("Self Target"), bytes32(0), 10, 1, b, new uint256[](0));
+    }
+
+    /// @notice H-05 (issue #140): a transiently-reverting execution leaves the proposal retryable
+    ///         (executed stays false). Once the target is fixed the finalize succeeds.
+    function testH05RevertingExecutionIsRetryable() public {
+        MutableTarget target = new MutableTarget();
+        vm.prank(address(exec));
+        dd.setConfig(DirectDemocracyVoting.ConfigKey.TARGET_ALLOWED, abi.encode(address(target), true));
+
+        // Batch calls target.poke(); target starts in "revert" mode.
+        target.setShouldRevert(true);
+        IExecutor.Call[][] memory b = new IExecutor.Call[][](2);
+        b[0] = new IExecutor.Call[](1);
+        b[0][0] = IExecutor.Call({target: address(target), value: 0, data: abi.encodeCall(MutableTarget.poke, ())});
+        b[1] = new IExecutor.Call[](0);
+        vm.prank(creator);
+        dd.createProposal(bytes("Retryable"), bytes32(0), 10, 2, b, new uint256[](0));
+        uint256 id = dd.proposalsCount() - 1;
+
+        uint8[] memory idx = new uint8[](1);
+        idx[0] = 0;
+        uint8[] memory w = new uint8[](1);
+        w[0] = 100;
+        vm.prank(voter);
+        dd.vote(id, idx, w);
+        vm.warp(block.timestamp + 11 minutes);
+
+        // First finalize: execution reverts inside the executor, but announceWinner does NOT revert.
+        vm.expectEmit(true, true, false, false);
+        emit ProposalExecutionFailed(id, 0, "");
+        (uint256 winner, bool valid) = dd.announceWinner(id);
+        assertTrue(valid, "Proposal valid");
+        assertEq(winner, 0, "Option 0 wins");
+        // executed stayed false (no getter exposed): proven by the successful retry below.
+        assertEq(target.pokeCount(), 0, "Target was not poked (call reverted)");
+
+        // Fix the target; the proposal is retryable because executed stayed false.
+        target.setShouldRevert(false);
+        (uint256 winner2, bool valid2) = dd.announceWinner(id);
+        assertTrue(valid2, "Proposal valid on retry");
+        assertEq(winner2, 0, "Option 0 wins on retry");
+        assertEq(target.pokeCount(), 1, "Target poked once on successful retry");
+
+        // Now terminal: a further finalize reverts.
+        vm.expectRevert(VotingErrors.AlreadyExecuted.selector);
+        dd.announceWinner(id);
+    }
+
+    /// @notice L-05: proposalEndTimestamp getter returns the stored end timestamp.
+    function testL05ProposalEndTimestamp() public {
+        uint256 created = block.timestamp;
+        uint256 id = _createSimple(2);
+        assertEq(dd.proposalEndTimestamp(id), created + 10 * 60, "end = created + duration");
+    }
+
+    /// @notice L-05: the lens now returns real values instead of tautologies.
+    function testL05LensActiveAndEndTimestamp() public {
+        DirectDemocracyVotingLens lens = new DirectDemocracyVotingLens();
+        uint256 created = block.timestamp;
+        uint256 id = _createSimple(2);
+
+        assertEq(lens.getProposalEndTimestamp(dd, id), created + 10 * 60, "lens end timestamp");
+        assertTrue(lens.isProposalActive(dd, id), "active while open");
+
+        vm.warp(created + 10 * 60 + 1);
+        assertFalse(lens.isProposalActive(dd, id), "inactive once end passed");
+
+        // Out-of-range id reverts (via the underlying exists modifier), not a silent false.
+        vm.expectRevert(VotingErrors.InvalidProposal.selector);
+        lens.isProposalActive(dd, id + 999);
+    }
+}
+
+/// @dev Toggleable execution target for H-05 retry testing. Reverts while `shouldRevert` is set.
+contract MutableTarget {
+    bool public shouldRevert;
+    uint256 public pokeCount;
+
+    function setShouldRevert(bool v) external {
+        shouldRevert = v;
+    }
+
+    function poke() external {
+        if (shouldRevert) revert("MutableTarget: deliberate revert");
+        pokeCount++;
     }
 }

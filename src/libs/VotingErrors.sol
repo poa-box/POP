@@ -28,4 +28,5 @@ library VotingErrors {
     error InvalidSliceSum();
     error TooManyClasses();
     error AlreadyExecuted();
+    error TooManyPollHats(); // M-14: poll-specific hat count exceeds MAX_POLL_HATS
 }

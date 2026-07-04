@@ -6,6 +6,7 @@ import "forge-std/Test.sol";
 
 /* target */
 import {HybridVoting} from "../src/HybridVoting.sol";
+import {HybridVotingLens} from "../src/lens/HybridVotingLens.sol";
 import {VotingErrors} from "../src/libs/VotingErrors.sol";
 import {HybridVotingProposals} from "../src/libs/HybridVotingProposals.sol";
 import {HybridVotingConfig} from "../src/libs/HybridVotingConfig.sol";
@@ -1619,11 +1620,113 @@ contract MockERC20 is IERC20 {
 
             assertTrue(valid, "Proposal should be valid");
             assertEq(winner, 0, "Option 0 should win");
+        }
 
-            // Cannot re-announce (executed flag is set)
+        /// @notice H-05 (issue #140): a transiently-reverting execution must leave the proposal
+        ///         retryable — the executed flag stays false so finalize can be re-attempted once
+        ///         the revert cause is fixed. (Old buggy behaviour: proposal was permanently
+        ///         bricked because `executed` was set true before the executor call.)
+        function testH05RevertingExecutionIsRetryable() public {
+            // Point the voting contract at a reverting executor.
+            RevertingExecutor revertExec = new RevertingExecutor();
+            vm.prank(address(exec));
+            hv.setConfig(HybridVoting.ConfigKey.EXECUTOR, abi.encode(address(revertExec)));
+
+            uint256 id = _create();
+            _voteYES(alice);
+            _voteYES(carol);
+            vm.warp(block.timestamp + 16 minutes);
+
+            // First finalize: execution reverts, ProposalExecutionFailed is emitted, no revert.
+            vm.expectEmit(true, true, false, false);
+            emit ProposalExecutionFailed(id, 0, "");
+            vm.prank(alice);
+            (uint256 winner, bool valid) = hv.announceWinner(id);
+            assertTrue(valid, "Proposal should be valid");
+            assertEq(winner, 0, "Option 0 should win");
+
+            // The proposal is NOT bricked: it can be re-finalized because executed stayed false.
+            // Repair the executor (swap back to the working MockExecutor) and retry.
+            vm.prank(address(revertExec));
+            hv.setConfig(HybridVoting.ConfigKey.EXECUTOR, abi.encode(address(exec)));
+
+            // Retry: this time execution succeeds and ProposalExecuted fires.
+            vm.prank(alice);
+            (uint256 winner2, bool valid2) = hv.announceWinner(id);
+            assertTrue(valid2, "Proposal still valid on retry");
+            assertEq(winner2, 0, "Option 0 still wins on retry");
+            assertEq(exec.lastId(), id, "Working executor received the retried batch");
+
+            // Now that execution actually succeeded, executed==true: a third finalize reverts.
             vm.expectRevert(VotingErrors.AlreadyExecuted.selector);
             vm.prank(alice);
             hv.announceWinner(id);
+        }
+
+        /// @notice M-14: creating a proposal with more than MAX_POLL_HATS poll hats reverts.
+        function testM14PollHatsCapEnforced() public {
+            uint256 max = hv.MAX_POLL_HATS();
+
+            // Exactly MAX_POLL_HATS is allowed.
+            uint256[] memory okHats = new uint256[](max);
+            for (uint256 i; i < max; ++i) {
+                okHats[i] = i + 1;
+            }
+            _createHatPoll(2, okHats);
+
+            // MAX_POLL_HATS + 1 reverts with TooManyPollHats.
+            uint256[] memory tooMany = new uint256[](max + 1);
+            for (uint256 i; i < max + 1; ++i) {
+                tooMany[i] = i + 1;
+            }
+            IExecutor.Call[][] memory batches = new IExecutor.Call[][](0);
+            vm.prank(alice);
+            vm.expectRevert(VotingErrors.TooManyPollHats.selector);
+            hv.createProposal(bytes("Too Many Hats"), bytes32(0), 15, 2, batches, tooMany);
+        }
+
+        /// @notice L-02: a winning batch that targets the voting contract itself reverts.
+        function testL02SelfTargetBatchRejectedAtCreation() public {
+            vm.startPrank(alice);
+            IExecutor.Call[][] memory batches = new IExecutor.Call[][](2);
+            batches[0] = new IExecutor.Call[](1);
+            batches[1] = new IExecutor.Call[](1);
+            batches[0][0] = IExecutor.Call({target: address(hv), value: 0, data: ""});
+            batches[1][0] = IExecutor.Call({target: address(0xCA11), value: 0, data: ""});
+            uint256[] memory hatIds = new uint256[](0);
+            vm.expectRevert(VotingErrors.TargetSelf.selector);
+            hv.createProposal(bytes("Self Target"), bytes32(0), 15, 2, batches, hatIds);
+            vm.stopPrank();
+        }
+
+        /// @notice L-04: MIN_DURATION facade constant matches the enforced library floor (10).
+        function testL04MinDurationReconciled() public {
+            assertEq(hv.MIN_DURATION(), 10, "facade MIN_DURATION must be the enforced floor");
+            // A duration below the floor reverts.
+            vm.startPrank(alice);
+            IExecutor.Call[][] memory batches = new IExecutor.Call[][](0);
+            uint256[] memory hatIds = new uint256[](0);
+            vm.expectRevert(VotingErrors.DurationOutOfRange.selector);
+            hv.createProposal(bytes("Too Short"), bytes32(0), 9, 2, batches, hatIds);
+            vm.stopPrank();
+        }
+
+        /// @notice L-05: the lens returns real end timestamps / active flags (previously dead
+        ///         getters returning 0 / a tautology).
+        function testL05LensActiveAndEndTimestamp() public {
+            HybridVotingLens lens = new HybridVotingLens();
+            uint256 created = block.timestamp;
+            uint256 id = _create(); // 15-minute proposal
+
+            assertEq(lens.getProposalEndTimestamp(hv, id), created + 15 * 60, "lens end timestamp");
+            assertTrue(lens.isProposalActive(hv, id), "active while open");
+
+            vm.warp(created + 15 * 60 + 1);
+            assertFalse(lens.isProposalActive(hv, id), "inactive once end passed");
+
+            // Out-of-range id reverts (via exists), not a silent tautology.
+            vm.expectRevert(VotingErrors.InvalidProposal.selector);
+            lens.isProposalActive(hv, id + 999);
         }
     }
 

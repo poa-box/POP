@@ -18,8 +18,14 @@ contract HybridVoting is Initializable {
     uint8 public constant MAX_OPTIONS = 50;
     uint8 public constant MAX_CALLS = 20;
     uint8 public constant MAX_CLASSES = 8;
+    // M-14: mirror of HybridVotingProposals.MAX_POLL_HATS — the enforced cap lives in the lib
+    // (_initProposal), this facade copy makes the bound discoverable via the public ABI. Keep
+    // the two in sync.
+    uint16 public constant MAX_POLL_HATS = 100;
     uint32 public constant MAX_DURATION = 43_200; /* 30 days */
-    uint32 public constant MIN_DURATION = 1; /* 1 min for testing */
+    // L-04: reconciled to match the value ENFORCED in HybridVotingProposals._validateDuration
+    // (the facade constant is informational only; enforcement lives in the lib). Both are now 10.
+    uint32 public constant MIN_DURATION = 10; /* 10 min floor */
 
     /* ─────── Data Structures ─────── */
 
@@ -314,6 +320,13 @@ contract HybridVoting is Initializable {
 
     function pollRestricted(uint256 id) external view exists(id) returns (bool) {
         return _layout()._proposals[id].restricted;
+    }
+
+    /// @notice Unix timestamp at which voting on proposal `id` closes.
+    /// @dev L-05: real end-timestamp getter that backs HybridVotingLens (previously the lens
+    ///      returned 0 / a tautology because this value was not exposed).
+    function proposalEndTimestamp(uint256 id) external view exists(id) returns (uint64) {
+        return _layout()._proposals[id].endTimestamp;
     }
 
     function pollHatAllowed(uint256 id, uint256 hat) external view exists(id) returns (bool) {

@@ -14,6 +14,9 @@ library HybridVotingProposals {
     uint8 public constant MAX_CALLS = 20;
     uint32 public constant MAX_DURATION = 43_200;
     uint32 public constant MIN_DURATION = 10;
+    // M-14: cap poll-specific hats — HybridVotingCore.vote() scans p.pollHatIds linearly for
+    // restricted polls, so an unbounded array makes every vote() call a gas-griefing target.
+    uint16 public constant MAX_POLL_HATS = 100;
 
     event NewProposal(uint256 id, bytes title, bytes32 descriptionHash, uint8 numOptions, uint64 endTs, uint64 created);
     event NewHatProposal(
@@ -111,6 +114,7 @@ library HybridVotingProposals {
 
         if (hatIds.length > 0) {
             uint256 len = hatIds.length;
+            if (len > MAX_POLL_HATS) revert VotingErrors.TooManyPollHats(); // M-14
             for (uint256 i; i < len;) {
                 p.pollHatIds.push(hatIds[i]);
                 p.pollHatAllowed[hatIds[i]] = true;
@@ -129,9 +133,20 @@ library HybridVotingProposals {
         }
     }
 
-    function _validateTargets(IExecutor.Call[] calldata batch) internal pure {
+    function _validateTargets(IExecutor.Call[] calldata batch) internal view {
         uint256 batchLen = batch.length;
         if (batchLen > MAX_CALLS) revert VotingErrors.TooManyCalls();
+        // L-02: reject any batch call that targets the voting contract itself. HybridVoting has
+        // no target allow-list (batches go straight to the Executor), so this self-guard is the
+        // only barrier stopping a proposal from re-entering setConfig/setClasses/pause via the
+        // executor and bypassing the onlyExecutor authority boundary. address(this) resolves to
+        // the HybridVoting proxy because this library runs under the proxy's delegatecall context.
+        for (uint256 j; j < batchLen;) {
+            if (batch[j].target == address(this)) revert VotingErrors.TargetSelf();
+            unchecked {
+                ++j;
+            }
+        }
     }
 
     function _snapshotClasses(HybridVoting.Proposal storage p, HybridVoting.Layout storage l) internal {
