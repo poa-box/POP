@@ -266,10 +266,9 @@ contract DirectDemocracyVoting is Initializable {
         uint256 batchLen = batch.length;
         if (batchLen > MAX_CALLS) revert VotingErrors.TooManyCalls();
         for (uint256 j; j < batchLen;) {
-            // L-02: a proposal batch must never call the voting contract itself — that would let
-            // governance re-enter setConfig/pause/etc. through the executor, bypassing the
-            // onlyExecutor gate's intended authority boundary.
-            if (batch[j].target == address(this)) revert VotingErrors.TargetSelf();
+            // No self-target guard: changing DDV's own onlyExecutor config via a proposal is the
+            // intended governance path. Self-targeting still requires the org to explicitly
+            // allow-list address(this) below, so it stays an opt-in, deliberate action.
             if (!l.allowedTarget[batch[j].target]) revert VotingErrors.TargetNotAllowed();
             unchecked {
                 ++j;
@@ -445,7 +444,8 @@ contract DirectDemocracyVoting is Initializable {
         if (valid && batch.length > 0) {
             uint256 len = batch.length;
             for (uint256 i; i < len;) {
-                if (batch[i].target == address(this)) revert VotingErrors.TargetSelf(); // L-02
+                // No self-target guard (see _validateTargets) — self-amendment is intended and
+                // still gated by the allowedTarget allow-list below.
                 if (!l.allowedTarget[batch[i].target]) revert VotingErrors.TargetNotAllowed();
                 unchecked {
                     ++i;

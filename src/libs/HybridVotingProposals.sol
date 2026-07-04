@@ -133,20 +133,15 @@ library HybridVotingProposals {
         }
     }
 
-    function _validateTargets(IExecutor.Call[] calldata batch) internal view {
-        uint256 batchLen = batch.length;
-        if (batchLen > MAX_CALLS) revert VotingErrors.TooManyCalls();
-        // L-02: reject any batch call that targets the voting contract itself. HybridVoting has
-        // no target allow-list (batches go straight to the Executor), so this self-guard is the
-        // only barrier stopping a proposal from re-entering setConfig/setClasses/pause via the
-        // executor and bypassing the onlyExecutor authority boundary. address(this) resolves to
-        // the HybridVoting proxy because this library runs under the proxy's delegatecall context.
-        for (uint256 j; j < batchLen;) {
-            if (batch[j].target == address(this)) revert VotingErrors.TargetSelf();
-            unchecked {
-                ++j;
-            }
-        }
+    function _validateTargets(IExecutor.Call[] calldata batch) internal pure {
+        // NOTE: intentionally no self-target guard. Governance self-amendment is a core feature —
+        // setConfig/setClasses/pause/setExecutor are onlyExecutor, so the ONLY way to change
+        // HybridVoting's own config is a passed proposal whose batch targets this contract and is
+        // executed by the Executor. An earlier L-02 change added a `target == address(this)` revert
+        // here; it silently disabled self-amendment and was reverted. Reentrancy during execution
+        // is guarded by the `executed` in-flight lock in HybridVotingCore, not by restricting
+        // targets. HybridVoting deliberately has no target allow-list (see #74).
+        if (batch.length > MAX_CALLS) revert VotingErrors.TooManyCalls();
     }
 
     function _snapshotClasses(HybridVoting.Proposal storage p, HybridVoting.Layout storage l) internal {

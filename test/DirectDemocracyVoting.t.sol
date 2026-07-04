@@ -792,18 +792,31 @@ contract DDVotingTest is Test {
         dd.createProposal(bytes("Too Many Hats"), bytes32(0), 10, 2, new IExecutor.Call[][](0), tooMany);
     }
 
-    /// @notice L-02: a batch that targets the voting contract itself is rejected at creation.
-    function testL02SelfTargetBatchRejectedAtCreation() public {
-        // Allow address(dd) as a target so we get past the TargetNotAllowed check and hit TargetSelf.
+    /// @notice L-02 (reverted): DDV self-amendment is supported — once the org allow-lists
+    ///         address(dd), a proposal targeting DDV itself (to change its own onlyExecutor
+    ///         config via the executor) is accepted. The allow-list keeps self-targeting a
+    ///         deliberate opt-in; there is no blanket self-target ban.
+    function testSelfTargetBatchAllowedWhenAllowlisted() public {
+        // Governance opts in by allow-listing address(dd) as a valid target.
         vm.prank(address(exec));
         dd.setConfig(DirectDemocracyVoting.ConfigKey.TARGET_ALLOWED, abi.encode(address(dd), true));
 
         IExecutor.Call[][] memory b = new IExecutor.Call[][](1);
         b[0] = new IExecutor.Call[](1);
+        b[0][0] = IExecutor.Call({target: address(dd), value: 0, data: abi.encodeWithSignature("pause()")});
+        vm.prank(creator);
+        // No revert: self-targeting is allowed now that address(dd) is allow-listed.
+        dd.createProposal(bytes("Self Amend"), bytes32(0), 10, 1, b, new uint256[](0));
+    }
+
+    /// @notice A non-allow-listed target (including self when NOT allow-listed) still reverts.
+    function testSelfTargetStillNeedsAllowlist() public {
+        IExecutor.Call[][] memory b = new IExecutor.Call[][](1);
+        b[0] = new IExecutor.Call[](1);
         b[0][0] = IExecutor.Call({target: address(dd), value: 0, data: ""});
         vm.prank(creator);
-        vm.expectRevert(VotingErrors.TargetSelf.selector);
-        dd.createProposal(bytes("Self Target"), bytes32(0), 10, 1, b, new uint256[](0));
+        vm.expectRevert(VotingErrors.TargetNotAllowed.selector);
+        dd.createProposal(bytes("Self No Allowlist"), bytes32(0), 10, 1, b, new uint256[](0));
     }
 
     /// @notice H-05 (issue #140): a transiently-reverting execution leaves the proposal retryable

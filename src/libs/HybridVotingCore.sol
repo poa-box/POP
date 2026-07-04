@@ -235,15 +235,9 @@ library HybridVotingCore {
         IExecutor.Call[] storage batch = p.batches[winner];
         bool didExecute = false;
         if (valid && batch.length > 0) {
-            // L-02: defense-in-depth — never let the winning batch call the voting contract
-            // itself (address(this) is the HybridVoting proxy under delegatecall).
-            uint256 blen = batch.length;
-            for (uint256 j; j < blen;) {
-                if (batch[j].target == address(this)) revert VotingErrors.TargetSelf();
-                unchecked {
-                    ++j;
-                }
-            }
+            // No self-target guard: a winning batch MAY target this HybridVoting proxy to change
+            // its own onlyExecutor config (governance self-amendment — the intended mechanism).
+            // Reentrancy is already prevented by the `executed` in-flight lock set above.
             try l.executor.execute(id, batch) {
                 didExecute = true;
                 emit ProposalExecuted(id, winner, batch.length);

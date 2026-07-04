@@ -18,6 +18,7 @@ import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {UniversalAccountRegistry} from "../../src/UniversalAccountRegistry.sol";
 import {RoleConfigStructs} from "../../src/libs/RoleConfigStructs.sol";
 import {ParticipationToken} from "../../src/ParticipationToken.sol";
+import {QuickJoin} from "../../src/QuickJoin.sol";
 import {PoaManagerHub} from "../../src/crosschain/PoaManagerHub.sol";
 import {PoaManager} from "../../src/PoaManager.sol";
 import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.sol";
@@ -41,8 +42,9 @@ import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol"
  *          then RESETS it to false in the catch branch. Event shapes unchanged.
  *   H-06 (comment-only) — prominent flash-loan / soulbound-asset invariant warning in
  *          HybridVotingCore's ERC20_BAL branch AND GovernanceFactory._updateClassesWithTokenAndHats.
- *   L-02 — TargetSelf guard: a winning/queued batch may never target the voting contract
- *          itself (both voting contracts, at creation AND execution time).
+ *   L-02 — (reverted) The audit-suggested TargetSelf guard was removed: it disabled governance
+ *          self-amendment (proposals that change the voting contract's own onlyExecutor config),
+ *          which is the intended mechanism. Reentrancy is handled by the executed in-flight lock.
  *   L-03 — HybridVotingCore replaces the "Class raw overflow" require-string with
  *          VotingErrors.Overflow().
  *   L-04 — HybridVoting.MIN_DURATION reconciled 1 -> 10 to match the enforced library floor
@@ -136,6 +138,7 @@ string constant DDV_VERSION = "v11";
 string constant DEPLOYER_VERSION = "v16";
 string constant EXECUTOR_VERSION = "v4";
 string constant TOKEN_VERSION = "v5";
+string constant QUICKJOIN_VERSION = "v6"; // WS-D: current-src OrgDeployer step-9b needs QuickJoin.setClaimableHatIds
 
 /// @dev Satellite.upgradeBeaconDirect forwards to PoaManager.upgradeBeacon (onlyOwner=Satellite)
 ///      with the Satellite as msg.sender — the destination-chain emergency upgrade. adminCall is
@@ -585,14 +588,17 @@ contract SimGnosis is GovernanceUpgradeSimBase {
     }
 
     function _bootstrapFreshStack() internal returns (OrgDeployer deployer, OrgRegistry orgRegistry, address uar) {
-        // Precondition (WS-A dependency): flip the ParticipationToken (v5), Executor (v4) and
-        // OrgDeployer (v16) beacons so the fresh current-src stack is internally consistent —
-        // v16.deployFullOrg's step-8 wiring calls Executor.configureParticipationToken (v4), which
-        // drives ParticipationToken.setTaskManager (v5), and deployModules must match v16's ABI.
-        // In a real broadcast WS-A flips these first; here we reproduce it on the fork.
+        // Precondition (WS-A + WS-D + seed dependency): flip the ParticipationToken (v5),
+        // Executor (v4), OrgDeployer (v16) and QuickJoin (v6) beacons so the fresh current-src
+        // stack is internally consistent. deployFullOrg's step-8 wiring calls
+        // Executor.configureParticipationToken -> ParticipationToken.setTaskManager, and the
+        // current-src OrgDeployer's step-9b seeds QuickJoin's claimable allowlist via
+        // Executor.configureQuickJoinClaimable -> QuickJoin.setClaimableHatIds (needs QuickJoin v6).
+        // In a real broadcast these WS-A/WS-D/seed beacons flip first; here we reproduce it on the fork.
         DeterministicDeployer ddc = DeterministicDeployer(DD);
         _deployAndUpgrade(ddc, "ParticipationToken", TOKEN_VERSION, type(ParticipationToken).creationCode);
         _deployAndUpgrade(ddc, "Executor", EXECUTOR_VERSION, type(Executor).creationCode);
+        _deployAndUpgrade(ddc, "QuickJoin", QUICKJOIN_VERSION, type(QuickJoin).creationCode);
         _deployAndUpgrade(ddc, "OrgDeployer", DEPLOYER_VERSION, type(OrgDeployer).creationCode);
 
         GovernanceFactory gov = new GovernanceFactory();

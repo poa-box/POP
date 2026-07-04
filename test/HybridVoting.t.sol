@@ -1685,17 +1685,20 @@ contract MockERC20 is IERC20 {
             hv.createProposal(bytes("Too Many Hats"), bytes32(0), 15, 2, batches, tooMany);
         }
 
-        /// @notice L-02: a winning batch that targets the voting contract itself reverts.
-        function testL02SelfTargetBatchRejectedAtCreation() public {
+        /// @notice L-02 (reverted): governance self-amendment is a supported feature — a proposal
+        ///         whose batch targets the voting contract itself (to change its own onlyExecutor
+        ///         config via the executor) MUST be accepted at creation. HybridVoting has no
+        ///         target allow-list (#74), so any target including self is valid.
+        function testSelfTargetBatchAllowedAtCreation() public {
             vm.startPrank(alice);
             IExecutor.Call[][] memory batches = new IExecutor.Call[][](2);
             batches[0] = new IExecutor.Call[](1);
             batches[1] = new IExecutor.Call[](1);
-            batches[0][0] = IExecutor.Call({target: address(hv), value: 0, data: ""});
+            batches[0][0] = IExecutor.Call({target: address(hv), value: 0, data: abi.encodeWithSignature("pause()")});
             batches[1][0] = IExecutor.Call({target: address(0xCA11), value: 0, data: ""});
             uint256[] memory hatIds = new uint256[](0);
-            vm.expectRevert(VotingErrors.TargetSelf.selector);
-            hv.createProposal(bytes("Self Target"), bytes32(0), 15, 2, batches, hatIds);
+            // No revert: self-targeting config-change proposals are the governance mechanism.
+            hv.createProposal(bytes("Self Amend"), bytes32(0), 15, 2, batches, hatIds);
             vm.stopPrank();
         }
 

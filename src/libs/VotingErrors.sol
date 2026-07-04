@@ -18,7 +18,6 @@ library VotingErrors {
     error InvalidWeight();
     error DuplicateIndex();
     error TargetNotAllowed();
-    error TargetSelf();
     error EmptyBatch();
     error InvalidThreshold();
     error InvalidQuorum();
