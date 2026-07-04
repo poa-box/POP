@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {OwnableUpgradeable} from "lib/openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {CashOutRelay, IEscrowV2Minimal} from "../src/cashout/CashOutRelay.sol";
 
 /// @dev Mock EscrowV2 that records depositTo calls
@@ -143,6 +144,10 @@ contract CashOutRelayTest is Test {
             CashOutRelay.initialize.selector, address(escrow), address(usdc), address(mockTransmitter), OWNER
         );
         relay = CashOutRelay(payable(address(new ERC1967Proxy(address(impl), initData))));
+
+        // H-01: register the trusted Bungee executor that is allowed to call executeData.
+        vm.prank(OWNER);
+        relay.setBungeeExecutor(BUNGEE);
 
         // Tell mock transmitter where the relay is (so it mints USDC there)
         mockTransmitter.setRelay(address(relay));
@@ -433,9 +438,10 @@ contract CashOutRelayTest is Test {
     function testAdmin_NonOwnerCannotEmergencyRecover() public {
         usdc.mint(address(relay), 100e6);
 
-        vm.prank(address(0xA77AC6));
-        vm.expectRevert(CashOutRelay.NotOwner.selector);
-        relay.emergencyRecover(address(usdc), address(0xA77AC6), 100e6);
+        address attacker = address(0xA77AC6);
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, attacker));
+        relay.emergencyRecover(address(usdc), attacker, 100e6);
     }
 
     function testAdmin_NonOwnerCannotUpgrade() public {
@@ -491,8 +497,10 @@ contract CashOutRelayTest is Test {
         tokens[0] = address(usdc);
 
         vm.prank(attacker);
-        // Should revert — available USDC (balance - totalFailedAmount) is 0
-        vm.expectRevert(abi.encodeWithSelector(CashOutRelay.InsufficientDelivery.selector, amount, 0));
+        // H-01: executeData is now gated to the trusted Bungee executor, so an unauthorized
+        // caller is rejected before the balance check even runs — defense in depth over the
+        // prior `available == 0` guard (which alone protected only already-reserved funds).
+        vm.expectRevert(CashOutRelay.NotAuthorizedExecutor.selector);
         relay.executeData(keccak256("req_attack"), amounts, tokens, _encodeCashOutParams(attacker, amount));
 
         // User's recovery is still intact
@@ -518,7 +526,7 @@ contract CashOutRelayTest is Test {
 
         // Owner tries to drain held funds — should fail
         vm.prank(OWNER);
-        vm.expectRevert("would drain recovery funds");
+        vm.expectRevert(CashOutRelay.WouldDrainRecoveryFunds.selector);
         relay.emergencyRecover(address(usdc), OWNER, 1);
 
         // User can still recover
@@ -555,7 +563,7 @@ contract CashOutRelayTest is Test {
         });
 
         vm.prank(address(0xBAD1));
-        vm.expectRevert("only self");
+        vm.expectRevert(CashOutRelay.OnlySelf.selector);
         relay.createZkp2pDeposit(params, 50e6);
     }
 
@@ -646,9 +654,10 @@ contract CashOutRelayTest is Test {
     function testETH_NonOwnerCannotWithdraw() public {
         vm.deal(address(relay), 0.01 ether);
 
-        vm.prank(address(0xA77AC6));
-        vm.expectRevert(CashOutRelay.NotOwner.selector);
-        relay.withdrawETH(address(0xA77AC6));
+        address attacker = address(0xA77AC6);
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, attacker));
+        relay.withdrawETH(attacker);
     }
 
     /*═══════════════════════ CCTP completeCashOut TESTS ═══════════════════════*/
@@ -697,8 +706,9 @@ contract CashOutRelayTest is Test {
             maxIntentAmount: 10e6
         });
 
-        vm.prank(address(0xBAD1));
-        vm.expectRevert(CashOutRelay.NotOwner.selector);
+        address attacker = address(0xBAD1);
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, attacker));
         relay.completeCashOut(message, hex"CAFE", params);
     }
 
@@ -801,5 +811,250 @@ contract CashOutRelayTest is Test {
         assertEq(escrow.depositCount(), 1, "CCTP deposit created");
         assertEq(relay.totalFailedAmount(), 50e6, "Bungee failed amount unchanged");
         assertEq(relay.failedDepositor(keccak256("bungee_fail")), address(0xBEEF), "Bungee recovery intact");
+    }
+
+    /*═══════════════════════ H-01: executeData ACCESS CONTROL ═══════════════════════*/
+
+    /// @notice H-01: an arbitrary caller (not the trusted Bungee executor, not the owner)
+    ///         cannot call executeData and redirect freshly-bridged USDC.
+    function testH01_AttackerCannotCallExecuteData() public {
+        uint256 amount = 50e6;
+        _mintAndDeliver(amount); // fresh, not-yet-assigned USDC sits in the relay
+
+        address attacker = address(0xA77AC6);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = amount;
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(usdc);
+
+        // Attacker tries to mint the deposit to themselves — rejected by the executor gate.
+        vm.prank(attacker);
+        vm.expectRevert(CashOutRelay.NotAuthorizedExecutor.selector);
+        relay.executeData(keccak256("req_attack"), amounts, tokens, _encodeCashOutParams(attacker, amount));
+
+        // Funds untouched, no deposit created.
+        assertEq(escrow.depositCount(), 0, "No deposit created by attacker");
+        assertEq(usdc.balanceOf(address(relay)), amount, "USDC still held");
+    }
+
+    /// @notice H-01: the trusted Bungee executor can call executeData (happy path).
+    function testH01_BungeeExecutorCanCallExecuteData() public {
+        uint256 amount = 50e6;
+        _mintAndDeliver(amount);
+
+        // BUNGEE is the registered executor (set in setUp).
+        _callExecuteData(keccak256("req_bungee"), amount, _encodeCashOutParams(USER, amount));
+
+        assertEq(escrow.depositCount(), 1, "Deposit created by bungee executor");
+        (address depositor,,,,,) = escrow.deposits(0);
+        assertEq(depositor, USER, "Deposit owned by intended user");
+    }
+
+    /// @notice H-01: the owner is also authorized to call executeData (operational fallback).
+    function testH01_OwnerCanCallExecuteData() public {
+        uint256 amount = 50e6;
+        _mintAndDeliver(amount);
+
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = amount;
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(usdc);
+
+        vm.prank(OWNER);
+        relay.executeData(keccak256("req_owner"), amounts, tokens, _encodeCashOutParams(USER, amount));
+
+        assertEq(escrow.depositCount(), 1, "Owner can drive executeData");
+    }
+
+    /// @notice H-01: setBungeeExecutor is owner-gated and rejects the zero address.
+    function testH01_SetBungeeExecutorAuth() public {
+        address newExec = address(0xB00B00);
+
+        // Non-owner cannot set.
+        address attacker = address(0xA77AC6);
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, attacker));
+        relay.setBungeeExecutor(newExec);
+
+        // Zero address rejected.
+        vm.prank(OWNER);
+        vm.expectRevert(CashOutRelay.ZeroAddress.selector);
+        relay.setBungeeExecutor(address(0));
+
+        // Owner can rotate, event fires, old executor loses access.
+        vm.expectEmit(true, true, false, true);
+        emit CashOutRelay.BungeeExecutorSet(BUNGEE, newExec);
+        vm.prank(OWNER);
+        relay.setBungeeExecutor(newExec);
+        assertEq(relay.bungeeExecutor(), newExec, "Executor rotated");
+
+        // Old executor is now unauthorized.
+        _mintAndDeliver(10e6);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 10e6;
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(usdc);
+        vm.prank(BUNGEE);
+        vm.expectRevert(CashOutRelay.NotAuthorizedExecutor.selector);
+        relay.executeData(keccak256("stale"), amounts, tokens, _encodeCashOutParams(USER, 10e6));
+    }
+
+    /*═══════════════════════ L-47: AMOUNT RECONCILIATION ═══════════════════════*/
+
+    /// @notice L-47: when the bridge over-delivers, executeData deposits the FULL freshly
+    ///         delivered balance (not just the claimed amounts[0]), so no surplus is left
+    ///         untracked/drainable.
+    function testL47_OverDeliveryReconciledToActualBalance() public {
+        uint256 claimed = 50e6; // what Bungee reports in amounts[0]
+        uint256 delivered = 52e6; // what actually landed (surplus buffer)
+        _mintAndDeliver(delivered);
+
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = claimed;
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(usdc);
+
+        vm.prank(BUNGEE);
+        relay.executeData(keccak256("over"), amounts, tokens, _encodeCashOutParams(USER, claimed));
+
+        // Deposit funded with the actual delivered balance, not the claimed amount.
+        (, uint256 depAmount,,, uint256 minIntent, uint256 maxIntent) = escrow.deposits(0);
+        assertEq(depAmount, delivered, "Deposit uses actual delivered balance");
+        assertEq(minIntent, delivered, "Intent range pinned to delivered");
+        assertEq(maxIntent, delivered, "Intent range pinned to delivered");
+        // No surplus stranded in the relay.
+        assertEq(usdc.balanceOf(address(relay)), 0, "No untracked surplus left behind");
+    }
+
+    /// @notice L-47: reconciliation only touches FRESH funds — held recovery funds are
+    ///         excluded from the deposited amount even when they inflate the raw balance.
+    function testL47_ReconciliationExcludesHeldRecoveryFunds() public {
+        // Seed a held failed deposit (30 USDC reserved for recovery).
+        _mintAndDeliver(30e6);
+        escrow.setRevert(true, "paused");
+        _callExecuteData(keccak256("held"), 30e6, _encodeCashOutParams(address(0xBEEF), 30e6));
+        assertEq(relay.totalFailedAmount(), 30e6);
+
+        // Now a fresh delivery of 50 arrives; escrow works again.
+        escrow.setRevert(false, "");
+        _mintAndDeliver(50e6); // relay balance now 80, but only 50 is fresh
+
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 50e6;
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(usdc);
+        vm.prank(BUNGEE);
+        relay.executeData(keccak256("fresh"), amounts, tokens, _encodeCashOutParams(USER, 50e6));
+
+        // Only the fresh 50 was deposited; the 30 held for recovery is untouched.
+        (, uint256 depAmount,,,,) = escrow.deposits(0);
+        assertEq(depAmount, 50e6, "Only fresh funds deposited");
+        assertEq(relay.totalFailedAmount(), 30e6, "Held recovery funds preserved");
+        assertEq(usdc.balanceOf(address(relay)), 30e6, "Relay still holds recovery funds");
+    }
+
+    /*═══════════════════════ M-16: NONCE-BASED requestHash ═══════════════════════*/
+
+    /// @notice M-16: two identical createDepositFromBalance calls (same depositor, same block)
+    ///         produce DISTINCT requestHashes thanks to the monotonic nonce — the old
+    ///         keccak256(depositor, block.timestamp) preimage would have collided.
+    function testM16_NonceMonotonicity_DistinctRequestHashes() public {
+        escrow.setRevert(true, "paused"); // force the failure path so requestHash is recorded
+
+        // First delivery + deposit-from-balance (nonce 0).
+        _mintAndDeliver(20e6);
+        vm.prank(OWNER);
+        relay.createDepositFromBalance(_decodeParams(USER));
+        bytes32 hash0 = keccak256(abi.encode(address(relay), USER, uint256(0)));
+        assertEq(relay.failedDepositor(hash0), USER, "First failure recorded under nonce-0 hash");
+        assertEq(relay.depositNonce(), 1, "Nonce incremented to 1");
+
+        // Second identical call in the SAME block, same depositor (nonce 1).
+        _mintAndDeliver(20e6);
+        vm.prank(OWNER);
+        relay.createDepositFromBalance(_decodeParams(USER));
+        bytes32 hash1 = keccak256(abi.encode(address(relay), USER, uint256(1)));
+
+        assertTrue(hash0 != hash1, "Identical deposits yield distinct requestHashes");
+        assertEq(relay.failedDepositor(hash1), USER, "Second failure recorded under nonce-1 hash");
+        assertEq(relay.failedAmount(hash1), 20e6, "Second failure amount recorded");
+        assertEq(relay.depositNonce(), 2, "Nonce incremented to 2");
+        assertEq(relay.totalFailedAmount(), 40e6, "Both failures tracked - no collision revert");
+    }
+
+    /// @notice M-16: nonce advances on the SUCCESS path too, so a later failure can't collide
+    ///         with a prior success's hash.
+    function testM16_NonceAdvancesOnSuccess() public {
+        _mintAndDeliver(20e6);
+        vm.prank(OWNER);
+        relay.createDepositFromBalance(_decodeParams(USER));
+        assertEq(escrow.depositCount(), 1, "Success path ran");
+        assertEq(relay.depositNonce(), 1, "Nonce advanced on success");
+    }
+
+    function _decodeParams(address depositor) internal pure returns (CashOutRelay.CashOutParams memory) {
+        return CashOutRelay.CashOutParams({
+            depositor: depositor,
+            paymentMethod: VENMO_METHOD,
+            payeeDetailsHash: PAYEE_HASH,
+            fiatCurrency: USD_CURRENCY,
+            conversionRate: CONVERSION_RATE,
+            minIntentAmount: 1e6,
+            maxIntentAmount: 20e6
+        });
+    }
+
+    /*═══════════════════════ L-46: 2-STEP OWNERSHIP ═══════════════════════*/
+
+    /// @notice L-46: ownership uses Ownable2Step — transfer requires the new owner to accept,
+    ///         so a fat-fingered transfer to a wrong/dead address does not brick the contract.
+    function testL46_TwoStepOwnershipHandover() public {
+        address newOwner = address(0x0E0E);
+
+        // Step 1: current owner proposes. Ownership does NOT change yet.
+        vm.prank(OWNER);
+        relay.transferOwnership(newOwner);
+        assertEq(relay.owner(), OWNER, "Owner unchanged until accepted");
+        assertEq(relay.pendingOwner(), newOwner, "Pending owner set");
+
+        // Old owner still fully in control mid-handover.
+        vm.prank(OWNER);
+        relay.setBungeeExecutor(address(0xBEEF));
+        assertEq(relay.bungeeExecutor(), address(0xBEEF), "Old owner still acts pre-acceptance");
+
+        // A random address cannot accept.
+        vm.prank(address(0xBAD));
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, address(0xBAD)));
+        relay.acceptOwnership();
+
+        // Step 2: pending owner accepts → ownership transfers.
+        vm.prank(newOwner);
+        relay.acceptOwnership();
+        assertEq(relay.owner(), newOwner, "New owner active after acceptance");
+        assertEq(relay.pendingOwner(), address(0), "Pending owner cleared");
+
+        // Old owner is now powerless.
+        vm.prank(OWNER);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, OWNER));
+        relay.setBungeeExecutor(address(0xCAFE));
+
+        // New owner can act.
+        vm.prank(newOwner);
+        relay.setBungeeExecutor(address(0xCAFE));
+        assertEq(relay.bungeeExecutor(), address(0xCAFE), "New owner in control");
+    }
+
+    /// @notice L-46: only the owner can authorize a UUPS upgrade (now via Ownable).
+    function testL46_OnlyOwnerCanUpgrade() public {
+        CashOutRelay newImpl = new CashOutRelay();
+
+        address attacker = address(0xA77AC6);
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, attacker));
+        relay.upgradeToAndCall(address(newImpl), "");
+
+        vm.prank(OWNER);
+        relay.upgradeToAndCall(address(newImpl), "");
+        assertEq(relay.escrow(), address(escrow), "Config preserved after upgrade");
     }
 }
