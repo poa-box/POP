@@ -4867,8 +4867,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         ParticipationToken token = ParticipationToken(result.participationToken);
         assertEq(token.educationHub(), address(0), "EducationHub should initially be address(0)");
 
-        // Set EducationHub later (first setter can set it)
+        // Set EducationHub later via the executor (C-01 fix: setEducationHub is executor-only).
         address newEducationHub = address(0x456);
+        vm.prank(result.executor);
         token.setEducationHub(newEducationHub);
 
         assertEq(token.educationHub(), newEducationHub, "EducationHub should be set to new address");
@@ -5818,6 +5819,28 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // Check EducationHub completeModule is whitelisted
         rule = paymasterHub.getRule(orgId, result.educationHub, bytes4(keccak256("completeModule(uint256,uint8)")));
         assertTrue(rule.allowed, "EducationHub completeModule should be whitelisted");
+
+        // L-53 fix: updateOrgMetaAsAdmin lives on the OrgRegistry, NOT the
+        // UniversalAccountRegistry (account registry). The default rule must target
+        // the OrgRegistry so gasless org-metadata edits actually resolve to a
+        // contract that implements the selector.
+        bytes4 updateOrgMetaSel = bytes4(keccak256("updateOrgMetaAsAdmin(bytes32,bytes,bytes32)"));
+
+        rule = paymasterHub.getRule(orgId, address(orgRegistry), updateOrgMetaSel);
+        assertTrue(rule.allowed, "updateOrgMetaAsAdmin must be whitelisted against the OrgRegistry (L-53)");
+
+        // And it must NOT be whitelisted against the UniversalAccountRegistry (the old target).
+        rule = paymasterHub.getRule(orgId, accountRegProxy, updateOrgMetaSel);
+        assertFalse(rule.allowed, "updateOrgMetaAsAdmin must NOT target the UniversalAccountRegistry (old L-53 bug)");
+
+        // setProfileMetadata still lives on the UniversalAccountRegistry — unchanged by L-53.
+        rule = paymasterHub.getRule(orgId, accountRegProxy, bytes4(keccak256("setProfileMetadata(bytes32)")));
+        assertTrue(rule.allowed, "setProfileMetadata should be whitelisted against the account registry");
+
+        // C-01 wiring: after deploy the token's minters are wired through the executor.
+        ParticipationToken token = ParticipationToken(result.participationToken);
+        assertEq(token.taskManager(), result.taskManager, "token.taskManager should be wired to the TaskManager");
+        assertEq(token.educationHub(), result.educationHub, "token.educationHub should be wired to the EducationHub");
     }
 
     function testDeployFullOrgWithPaymasterFeeCaps() public {

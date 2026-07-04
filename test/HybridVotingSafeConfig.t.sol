@@ -56,7 +56,9 @@ contract HybridVotingSafeConfigTest is Test {
         hats.mintHat(CREATOR_HAT, alice);
 
         // Deploy the real (soulbound) ParticipationToken; narrow mint authority to `taskManager`.
+        // C-01 fix: setTaskManager is executor-only — the token's executor is `exec`.
         pt = _deployPT();
+        vm.prank(address(exec));
         pt.setTaskManager(taskManager);
         vm.startPrank(taskManager);
         pt.mint(alice, 200 ether);

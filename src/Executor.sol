@@ -19,6 +19,11 @@ interface IExecutor {
     function execute(uint256 proposalId, Call[] calldata batch) external;
 }
 
+interface IParticipationTokenConfig {
+    function setTaskManager(address taskManager) external;
+    function setEducationHub(address educationHub) external;
+}
+
 /**
  * @title Executor
  * @notice Batch‑executor behind an UpgradeableBeacon.
@@ -30,12 +35,15 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     error CallFailed(uint256 index, bytes lowLevelData);
     error EmptyBatch();
     error TooManyCalls();
+    error TooManyHats();
     error TargetSelf();
     error ZeroAddress();
     error TimelockNotExpired();
+    error SweepFailed();
 
     /* ─────────── Constants ─────────── */
     uint8 public constant MAX_CALLS_PER_BATCH = 20;
+    uint8 public constant MAX_HATS_PER_MINT = 20;
     uint256 public constant CALLER_CHANGE_DELAY = 2 days;
 
     /* ─────────── ERC-7201 Storage ─────────── */
@@ -142,6 +150,8 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         Layout storage l = _layout();
         if (!l.authorizedHatMinters[msg.sender]) revert UnauthorizedCaller();
         if (user == address(0)) revert ZeroAddress();
+        // L-60 fix: cap the caller-supplied array to bound gas / prevent grief.
+        if (hatIds.length > MAX_HATS_PER_MINT) revert TooManyHats();
 
         // Mint each hat to the user
         for (uint256 i = 0; i < hatIds.length; i++) {
@@ -190,11 +200,34 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     function sweep(address payable to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         uint256 bal = address(this).balance;
-        to.transfer(bal);
+        // L-11 fix: use call instead of transfer so contract recipients (multisigs,
+        // smart wallets) with >2300-gas receive/fallback hooks don't break sweeps.
+        (bool ok,) = to.call{value: bal}("");
+        if (!ok) revert SweepFailed();
         emit Swept(to, bal);
     }
 
     /* ─────────── Module Configuration ─────────── */
+    /**
+     * @notice One-shot wiring of the org's ParticipationToken during initial setup.
+     * @dev C-01 fix: the token's `setTaskManager` / `setEducationHub` are now
+     *      executor-only. Since this Executor IS the token's `executor`, routing
+     *      the initial wiring through here (owner-gated) lets OrgDeployer configure
+     *      the token before renouncing ownership without reopening the setters to
+     *      arbitrary callers. Only callable by owner (the OrgDeployer) before the
+     *      post-deploy `renounceOwnership`.
+     * @param token The ParticipationToken proxy
+     * @param taskManager The TaskManager authorized to mint (required, non-zero)
+     * @param educationHub The EducationHub authorized to mint (address(0) = skip)
+     */
+    function configureParticipationToken(address token, address taskManager, address educationHub) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
+        IParticipationTokenConfig(token).setTaskManager(taskManager);
+        if (educationHub != address(0)) {
+            IParticipationTokenConfig(token).setEducationHub(educationHub);
+        }
+    }
+
     /**
      * @notice Configure vouching on EligibilityModule during initial setup
      * @dev Only callable by owner before renouncing ownership

@@ -182,31 +182,29 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     }
 
     /*──────── Admin setters ───────*/
-    function setTaskManager(address tm) external {
+    /// @notice Set the TaskManager authorized to mint tokens. Executor-only.
+    /// @dev C-01 fix: previously the first set (while `taskManager == 0`) was open
+    ///      to any caller, letting an attacker install a malicious minter. Now every
+    ///      set — first and subsequent — must come from the executor. During atomic
+    ///      deploy the wiring flows through `Executor.configureParticipationToken`,
+    ///      so `_msgSender()` is the executor and the gate passes.
+    function setTaskManager(address tm) external onlyExecutor {
         if (tm == address(0)) revert InvalidAddress();
         Layout storage l = _layout();
-        if (l.taskManager == address(0)) {
-            l.taskManager = tm;
-            emit TaskManagerSet(tm);
-        } else {
-            if (_msgSender() != l.executor) revert Unauthorized();
-            l.taskManager = tm;
-            emit TaskManagerSet(tm);
-        }
+        l.taskManager = tm;
+        emit TaskManagerSet(tm);
     }
 
-    function setEducationHub(address eh) external {
-        // Allow address(0) to support optional EducationHub deployment
-        // and allow executor to clear it later
+    /// @notice Set (or clear) the EducationHub authorized to mint tokens. Executor-only.
+    /// @dev C-01 fix: the first set was previously open to any caller. Because an
+    ///      unset `educationHub` authorizes its owner as an unbounded minter via
+    ///      `_checkTaskOrEdu`, an attacker could seize minting on any org deployed
+    ///      without an EducationHub. Now every set is executor-only. `address(0)` is
+    ///      still accepted so the executor can clear a previously-set hub.
+    function setEducationHub(address eh) external onlyExecutor {
         Layout storage l = _layout();
-        if (l.educationHub == address(0)) {
-            l.educationHub = eh;
-            emit EducationHubSet(eh);
-        } else {
-            if (_msgSender() != l.executor) revert Unauthorized();
-            l.educationHub = eh;
-            emit EducationHubSet(eh);
-        }
+        l.educationHub = eh;
+        emit EducationHubSet(eh);
     }
 
     function setMemberHatAllowed(uint256 h, bool ok) external onlyExecutor {
