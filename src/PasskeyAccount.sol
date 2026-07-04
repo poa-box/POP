@@ -23,6 +23,7 @@ interface IPasskeyAccountFactoryConfig {
 
 /*──────────────────── Libraries ────────────────────────────────────*/
 import {WebAuthnLib} from "./libs/WebAuthnLib.sol";
+import {P256Verifier} from "./libs/P256Verifier.sol";
 
 /**
  * @title PasskeyAccount
@@ -30,7 +31,9 @@ import {WebAuthnLib} from "./libs/WebAuthnLib.sol";
  * @notice ERC-4337 smart contract wallet with WebAuthn/Passkey authentication
  * @dev Features:
  *      - Multi-passkey support (up to maxCredentials per org)
- *      - Guardian-assisted recovery with time delay
+ *      - M-of-N threshold multi-guardian recovery with time delay (H-04). Recovery is DISABLED by
+ *        default (no guardians, threshold 0) until the owner configures a guardian set. A single
+ *        guardian can never stage a recovery; `recoveryThreshold` distinct guardians must approve.
  *      - Per-org credential tracking to prevent account selling
  *      - EIP-7951 native P256 signature verification
  *
@@ -60,17 +63,30 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
     /*──────────────────────── ERC-7201 Storage ──────────────────────────*/
 
     /// @custom:storage-location erc7201:poa.passkeyaccount.storage
+    /// @dev APPEND-ONLY. New H-04 (M-of-N recovery) fields are appended at the END of the struct.
+    ///      Existing deployed accounts read those appended slots as zero: guardians == [] and
+    ///      recoveryThreshold == 0, which by design means recovery is DISABLED until the owner
+    ///      configures a guardian set. The legacy single `guardian` field is now INERT (it grants
+    ///      no recovery power); it is retained only to preserve the storage layout.
     struct Layout {
         // Factory that created this account
         address factory;
         // Passkey credentials
         mapping(bytes32 => PasskeyCredential) credentials;
         bytes32[] credentialIds;
-        // Guardian recovery
+        // Legacy single-guardian recovery fields (INERT — kept for storage-layout compatibility)
         address guardian;
         uint48 recoveryDelay;
         mapping(bytes32 => RecoveryRequest) recoveryRequests;
         bytes32[] pendingRecoveryIds;
+        // ── H-04: M-of-N multi-guardian recovery (APPENDED — reads as empty on legacy accounts) ──
+        address[] guardians;
+        mapping(address => bool) isGuardianMap;
+        uint256 recoveryThreshold;
+        // Per-proposal guardian approval accounting.
+        // proposalId = keccak256(credentialId, pubKeyX, pubKeyY)
+        mapping(bytes32 => uint256) recoveryApprovals;
+        mapping(bytes32 => mapping(address => bool)) recoveryApprovedBy;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.passkeyaccount.storage");
@@ -96,16 +112,16 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
         _;
     }
 
-    /// @notice Restrict to guardian only
+    /// @notice Restrict to a registered M-of-N recovery guardian
     modifier onlyGuardian() {
-        if (msg.sender != _layout().guardian) revert OnlyGuardian();
+        if (!_layout().isGuardianMap[msg.sender]) revert NotAGuardian();
         _;
     }
 
-    /// @notice Restrict to guardian or self
+    /// @notice Restrict to a registered recovery guardian or the account itself
     modifier onlyGuardianOrSelf() {
         Layout storage l = _layout();
-        if (msg.sender != l.guardian && msg.sender != address(this)) {
+        if (!l.isGuardianMap[msg.sender] && msg.sender != address(this)) {
             revert OnlyGuardianOrSelf();
         }
         _;
@@ -126,25 +142,22 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
      * @param credentialId Initial credential ID
      * @param pubKeyX Initial credential public key X
      * @param pubKeyY Initial credential public key Y
-     * @param guardian_ Recovery guardian address
-     * @param recoveryDelay_ Recovery delay in seconds
+     * @dev M-06: no guardian/recovery-delay config is baked in here, so the counterfactual
+     *      account address is a pure function of (factory, credentialId, pubKeyX, pubKeyY, salt)
+     *      and never depends on mutable factory config. The account starts with NO guardians and
+     *      threshold 0 (recovery DISABLED). The owner configures the M-of-N guardian set lazily
+     *      via addGuardian / setRecoveryThreshold (owner self-calls through the EntryPoint).
+     *      The recovery delay defaults to MIN_RECOVERY_DELAY and can be raised via setRecoveryDelay.
      */
-    function initialize(
-        address factory_,
-        bytes32 credentialId,
-        bytes32 pubKeyX,
-        bytes32 pubKeyY,
-        address guardian_,
-        uint48 recoveryDelay_
-    ) external initializer {
+    function initialize(address factory_, bytes32 credentialId, bytes32 pubKeyX, bytes32 pubKeyY) external initializer {
         if (factory_ == address(0)) revert ZeroAddress();
         if (pubKeyX == bytes32(0) || pubKeyY == bytes32(0)) revert InvalidSignature();
 
         Layout storage l = _layout();
 
         l.factory = factory_;
-        l.guardian = guardian_;
-        l.recoveryDelay = recoveryDelay_ < MIN_RECOVERY_DELAY ? MIN_RECOVERY_DELAY : recoveryDelay_;
+        // Recovery starts DISABLED: no guardians, threshold 0. Delay defaults to the minimum.
+        l.recoveryDelay = MIN_RECOVERY_DELAY;
 
         // Register initial credential
         l.credentials[credentialId] = PasskeyCredential({
@@ -153,9 +166,6 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
         l.credentialIds.push(credentialId);
 
         emit CredentialAdded(credentialId, uint64(block.timestamp));
-        if (guardian_ != address(0)) {
-            emit GuardianUpdated(address(0), guardian_);
-        }
     }
 
     /*──────────────────────────── ERC-4337 IAccount ────────────────────*/
@@ -295,14 +305,50 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
         emit CredentialStatusChanged(credentialId, active);
     }
 
-    /*──────────────────────────── Guardian Management ─────────────────*/
+    /*──────────────────────────── Guardian Management (M-of-N) ────────*/
 
     /// @inheritdoc IPasskeyAccount
-    function setGuardian(address newGuardian) external override onlySelf {
+    function addGuardian(address newGuardian) external override onlySelf {
+        if (newGuardian == address(0)) revert ZeroAddress();
         Layout storage l = _layout();
-        address oldGuardian = l.guardian;
-        l.guardian = newGuardian;
-        emit GuardianUpdated(oldGuardian, newGuardian);
+        if (l.isGuardianMap[newGuardian]) revert GuardianAlreadyExists();
+
+        l.isGuardianMap[newGuardian] = true;
+        l.guardians.push(newGuardian);
+
+        emit GuardianAdded(newGuardian);
+    }
+
+    /// @inheritdoc IPasskeyAccount
+    function removeGuardian(address oldGuardian) external override onlySelf {
+        Layout storage l = _layout();
+        if (!l.isGuardianMap[oldGuardian]) revert GuardianDoesNotExist();
+
+        l.isGuardianMap[oldGuardian] = false;
+        _removeGuardianFromArray(oldGuardian);
+
+        emit GuardianRemoved(oldGuardian);
+
+        // Keep the invariant threshold <= guardian count: if removing a guardian drops the
+        // count below the current threshold, lower the threshold to the new count (which may
+        // be 0, disabling recovery). This prevents an unreachable-quorum lockout state.
+        uint256 count = l.guardians.length;
+        if (l.recoveryThreshold > count) {
+            uint256 oldThreshold = l.recoveryThreshold;
+            l.recoveryThreshold = count;
+            emit RecoveryThresholdUpdated(oldThreshold, count);
+        }
+    }
+
+    /// @inheritdoc IPasskeyAccount
+    function setRecoveryThreshold(uint256 newThreshold) external override onlySelf {
+        Layout storage l = _layout();
+        if (newThreshold > l.guardians.length) revert ThresholdExceedsGuardianCount();
+
+        uint256 oldThreshold = l.recoveryThreshold;
+        l.recoveryThreshold = newThreshold;
+
+        emit RecoveryThresholdUpdated(oldThreshold, newThreshold);
     }
 
     /// @inheritdoc IPasskeyAccount
@@ -319,22 +365,53 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
     /*──────────────────────────── Recovery Functions ──────────────────*/
 
     /// @inheritdoc IPasskeyAccount
-    function initiateRecovery(bytes32 credentialId, bytes32 pubKeyX, bytes32 pubKeyY) external override onlyGuardian {
+    function computeRecoveryProposalId(bytes32 credentialId, bytes32 pubKeyX, bytes32 pubKeyY)
+        public
+        pure
+        override
+        returns (bytes32 proposalId)
+    {
+        return keccak256(abi.encodePacked(credentialId, pubKeyX, pubKeyY));
+    }
+
+    /// @inheritdoc IPasskeyAccount
+    /// @dev H-04: a single guardian can no longer stage a recovery. Each distinct guardian records
+    ///      one approval against the (credentialId, pubKeyX, pubKeyY) proposal; only once
+    ///      `recoveryThreshold` distinct guardians have approved is the recovery staged (delay timer
+    ///      started). With no guardians / threshold 0, recovery is DISABLED and this reverts.
+    function approveRecovery(bytes32 credentialId, bytes32 pubKeyX, bytes32 pubKeyY) external override onlyGuardian {
         if (pubKeyX == bytes32(0) || pubKeyY == bytes32(0)) revert InvalidSignature();
         Layout storage l = _layout();
 
-        // Generate recovery ID
-        bytes32 recoveryId = keccak256(abi.encodePacked(credentialId, block.timestamp, msg.sender));
+        // Recovery must be enabled: a non-zero threshold and at least that many guardians.
+        uint256 threshold = l.recoveryThreshold;
+        if (threshold == 0) revert RecoveryDisabled();
 
-        // Check if recovery already pending for this credential
-        if (l.recoveryRequests[recoveryId].executeAfter != 0) {
-            revert RecoveryAlreadyPending();
-        }
+        // H-04 hardening: staged recovery key must be a valid on-curve P-256 point.
+        if (!P256Verifier.isValidPublicKey(pubKeyX, pubKeyY)) revert InvalidPublicKey();
 
-        // Check credential doesn't already exist
-        if (l.credentials[credentialId].createdAt != 0) {
-            revert CredentialExists();
-        }
+        // New credential must not already exist.
+        if (l.credentials[credentialId].createdAt != 0) revert CredentialExists();
+
+        bytes32 proposalId = keccak256(abi.encodePacked(credentialId, pubKeyX, pubKeyY));
+
+        // A guardian cannot approve the same proposal twice to fake quorum.
+        if (l.recoveryApprovedBy[proposalId][msg.sender]) revert AlreadyApproved();
+        l.recoveryApprovedBy[proposalId][msg.sender] = true;
+
+        uint256 approvals = l.recoveryApprovals[proposalId] + 1;
+        l.recoveryApprovals[proposalId] = approvals;
+
+        emit RecoveryApproved(proposalId, msg.sender, approvals);
+
+        // Not yet at quorum — wait for more distinct guardian approvals.
+        if (approvals < threshold) return;
+
+        // Quorum reached: stage the recovery request with the delay timer.
+        bytes32 recoveryId = keccak256(abi.encodePacked(proposalId, block.timestamp));
+
+        // Defensive: an identical proposal already staged in the same block is a no-op re-stage.
+        if (l.recoveryRequests[recoveryId].executeAfter != 0) revert RecoveryAlreadyPending();
 
         uint48 executeAfter = uint48(block.timestamp) + l.recoveryDelay;
 
@@ -342,6 +419,10 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
             credentialId: credentialId, pubKeyX: pubKeyX, pubKeyY: pubKeyY, executeAfter: executeAfter, cancelled: false
         });
         l.pendingRecoveryIds.push(recoveryId);
+
+        // Clear the approval accounting for this proposal so a future recovery for the same
+        // (credentialId, pubKeyX, pubKeyY) starts fresh.
+        _clearRecoveryApprovals(proposalId);
 
         emit RecoveryInitiated(recoveryId, credentialId, msg.sender, executeAfter);
     }
@@ -498,6 +579,31 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
     }
 
     /// @inheritdoc IPasskeyAccount
+    function getGuardians() external view override returns (address[] memory) {
+        return _layout().guardians;
+    }
+
+    /// @inheritdoc IPasskeyAccount
+    function isGuardian(address account) external view override returns (bool) {
+        return _layout().isGuardianMap[account];
+    }
+
+    /// @inheritdoc IPasskeyAccount
+    function recoveryThreshold() external view override returns (uint256) {
+        return _layout().recoveryThreshold;
+    }
+
+    /// @inheritdoc IPasskeyAccount
+    function recoveryApprovalCount(bytes32 proposalId) external view override returns (uint256) {
+        return _layout().recoveryApprovals[proposalId];
+    }
+
+    /// @inheritdoc IPasskeyAccount
+    function hasApprovedRecovery(bytes32 proposalId, address guardianAddr) external view override returns (bool) {
+        return _layout().recoveryApprovedBy[proposalId][guardianAddr];
+    }
+
+    /// @inheritdoc IPasskeyAccount
     function recoveryDelay() external view override returns (uint48) {
         return _layout().recoveryDelay;
     }
@@ -530,6 +636,40 @@ contract PasskeyAccount is Initializable, IAccount, IPasskeyAccount {
                 break;
             }
         }
+    }
+
+    /**
+     * @notice Remove a guardian from the guardian array (swap-and-pop)
+     * @param guardianAddr The guardian address to remove
+     */
+    function _removeGuardianFromArray(address guardianAddr) private {
+        Layout storage l = _layout();
+        uint256 len = l.guardians.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (l.guardians[i] == guardianAddr) {
+                l.guardians[i] = l.guardians[len - 1];
+                l.guardians.pop();
+                break;
+            }
+        }
+    }
+
+    /**
+     * @notice Reset the per-guardian approval flags and the count for a recovery proposal.
+     * @param proposalId keccak256(credentialId, pubKeyX, pubKeyY)
+     * @dev Iterates the bounded guardian set. Called after quorum is reached and the request is
+     *      staged, so a subsequent recovery for the same key starts from a clean slate.
+     */
+    function _clearRecoveryApprovals(bytes32 proposalId) private {
+        Layout storage l = _layout();
+        uint256 len = l.guardians.length;
+        for (uint256 i = 0; i < len; i++) {
+            address g = l.guardians[i];
+            if (l.recoveryApprovedBy[proposalId][g]) {
+                l.recoveryApprovedBy[proposalId][g] = false;
+            }
+        }
+        l.recoveryApprovals[proposalId] = 0;
     }
 
     /**

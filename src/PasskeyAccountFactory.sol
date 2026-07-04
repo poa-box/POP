@@ -161,8 +161,11 @@ contract PasskeyAccountFactory is Initializable {
     /*──────────────────────────── Governance ──────────────────────────*/
 
     /**
-     * @notice Update the POA guardian
+     * @notice Update the POA guardian recorded in global config
      * @param newGuardian New guardian address
+     * @dev M-06/H-04: this value is NO LONGER baked into new-account init data. It does not affect
+     *      counterfactual addresses and grants no recovery power on any account. Recovery guardians
+     *      are configured per-account via PasskeyAccount.addGuardian. Kept for informational use.
      */
     function setPoaGuardian(address newGuardian) external onlyPoaManager {
         Layout storage l = _layout();
@@ -171,8 +174,11 @@ contract PasskeyAccountFactory is Initializable {
     }
 
     /**
-     * @notice Update the recovery delay
+     * @notice Update the recovery delay recorded in global config
      * @param newDelay New recovery delay in seconds
+     * @dev M-06: this value is NO LONGER baked into new-account init data and does not affect
+     *      counterfactual addresses. Each account's recovery delay is managed per-account via
+     *      PasskeyAccount.setRecoveryDelay (defaulting to the account's minimum).
      */
     function setRecoveryDelay(uint48 newDelay) external onlyPoaManager {
         Layout storage l = _layout();
@@ -241,17 +247,16 @@ contract PasskeyAccountFactory is Initializable {
             return account;
         }
 
-        GlobalConfig storage config = l.globalConfig;
-
-        // Build initialization data
+        // Build initialization data.
+        // M-06: NO mutable guardian/recovery-delay config is included, so the counterfactual
+        // address is a pure function of (factory, credentialId, pubKeyX, pubKeyY, salt) and never
+        // shifts when factory global config changes. Recovery config is set per-account, lazily.
         bytes memory initData = abi.encodeWithSelector(
             PasskeyAccount.initialize.selector,
             address(this), // factory
             credentialId,
             pubKeyX,
-            pubKeyY,
-            config.poaGuardian,
-            config.recoveryDelay
+            pubKeyY
         );
 
         // Deploy via CREATE2
@@ -272,6 +277,9 @@ contract PasskeyAccountFactory is Initializable {
      * @param pubKeyY Credential public key Y coordinate
      * @param salt Additional salt for CREATE2
      * @return account The predicted account address
+     * @dev M-06: the returned address is a pure function of (credentialId, pubKeyX, pubKeyY, salt)
+     *      and the immutable factory/beacon. It does NOT depend on any mutable global config
+     *      (poaGuardian, recoveryDelay), so changing that config never moves an account address.
      */
     function getAddress(bytes32 credentialId, bytes32 pubKeyX, bytes32 pubKeyY, uint256 salt)
         public
@@ -279,17 +287,16 @@ contract PasskeyAccountFactory is Initializable {
         returns (address account)
     {
         Layout storage l = _layout();
-        GlobalConfig storage config = l.globalConfig;
 
-        // Build initialization data
+        // Build initialization data — M-06: identical to createAccount's init data. It intentionally
+        // excludes the mutable globalConfig (guardian/recoveryDelay), so getAddress is a pure
+        // function of (credentialId, pubKeyX, pubKeyY, salt) and does not depend on factory config.
         bytes memory initData = abi.encodeWithSelector(
             PasskeyAccount.initialize.selector,
             address(this), // factory
             credentialId,
             pubKeyX,
-            pubKeyY,
-            config.poaGuardian,
-            config.recoveryDelay
+            pubKeyY
         );
 
         // Compute bytecode hash

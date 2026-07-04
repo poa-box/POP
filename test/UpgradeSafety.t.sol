@@ -138,7 +138,7 @@ contract UpgradeSafetyTest is Test {
     function testPasskeyAccountImplCannotBeInitialized() public {
         PasskeyAccount impl = new PasskeyAccount();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), OWNER, 1 days);
+        impl.initialize(OWNER, bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)));
     }
 
     function testPasskeyAccountFactoryImplCannotBeInitialized() public {

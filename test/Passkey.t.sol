@@ -93,6 +93,10 @@ contract PasskeyTest is Test {
     bytes32 constant PUB_KEY_X = 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef;
     bytes32 constant PUB_KEY_Y = 0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321;
 
+    // Real on-curve NIST P-256 public key (used for recovery, which now requires isValidPublicKey)
+    bytes32 constant CURVE_X = 0x1ccbe91c075fc7f4f033bfa248db8fccd3565de94bbfb12f3c59ff46c271bf83;
+    bytes32 constant CURVE_Y = 0xce4014c68811f9a21a1fdb2c0e6113e06db7ca93b7404e78dc7ccd5ca89a4ca9;
+
     /*──────── State ────────*/
     PasskeyAccount accountImpl;
     PasskeyAccountFactory factoryImpl;
@@ -111,12 +115,20 @@ contract PasskeyTest is Test {
     address guardian = address(0x2);
     address user = address(0x3);
     address attacker = address(0x4);
+    // Three M-of-N recovery guardians for H-04 tests.
+    address guardianA = address(0xA1);
+    address guardianB = address(0xB2);
+    address guardianC = address(0xC3);
 
     /*──────── Events ────────*/
     event CredentialAdded(bytes32 indexed credentialId, uint64 createdAt);
     event CredentialRemoved(bytes32 indexed credentialId);
     event CredentialStatusChanged(bytes32 indexed credentialId, bool active);
     event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
+    event GuardianAdded(address indexed guardian);
+    event GuardianRemoved(address indexed guardian);
+    event RecoveryThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
+    event RecoveryApproved(bytes32 indexed proposalId, address indexed guardian, uint256 approvals);
     event RecoveryInitiated(
         bytes32 indexed recoveryId, bytes32 credentialId, address indexed initiator, uint48 executeAfter
     );
@@ -241,7 +253,9 @@ contract PasskeyTest is Test {
 
         PasskeyAccount pa = PasskeyAccount(payable(account));
         assertEq(pa.factory(), address(factory));
-        assertEq(pa.guardian(), guardian);
+        // M-06/H-04: no guardian is baked in at creation; recovery starts DISABLED.
+        assertEq(pa.getGuardians().length, 0);
+        assertEq(pa.recoveryThreshold(), 0);
 
         IPasskeyAccount.PasskeyCredential memory cred = pa.getCredential(CREDENTIAL_ID);
         assertEq(cred.publicKeyX, PUB_KEY_X);
@@ -308,11 +322,30 @@ contract PasskeyTest is Test {
         return PasskeyAccount(payable(account));
     }
 
+    /// @notice Configure a 2-of-3 M-of-N guardian set on the account (via self-calls).
+    function _setupThreshold2of3(PasskeyAccount account) internal {
+        vm.startPrank(address(account));
+        account.addGuardian(guardianA);
+        account.addGuardian(guardianB);
+        account.addGuardian(guardianC);
+        account.setRecoveryThreshold(2);
+        vm.stopPrank();
+    }
+
+    /// @notice Create an account and configure a 2-of-3 guardian set.
+    function _createAccountWithGuardians() internal returns (PasskeyAccount account) {
+        account = _createAccount();
+        _setupThreshold2of3(account);
+    }
+
     function testAccountInitialization() public {
         PasskeyAccount account = _createAccount();
 
         assertEq(account.factory(), address(factory));
-        assertEq(account.guardian(), guardian);
+        // M-06/H-04: recovery disabled at init (no guardians, threshold 0). Legacy field is empty.
+        assertEq(account.guardian(), address(0));
+        assertEq(account.getGuardians().length, 0);
+        assertEq(account.recoveryThreshold(), 0);
         assertGe(account.recoveryDelay(), 1 days); // MIN_RECOVERY_DELAY
 
         bytes32[] memory credIds = account.getCredentialIds();
@@ -400,19 +433,122 @@ contract PasskeyTest is Test {
         assertFalse(cred.active);
     }
 
-    function testAccountSetGuardian() public {
+    /*════════════════════════════════════════════════════════════════════
+                    H-04: M-of-N GUARDIAN MANAGEMENT TESTS
+    ════════════════════════════════════════════════════════════════════*/
+
+    function testAddGuardian() public {
         PasskeyAccount account = _createAccount();
 
-        address newGuardian = address(0x777);
+        vm.prank(address(account));
+        vm.expectEmit(true, false, false, false);
+        emit GuardianAdded(guardianA);
+        account.addGuardian(guardianA);
+
+        assertTrue(account.isGuardian(guardianA));
+        assertEq(account.getGuardians().length, 1);
+        assertEq(account.getGuardians()[0], guardianA);
+    }
+
+    function testAddGuardianOnlySelf() public {
+        PasskeyAccount account = _createAccount();
+        vm.prank(attacker);
+        vm.expectRevert(IPasskeyAccount.OnlySelf.selector);
+        account.addGuardian(guardianA);
+    }
+
+    function testAddGuardianZeroReverts() public {
+        PasskeyAccount account = _createAccount();
+        vm.prank(address(account));
+        vm.expectRevert(IPasskeyAccount.ZeroAddress.selector);
+        account.addGuardian(address(0));
+    }
+
+    function testAddGuardianDuplicateReverts() public {
+        PasskeyAccount account = _createAccount();
+        vm.startPrank(address(account));
+        account.addGuardian(guardianA);
+        vm.expectRevert(IPasskeyAccount.GuardianAlreadyExists.selector);
+        account.addGuardian(guardianA);
+        vm.stopPrank();
+    }
+
+    function testRemoveGuardian() public {
+        PasskeyAccount account = _createAccountWithGuardians(); // 2-of-3
 
         vm.prank(address(account));
+        vm.expectEmit(true, false, false, false);
+        emit GuardianRemoved(guardianB);
+        account.removeGuardian(guardianB);
 
-        vm.expectEmit(true, true, false, false);
-        emit GuardianUpdated(guardian, newGuardian);
+        assertFalse(account.isGuardian(guardianB));
+        assertEq(account.getGuardians().length, 2);
+        // Threshold 2 still <= 2 guardians, so it is preserved.
+        assertEq(account.recoveryThreshold(), 2);
+    }
 
-        account.setGuardian(newGuardian);
+    function testRemoveGuardianOnlySelf() public {
+        PasskeyAccount account = _createAccountWithGuardians();
+        vm.prank(attacker);
+        vm.expectRevert(IPasskeyAccount.OnlySelf.selector);
+        account.removeGuardian(guardianA);
+    }
 
-        assertEq(account.guardian(), newGuardian);
+    function testRemoveNonexistentGuardianReverts() public {
+        PasskeyAccount account = _createAccount();
+        vm.prank(address(account));
+        vm.expectRevert(IPasskeyAccount.GuardianDoesNotExist.selector);
+        account.removeGuardian(guardianA);
+    }
+
+    function testRemoveGuardianLowersThresholdBelowCount() public {
+        PasskeyAccount account = _createAccountWithGuardians(); // 3 guardians, threshold 2
+
+        // Remove two guardians -> count drops to 1, threshold auto-lowered to 1.
+        vm.startPrank(address(account));
+        account.removeGuardian(guardianA);
+        vm.expectEmit(false, false, false, true);
+        emit RecoveryThresholdUpdated(2, 1);
+        account.removeGuardian(guardianB);
+        vm.stopPrank();
+
+        assertEq(account.getGuardians().length, 1);
+        assertEq(account.recoveryThreshold(), 1);
+
+        // Remove the last one -> threshold auto-lowered to 0 (recovery disabled).
+        vm.prank(address(account));
+        account.removeGuardian(guardianC);
+        assertEq(account.getGuardians().length, 0);
+        assertEq(account.recoveryThreshold(), 0);
+    }
+
+    function testSetRecoveryThreshold() public {
+        PasskeyAccount account = _createAccount();
+        vm.startPrank(address(account));
+        account.addGuardian(guardianA);
+        account.addGuardian(guardianB);
+        vm.expectEmit(false, false, false, true);
+        emit RecoveryThresholdUpdated(0, 2);
+        account.setRecoveryThreshold(2);
+        vm.stopPrank();
+        assertEq(account.recoveryThreshold(), 2);
+    }
+
+    function testSetRecoveryThresholdOnlySelf() public {
+        PasskeyAccount account = _createAccountWithGuardians();
+        vm.prank(attacker);
+        vm.expectRevert(IPasskeyAccount.OnlySelf.selector);
+        account.setRecoveryThreshold(1);
+    }
+
+    function testSetRecoveryThresholdExceedsCountReverts() public {
+        PasskeyAccount account = _createAccount();
+        vm.startPrank(address(account));
+        account.addGuardian(guardianA);
+        // Only 1 guardian; threshold of 2 must revert.
+        vm.expectRevert(IPasskeyAccount.ThresholdExceedsGuardianCount.selector);
+        account.setRecoveryThreshold(2);
+        vm.stopPrank();
     }
 
     function testAccountSetRecoveryDelay() public {
@@ -435,89 +571,162 @@ contract PasskeyTest is Test {
     }
 
     /*════════════════════════════════════════════════════════════════════
-                        RECOVERY TESTS
+                        H-04: M-of-N RECOVERY TESTS
     ════════════════════════════════════════════════════════════════════*/
 
-    function testInitiateRecovery() public {
-        PasskeyAccount account = _createAccount();
+    bytes32 constant REC_CRED = keccak256("recovery_credential");
 
-        bytes32 newCredId = keccak256("recovery_credential");
-        bytes32 newPubKeyX = keccak256("new_x");
-        bytes32 newPubKeyY = keccak256("new_y");
-
-        vm.prank(guardian);
-        account.initiateRecovery(newCredId, newPubKeyX, newPubKeyY);
-
-        // Verify recovery request was created
-        // Note: Recovery ID is computed from credentialId, timestamp, and sender
+    /// @notice Have two distinct guardians approve, staging the recovery, and return the recoveryId.
+    /// @dev The recoveryId is deterministic: keccak256(proposalId, block.timestamp) at staging.
+    function _stageRecovery(PasskeyAccount account, bytes32 credId, bytes32 x, bytes32 y)
+        internal
+        returns (bytes32 recoveryId)
+    {
+        vm.prank(guardianA);
+        account.approveRecovery(credId, x, y);
+        // Second distinct guardian approval reaches quorum and stages.
+        vm.recordLogs();
+        vm.prank(guardianB);
+        account.approveRecovery(credId, x, y);
+        bytes32 proposalId = account.computeRecoveryProposalId(credId, x, y);
+        recoveryId = keccak256(abi.encodePacked(proposalId, block.timestamp));
     }
 
-    function testInitiateRecoveryUnauthorized() public {
-        PasskeyAccount account = _createAccount();
+    function testApproveRecoveryDisabledWhenNoGuardians() public {
+        PasskeyAccount account = _createAccount(); // no guardians configured
 
+        // Even a would-be guardian is not registered; onlyGuardian fires first.
+        vm.prank(guardianA);
+        vm.expectRevert(IPasskeyAccount.NotAGuardian.selector);
+        account.approveRecovery(REC_CRED, CURVE_X, CURVE_Y);
+    }
+
+    function testApproveRecoveryDisabledWithZeroThreshold() public {
+        PasskeyAccount account = _createAccount();
+        // Add guardians but leave threshold 0 -> recovery is DISABLED.
+        vm.startPrank(address(account));
+        account.addGuardian(guardianA);
+        account.addGuardian(guardianB);
+        vm.stopPrank();
+
+        vm.prank(guardianA);
+        vm.expectRevert(IPasskeyAccount.RecoveryDisabled.selector);
+        account.approveRecovery(REC_CRED, CURVE_X, CURVE_Y);
+    }
+
+    function testApproveRecoveryUnauthorized() public {
+        PasskeyAccount account = _createAccountWithGuardians();
         vm.prank(attacker);
-        vm.expectRevert(IPasskeyAccount.OnlyGuardian.selector);
-        account.initiateRecovery(keccak256("new_cred"), keccak256("x"), keccak256("y"));
+        vm.expectRevert(IPasskeyAccount.NotAGuardian.selector);
+        account.approveRecovery(REC_CRED, CURVE_X, CURVE_Y);
     }
 
-    function testCompleteRecoveryBeforeDelay() public {
-        PasskeyAccount account = _createAccount();
+    /// @notice H-04 CORE: a single guardian cannot stage/complete a recovery under threshold 2.
+    function testSingleGuardianCannotCompleteRecovery() public {
+        PasskeyAccount account = _createAccountWithGuardians(); // 2-of-3
 
-        bytes32 newCredId = keccak256("recovery_credential");
+        // One guardian approves — this must NOT stage the recovery.
+        vm.prank(guardianA);
+        account.approveRecovery(REC_CRED, CURVE_X, CURVE_Y);
 
-        vm.prank(guardian);
-        account.initiateRecovery(newCredId, keccak256("x"), keccak256("y"));
+        bytes32 proposalId = account.computeRecoveryProposalId(REC_CRED, CURVE_X, CURVE_Y);
+        assertEq(account.recoveryApprovalCount(proposalId), 1);
 
-        // Get recovery ID (would need to capture from event in real scenario)
-        bytes32 recoveryId = keccak256(abi.encodePacked(newCredId, block.timestamp, guardian));
+        // No recovery request exists yet: the deterministic recoveryId is not staged.
+        bytes32 wouldBeId = keccak256(abi.encodePacked(proposalId, block.timestamp));
+        IPasskeyAccount.RecoveryRequest memory req = account.getRecoveryRequest(wouldBeId);
+        assertEq(req.executeAfter, 0, "single approval must not stage recovery");
 
-        // Try to complete immediately
+        // Attempting to complete reverts (nothing pending).
+        vm.warp(block.timestamp + 7 days + 1);
+        vm.expectRevert(IPasskeyAccount.RecoveryNotPending.selector);
+        account.completeRecovery(wouldBeId);
+    }
+
+    /// @notice H-04 CORE: a guardian cannot approve twice to fake quorum.
+    function testGuardianCannotApproveTwice() public {
+        PasskeyAccount account = _createAccountWithGuardians(); // 2-of-3
+
+        vm.prank(guardianA);
+        account.approveRecovery(REC_CRED, CURVE_X, CURVE_Y);
+
+        // Same guardian approving again must revert; quorum (2) still not reached.
+        vm.prank(guardianA);
+        vm.expectRevert(IPasskeyAccount.AlreadyApproved.selector);
+        account.approveRecovery(REC_CRED, CURVE_X, CURVE_Y);
+
+        bytes32 proposalId = account.computeRecoveryProposalId(REC_CRED, CURVE_X, CURVE_Y);
+        assertEq(account.recoveryApprovalCount(proposalId), 1, "double approve must not increment");
+    }
+
+    /// @notice H-04 CORE: two DISTINCT guardians stage the recovery; after delay it finalizes.
+    function testTwoGuardiansStageAndComplete() public {
+        PasskeyAccount account = _createAccountWithGuardians(); // 2-of-3
+
+        bytes32 recoveryId = _stageRecovery(account, REC_CRED, CURVE_X, CURVE_Y);
+
+        // Recovery is now staged.
+        IPasskeyAccount.RecoveryRequest memory req = account.getRecoveryRequest(recoveryId);
+        assertTrue(req.executeAfter > 0, "quorum should stage recovery");
+
+        // Cannot complete before the delay.
         vm.expectRevert(IPasskeyAccount.RecoveryDelayNotPassed.selector);
         account.completeRecovery(recoveryId);
-    }
 
-    function testCompleteRecoveryAfterDelay() public {
-        PasskeyAccount account = _createAccount();
-
-        bytes32 newCredId = keccak256("recovery_credential");
-        bytes32 newPubKeyX = keccak256("new_x");
-        bytes32 newPubKeyY = keccak256("new_y");
-
-        vm.prank(guardian);
-        account.initiateRecovery(newCredId, newPubKeyX, newPubKeyY);
-
-        bytes32 recoveryId = keccak256(abi.encodePacked(newCredId, block.timestamp, guardian));
-
-        // Warp past recovery delay
+        // After the delay, anyone can finalize.
         vm.warp(block.timestamp + 7 days + 1);
-
         vm.expectEmit(true, true, false, false);
-        emit RecoveryCompleted(recoveryId, newCredId);
-
+        emit RecoveryCompleted(recoveryId, REC_CRED);
         account.completeRecovery(recoveryId);
 
-        // Verify credential was added
-        IPasskeyAccount.PasskeyCredential memory cred = account.getCredential(newCredId);
-        assertEq(cred.publicKeyX, newPubKeyX);
-        assertEq(cred.publicKeyY, newPubKeyY);
+        IPasskeyAccount.PasskeyCredential memory cred = account.getCredential(REC_CRED);
+        assertEq(cred.publicKeyX, CURVE_X);
+        assertEq(cred.publicKeyY, CURVE_Y);
         assertTrue(cred.active);
     }
 
+    /// @notice H-04 hardening: an off-curve recovery key is rejected before staging.
+    function testApproveRecoveryOffCurveKeyReverts() public {
+        PasskeyAccount account = _createAccountWithGuardians();
+
+        // keccak-derived coordinates are (almost surely) not on the P-256 curve.
+        vm.prank(guardianA);
+        vm.expectRevert(IPasskeyAccount.InvalidPublicKey.selector);
+        account.approveRecovery(REC_CRED, keccak256("off_x"), keccak256("off_y"));
+    }
+
+    function testApproveRecoveryZeroKeyReverts() public {
+        PasskeyAccount account = _createAccountWithGuardians();
+        vm.prank(guardianA);
+        vm.expectRevert(IPasskeyAccount.InvalidSignature.selector);
+        account.approveRecovery(REC_CRED, bytes32(0), CURVE_Y);
+    }
+
+    function testApproveRecoveryExistingCredentialReverts() public {
+        PasskeyAccount account = _createAccountWithGuardians();
+        // CREDENTIAL_ID already exists on the account.
+        vm.prank(guardianA);
+        vm.expectRevert(IPasskeyAccount.CredentialExists.selector);
+        account.approveRecovery(CREDENTIAL_ID, CURVE_X, CURVE_Y);
+    }
+
+    /// @notice After a completed recovery, the approval accounting is reset (fresh future recovery).
+    function testApprovalsResetAfterStaging() public {
+        PasskeyAccount account = _createAccountWithGuardians();
+        _stageRecovery(account, REC_CRED, CURVE_X, CURVE_Y);
+        bytes32 proposalId = account.computeRecoveryProposalId(REC_CRED, CURVE_X, CURVE_Y);
+        assertEq(account.recoveryApprovalCount(proposalId), 0, "approvals cleared after staging");
+        assertFalse(account.hasApprovedRecovery(proposalId, guardianA));
+        assertFalse(account.hasApprovedRecovery(proposalId, guardianB));
+    }
+
     function testCancelRecoveryByGuardian() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
+        bytes32 recoveryId = _stageRecovery(account, REC_CRED, CURVE_X, CURVE_Y);
 
-        bytes32 newCredId = keccak256("recovery_credential");
-
-        vm.prank(guardian);
-        account.initiateRecovery(newCredId, keccak256("x"), keccak256("y"));
-
-        bytes32 recoveryId = keccak256(abi.encodePacked(newCredId, block.timestamp, guardian));
-
-        vm.prank(guardian);
-
+        vm.prank(guardianA);
         vm.expectEmit(true, false, false, false);
         emit RecoveryCancelled(recoveryId);
-
         account.cancelRecovery(recoveryId);
 
         IPasskeyAccount.RecoveryRequest memory request = account.getRecoveryRequest(recoveryId);
@@ -525,14 +734,8 @@ contract PasskeyTest is Test {
     }
 
     function testCancelRecoveryBySelf() public {
-        PasskeyAccount account = _createAccount();
-
-        bytes32 newCredId = keccak256("recovery_credential");
-
-        vm.prank(guardian);
-        account.initiateRecovery(newCredId, keccak256("x"), keccak256("y"));
-
-        bytes32 recoveryId = keccak256(abi.encodePacked(newCredId, block.timestamp, guardian));
+        PasskeyAccount account = _createAccountWithGuardians();
+        bytes32 recoveryId = _stageRecovery(account, REC_CRED, CURVE_X, CURVE_Y);
 
         vm.prank(address(account));
         account.cancelRecovery(recoveryId);
@@ -542,14 +745,8 @@ contract PasskeyTest is Test {
     }
 
     function testCancelRecoveryUnauthorized() public {
-        PasskeyAccount account = _createAccount();
-
-        bytes32 newCredId = keccak256("recovery_credential");
-
-        vm.prank(guardian);
-        account.initiateRecovery(newCredId, keccak256("x"), keccak256("y"));
-
-        bytes32 recoveryId = keccak256(abi.encodePacked(newCredId, block.timestamp, guardian));
+        PasskeyAccount account = _createAccountWithGuardians();
+        bytes32 recoveryId = _stageRecovery(account, REC_CRED, CURVE_X, CURVE_Y);
 
         vm.prank(attacker);
         vm.expectRevert(IPasskeyAccount.OnlyGuardianOrSelf.selector);
@@ -799,14 +996,13 @@ contract PasskeyTest is Test {
     }
 
     function testAccountInitializeZeroFactory() public {
+        // M-06: initialize no longer takes guardian/recoveryDelay.
         bytes memory initData = abi.encodeWithSelector(
             PasskeyAccount.initialize.selector,
             address(0), // Zero factory
             CREDENTIAL_ID,
             PUB_KEY_X,
-            PUB_KEY_Y,
-            guardian,
-            7 days
+            PUB_KEY_Y
         );
 
         vm.expectRevert(IPasskeyAccount.ZeroAddress.selector);
@@ -819,9 +1015,7 @@ contract PasskeyTest is Test {
             address(factory),
             CREDENTIAL_ID,
             bytes32(0), // Zero public key X
-            PUB_KEY_Y,
-            guardian,
-            7 days
+            PUB_KEY_Y
         );
 
         vm.expectRevert(IPasskeyAccount.InvalidSignature.selector);
@@ -849,12 +1043,12 @@ contract PasskeyTest is Test {
     }
 
     function testInitiateRecoveryExistingCredential() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        // Try to initiate recovery with existing credential ID
-        vm.prank(guardian);
+        // Try to approve recovery with existing credential ID
+        vm.prank(guardianA);
         vm.expectRevert(IPasskeyAccount.CredentialExists.selector);
-        account.initiateRecovery(CREDENTIAL_ID, keccak256("x"), keccak256("y"));
+        account.approveRecovery(CREDENTIAL_ID, CURVE_X, CURVE_Y);
     }
 
     function testCompleteRecoveryNotPending() public {
@@ -865,17 +1059,12 @@ contract PasskeyTest is Test {
     }
 
     function testCompleteCancelledRecovery() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        bytes32 newCredId = keccak256("recovery_credential");
+        bytes32 recoveryId = _stageRecovery(account, REC_CRED, CURVE_X, CURVE_Y);
 
-        vm.prank(guardian);
-        account.initiateRecovery(newCredId, keccak256("x"), keccak256("y"));
-
-        bytes32 recoveryId = keccak256(abi.encodePacked(newCredId, block.timestamp, guardian));
-
-        // Cancel the recovery
-        vm.prank(guardian);
+        // Cancel the recovery (guardian).
+        vm.prank(guardianA);
         account.cancelRecovery(recoveryId);
 
         // Try to complete after cancelled
@@ -885,9 +1074,9 @@ contract PasskeyTest is Test {
     }
 
     function testCancelRecoveryNotPending() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        vm.prank(guardian);
+        vm.prank(guardianA);
         vm.expectRevert(IPasskeyAccount.RecoveryNotPending.selector);
         account.cancelRecovery(keccak256("nonexistent_recovery"));
     }
@@ -996,19 +1185,19 @@ contract PasskeyTest is Test {
     }
 
     function testInitiateRecoveryZeroPubKeyXReverts() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        vm.prank(guardian);
+        vm.prank(guardianA);
         vm.expectRevert(IPasskeyAccount.InvalidSignature.selector);
-        account.initiateRecovery(keccak256("new_cred"), bytes32(0), PUB_KEY_Y);
+        account.approveRecovery(keccak256("new_cred"), bytes32(0), PUB_KEY_Y);
     }
 
     function testInitiateRecoveryZeroPubKeyYReverts() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        vm.prank(guardian);
+        vm.prank(guardianA);
         vm.expectRevert(IPasskeyAccount.InvalidSignature.selector);
-        account.initiateRecovery(keccak256("new_cred"), PUB_KEY_X, bytes32(0));
+        account.approveRecovery(keccak256("new_cred"), PUB_KEY_X, bytes32(0));
     }
 
     /*════════════════════════════════════════════════════════════════════
@@ -1016,16 +1205,13 @@ contract PasskeyTest is Test {
     ════════════════════════════════════════════════════════════════════*/
 
     function testCompleteCancelledRecovery_Reverts() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
         bytes32 recoveryCredId = keccak256("cancelled_cred");
-        vm.prank(guardian);
-        account.initiateRecovery(recoveryCredId, keccak256("x"), keccak256("y"));
-
-        bytes32 recoveryId = keccak256(abi.encodePacked(recoveryCredId, block.timestamp, guardian));
+        bytes32 recoveryId = _stageRecovery(account, recoveryCredId, CURVE_X, CURVE_Y);
 
         // Cancel the recovery
-        vm.prank(guardian);
+        vm.prank(guardianA);
         account.cancelRecovery(recoveryId);
 
         // Warp past delay
@@ -1045,22 +1231,20 @@ contract PasskeyTest is Test {
     }
 
     function testInitiateRecoveryForExistingCredential_Reverts() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        // Try to initiate recovery for credential that already exists (the one created with the account)
-        vm.prank(guardian);
+        // Try to approve recovery for a credential that already exists (created with the account)
+        vm.prank(guardianA);
         vm.expectRevert(IPasskeyAccount.CredentialExists.selector);
-        account.initiateRecovery(CREDENTIAL_ID, keccak256("new_x"), keccak256("new_y"));
+        account.approveRecovery(CREDENTIAL_ID, CURVE_X, CURVE_Y);
     }
 
     function testRecoveryCredentialArrayIntegrity() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        // Recover a credential
+        // Recover a credential (2-of-3 quorum).
         bytes32 recoveryCredId = keccak256("integrity_check");
-        vm.prank(guardian);
-        account.initiateRecovery(recoveryCredId, keccak256("ix"), keccak256("iy"));
-        bytes32 recoveryId = keccak256(abi.encodePacked(recoveryCredId, block.timestamp, guardian));
+        bytes32 recoveryId = _stageRecovery(account, recoveryCredId, CURVE_X, CURVE_Y);
 
         vm.warp(block.timestamp + 7 days + 1);
         account.completeRecovery(recoveryId);
@@ -1082,20 +1266,17 @@ contract PasskeyTest is Test {
     // ──────── M-02 Fix: Simultaneous recovery race condition ────────
 
     function testCompletingRecoveryCancelsOtherPendingRecoveries() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        // Guardian initiates two recovery requests with different credentials
+        // Stage two recovery requests (via quorum) with different credentials.
+        // Same on-curve key is reused with a distinct credentialId (address is per-credential).
         bytes32 credA = keccak256("recovery_A");
         bytes32 credB = keccak256("recovery_B");
 
-        vm.prank(guardian);
-        account.initiateRecovery(credA, keccak256("ax"), keccak256("ay"));
-        bytes32 recoveryIdA = keccak256(abi.encodePacked(credA, block.timestamp, guardian));
+        bytes32 recoveryIdA = _stageRecovery(account, credA, CURVE_X, CURVE_Y);
 
-        vm.warp(block.timestamp + 1); // different timestamp for unique recovery ID
-        vm.prank(guardian);
-        account.initiateRecovery(credB, keccak256("bx"), keccak256("by"));
-        bytes32 recoveryIdB = keccak256(abi.encodePacked(credB, block.timestamp, guardian));
+        vm.warp(block.timestamp + 1); // different timestamp for a unique recovery ID
+        bytes32 recoveryIdB = _stageRecovery(account, credB, CURVE_X, CURVE_Y);
 
         // Both recoveries should be pending
         IPasskeyAccount.RecoveryRequest memory reqA = account.getRecoveryRequest(recoveryIdA);
@@ -1124,17 +1305,13 @@ contract PasskeyTest is Test {
     }
 
     function testRepeatedRecoveriesDoNotGrowArray() public {
-        PasskeyAccount account = _createAccount();
+        PasskeyAccount account = _createAccountWithGuardians();
 
-        // Perform 5 sequential recoveries
+        // Perform 5 sequential recoveries. Each reuses the on-curve key with a distinct credentialId.
         for (uint256 round = 1; round <= 5; round++) {
             bytes32 newCredId = keccak256(abi.encodePacked("recovery_round_", round));
 
-            vm.prank(guardian);
-            account.initiateRecovery(
-                newCredId, keccak256(abi.encodePacked("x", round)), keccak256(abi.encodePacked("y", round))
-            );
-            bytes32 recoveryId = keccak256(abi.encodePacked(newCredId, block.timestamp, guardian));
+            bytes32 recoveryId = _stageRecovery(account, newCredId, CURVE_X, CURVE_Y);
 
             vm.warp(block.timestamp + 7 days + 1);
             account.completeRecovery(recoveryId);
