@@ -24,6 +24,10 @@ interface IParticipationTokenConfig {
     function setEducationHub(address educationHub) external;
 }
 
+interface IQuickJoinClaimableConfig {
+    function setClaimableHatIds(uint256[] calldata claimableHatIds) external;
+}
+
 /**
  * @title Executor
  * @notice Batch‑executor behind an UpgradeableBeacon.
@@ -226,6 +230,23 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         if (educationHub != address(0)) {
             IParticipationTokenConfig(token).setEducationHub(educationHub);
         }
+    }
+
+    /**
+     * @notice One-shot seeding of the org's QuickJoin claimable-hats allowlist during initial setup.
+     * @dev H-03 (WS-D) fix: QuickJoin's `setClaimableHatIds` is executor-only and the H-03 allowlist
+     *      defaults to EMPTY = CLOSED. Since this Executor IS the QuickJoin's `executor`, routing the
+     *      initial seed through here (owner-gated) lets OrgDeployer open the intended member-level hats
+     *      for the caller-specified claim paths before renouncing ownership, without reopening the
+     *      setter to arbitrary callers. Only callable by owner (the OrgDeployer) before the post-deploy
+     *      `renounceOwnership`. Seed ONLY non-privileged member/base hats — never executive/admin hats —
+     *      so H-03 stays closed for privileged claims.
+     * @param quickJoin The QuickJoin proxy
+     * @param claimableHatIds The member-level hat IDs to allowlist as claimable (empty = leave closed)
+     */
+    function configureQuickJoinClaimable(address quickJoin, uint256[] calldata claimableHatIds) external onlyOwner {
+        if (quickJoin == address(0)) revert ZeroAddress();
+        IQuickJoinClaimableConfig(quickJoin).setClaimableHatIds(claimableHatIds);
     }
 
     /**
