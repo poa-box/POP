@@ -180,7 +180,7 @@ contract Step2_UpgradeAndFix is Script {
 }
 
 // DryRun: Full E2E simulation on Gnosis fork.
-// Tests: upgrade beacon → reinitializeProtocolAdmin → adminBatchAddRules as deployer → verify rules.
+// Tests: upgrade beacon → setProtocolAdmin (poaManager-gated) → adminBatchAddRules as deployer → verify rules.
 //
 // Usage:
 //   FOUNDRY_PROFILE=production forge script \
@@ -208,10 +208,12 @@ contract DryRun is Script {
         require(ok, "Beacon upgrade failed");
         console.log("Beacon upgraded");
 
-        // 3. Call reinitializeProtocolAdmin as deployer (callable by anyone, runs once)
+        // 3. Set protocolAdmin via the poaManager-gated setter (M-10: the old unauthenticated
+        //    reinitializeProtocolAdmin is gone). On Gnosis the paymaster's poaManager is the
+        //    Satellite (pmOwner), so it is the authorized caller.
         PaymasterHub pm = PaymasterHub(payable(gnosisPaymaster));
-        vm.prank(deployer);
-        pm.reinitializeProtocolAdmin(deployer);
+        vm.prank(pmOwner);
+        pm.setProtocolAdmin(deployer);
         console.log("protocolAdmin set to deployer");
 
         // 4. Check KUBI rules BEFORE
@@ -255,12 +257,12 @@ contract DryRun is Script {
             console.log("Unauthorized caller correctly rejected");
         }
 
-        // 9. Verify reinitializer can't be called again
-        vm.prank(deployer);
-        try pm.reinitializeProtocolAdmin(address(0x123)) {
-            revert("Should have reverted - already initialized");
+        // 9. Verify setProtocolAdmin is gated: a non-poaManager caller cannot seize it (M-10).
+        vm.prank(address(0x123));
+        try pm.setProtocolAdmin(address(0x123)) {
+            revert("Should have reverted - not poaManager");
         } catch {
-            console.log("Double reinitialize correctly rejected");
+            console.log("Unauthorized setProtocolAdmin correctly rejected");
         }
 
         console.log("=== ALL CHECKS PASSED ===");

@@ -14,24 +14,6 @@ library PaymasterGraceLib {
         return block.timestamp < uint256(registeredAt) + (uint256(initialGraceDays) * 1 days);
     }
 
-    /// @notice Calculate solidarity fee, returning zero during the grace period
-    /// @dev Replaces the repeated pattern of computing graceEndTime then branching on fee
-    /// @param actualGasCost The actual gas cost of the operation
-    /// @param feePercentageBps Solidarity fee in basis points (e.g. 100 = 1%)
-    /// @param registeredAt Timestamp when the org was registered
-    /// @param initialGraceDays Configured grace period duration in days
-    /// @return fee The calculated solidarity fee (0 during grace period)
-    function solidarityFee(uint256 actualGasCost, uint16 feePercentageBps, uint40 registeredAt, uint32 initialGraceDays)
-        internal
-        view
-        returns (uint256 fee)
-    {
-        if (isInGracePeriod(registeredAt, initialGraceDays)) {
-            return 0;
-        }
-        return (actualGasCost * uint256(feePercentageBps)) / 10000;
-    }
-
     /// @notice Calculate solidarity match allowance based on deposit tier
     /// @dev Progressive tier system with declining marginal match rates:
     ///      - Tier 1: deposit <= 1x min -> 2x match (total 3x)
