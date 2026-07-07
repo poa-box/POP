@@ -13,6 +13,13 @@ Decentral Park (`script/fixes/CreateAgentRoleDecentralPark.s.sol`). Nothing new
 is needed on-chain; you grant the bot's wallet a permission through normal
 governance.
 
+> **Advanced — bind the hat to the enclave, not the address.**
+> `TEEAgentEligibilityModule` lets governance grant a role to an attested TEE
+> *measurement*, so upgrading the bot's code becomes a governance event and
+> retiring an image de-authorizes it instantly. See
+> [`TEE_AGENT_ELIGIBILITY.md`](TEE_AGENT_ELIGIBILITY.md). The address-grant flow
+> below is the simpler baseline and works without it.
+
 ## 1. Get the bot's wallet address
 
 The bot signs with a key **derived inside its TEE** (dstack `derive_key`) — no
