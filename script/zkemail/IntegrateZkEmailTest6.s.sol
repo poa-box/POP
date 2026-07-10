@@ -510,7 +510,7 @@ contract BroadcastGovProposalTest6 is Test6Base {
             .createProposal(
                 bytes("Authorize ZkEmailInvites + activate allowlist"),
                 bytes32(0),
-                DURATION_MINUTES,
+                uint32(vm.envOr("VOTE_MINUTES", uint256(DURATION_MINUTES))),
                 1,
                 batches,
                 new uint256[](0)

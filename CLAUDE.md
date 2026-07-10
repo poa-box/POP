@@ -30,6 +30,7 @@
 - **PaymasterHub tests are skipped** — files ending `.t.sol.skip` require an EntryPoint fork. Rename to `.t.sol` to run locally.
 - **HybridVoting uses a v2 storage namespace** — the slot is `keccak256("poa.hybridvoting.v2.storage")`. Its three library files (`HybridVotingCore`, `HybridVotingConfig`, `HybridVotingProposals`) share this slot — changes must stay in sync.
 - **Pragma versions vary** — contracts range from `^0.8.17` to `^0.8.30`. Match the existing pragma when modifying a file; do not bump without testing all dependents.
+- **`HybridVoting.announceWinner` needs an explicit gas buffer** — it wraps the winning batch's `executor.execute()` in a `try/catch` (`HybridVotingCore`), so `eth_estimateGas` / wallets / `cast send` price only the cheap *caught-failure* path and under-fund the tx. An expensive batch (module deploy/init, `registerOrgContract` + `initialize` + `setActiveAllowlist`, etc.) then hits **OutOfGas** in a sub-call and is silently skipped: `announceWinner` still returns success with `didExecute=false` (emits `ProposalExecutionFailed` carrying `Executor.CallFailed(index, 0x)`), the proposal is marked `executed`, and **nothing happened** (proxy stays uninitialized, root unset). Always pass an explicit high gas limit — `cast send ... announceWinner <id> --gas-limit 3000000` — for any proposal with a non-trivial batch; the frontend's `announceWinner` call must add the same buffer. Confirmed live on Test6 (2026-07): proposal #23 no-op'd at ~29k gas for `setActiveAllowlist`; #24 re-run with a 3M limit.
 
 ## Architecture
 
