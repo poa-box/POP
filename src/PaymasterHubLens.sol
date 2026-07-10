@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IPaymaster} from "./interfaces/IPaymaster.sol";
 import {IEntryPoint} from "./interfaces/IEntryPoint.sol";
-import {PackedUserOperation} from "./interfaces/PackedUserOperation.sol";
+import {PackedUserOperation, UserOpLib} from "./interfaces/PackedUserOperation.sol";
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {IERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol";
 import {PaymasterHubErrors} from "./libs/PaymasterHubErrors.sol";
@@ -313,10 +313,10 @@ contract PaymasterHubLens {
     /// @dev Predict the hub's fee/gas cap check (L-36).
     function _feeCapsOk(bytes32 orgId, PackedUserOperation calldata userOp) private view returns (bool) {
         FeeCaps memory caps = hub.getFeeCaps(orgId);
-        (uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) = _unpackGasFees(userOp.gasFees);
+        (uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) = UserOpLib.unpackGasFees(userOp.gasFees);
         if (caps.maxFeePerGas > 0 && maxFeePerGas > caps.maxFeePerGas) return false;
         if (caps.maxPriorityFeePerGas > 0 && maxPriorityFeePerGas > caps.maxPriorityFeePerGas) return false;
-        (uint128 verificationGasLimit, uint128 callGasLimit) = _unpackAccountGasLimits(userOp.accountGasLimits);
+        (uint128 verificationGasLimit, uint128 callGasLimit) = UserOpLib.unpackAccountGasLimits(userOp.accountGasLimits);
         if (caps.maxCallGas > 0 && callGasLimit > caps.maxCallGas) return false;
         if (caps.maxVerificationGas > 0 && verificationGasLimit > caps.maxVerificationGas) return false;
         if (caps.maxPreVerificationGas > 0 && userOp.preVerificationGas > caps.maxPreVerificationGas) return false;
@@ -364,24 +364,10 @@ contract PaymasterHubLens {
         // rejects ops whose callGasLimit exceeds it (GasTooHigh). The batch path above
         // intentionally skips per-call gas hints, matching the hub.
         if (rule.maxCallGasHint > 0) {
-            (, uint128 callGasLimit) = _unpackAccountGasLimits(userOp.accountGasLimits);
+            (, uint128 callGasLimit) = UserOpLib.unpackAccountGasLimits(userOp.accountGasLimits);
             if (callGasLimit > rule.maxCallGasHint) return false;
         }
         return true;
-    }
-
-    function _unpackGasFees(bytes32 gasFees) private pure returns (uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) {
-        maxPriorityFeePerGas = uint128(uint256(gasFees) >> 128);
-        maxFeePerGas = uint128(uint256(gasFees));
-    }
-
-    function _unpackAccountGasLimits(bytes32 accountGasLimits)
-        private
-        pure
-        returns (uint128 verificationGasLimit, uint128 callGasLimit)
-    {
-        verificationGasLimit = uint128(uint256(accountGasLimits) >> 128);
-        callGasLimit = uint128(uint256(accountGasLimits));
     }
 
     function supportsInterface(bytes4 interfaceId) public pure returns (bool) {

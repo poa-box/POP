@@ -297,7 +297,104 @@ contract PaymasterHubSecurityTest is Test {
         assertEq(hub.getOrgFinancials(ORG).solidarityUsedThisPeriod, actual, "not reconciled to actual");
     }
 
+    /*═════════ WS-C gas/fee unpack regression (ERC-4337 v0.7 canonical) ═════════*/
+    // These validatePaymasterUserOp tests reproduce the zk-email scenario that exposed the reversed
+    // UserOpLib helpers. The gas/fee words are built as RAW canonical bytes32 (verification in the
+    // HIGH 128 bits, callGas in the LOW; maxPriorityFeePerGas HIGH, maxFeePerGas LOW) — NEVER via the
+    // repo's pack helper — with ASYMMETRIC halves, so a re-introduced swap cannot round-trip to green.
+    // Reference: ERC-4337 v0.7 / eth-infinitism UserOperationLib.
+
+    /// @notice zk-email scenario: rule hint 1.2M, op has callGas 500k (< hint) but verification 1.5M.
+    ///         Canonical: rule compares maxCallGasHint vs callGasLimit (LOW half = 500k) → PASSES.
+    ///         Pre-fix (reversed) lib compared the HIGH half (verification 1.5M > 1.2M) → false GasTooHigh.
+    function testWSC_RuleHint_ComparesCallGasNotVerification_Passes() public {
+        // Rule hint 1.2M callGas. (setUp registered ORG with adminHat only; orgAdmin is admin.)
+        vm.prank(orgAdmin);
+        hub.setRule(ORG, RULE_TARGET, RULE_SELECTOR, true, 1_200_000);
+
+        // Raw canonical accountGasLimits: verification = 1_500_000 (HIGH), callGas = 500_000 (LOW).
+        bytes32 accountGasLimits = bytes32((uint256(1_500_000) << 128) | uint256(500_000));
+        PackedUserOperation memory op = _buildRawGasUserOp(orgAdmin, 0, accountGasLimits, _gasFees(1 gwei, 1 gwei));
+
+        // callGas 500k < 1.2M hint → must succeed. Buggy lib would revert GasTooHigh on verification 1.5M.
+        vm.prank(address(ep));
+        (bytes memory ctx,) = hub.validatePaymasterUserOp(op, bytes32(0), 0.001 ether);
+        assertTrue(ctx.length > 0, "op with callGas below the rule hint must validate");
+    }
+
+    /// @notice Mirror: swap the halves — verification 500k, callGas 1.5M — so the SAME 1.2M hint now
+    ///         binds on the callGas half. Canonical compares callGas 1.5M > 1.2M → GasTooHigh (correct).
+    ///         Proves the hint really binds on callGas, not verification.
+    function testWSC_RuleHint_ComparesCallGasNotVerification_RevertsWhenCallGasExceeds() public {
+        vm.prank(orgAdmin);
+        hub.setRule(ORG, RULE_TARGET, RULE_SELECTOR, true, 1_200_000);
+
+        // Raw canonical: verification = 500_000 (HIGH), callGas = 1_500_000 (LOW).
+        bytes32 accountGasLimits = bytes32((uint256(500_000) << 128) | uint256(1_500_000));
+        PackedUserOperation memory op = _buildRawGasUserOp(orgAdmin, 0, accountGasLimits, _gasFees(1 gwei, 1 gwei));
+
+        vm.prank(address(ep));
+        vm.expectRevert(PaymasterHubErrors.GasTooHigh.selector);
+        hub.validatePaymasterUserOp(op, bytes32(0), 0.001 ether);
+    }
+
+    /// @notice Fee-cap asymmetry: cap maxFeePerGas = 50 gwei; op has maxPriorityFeePerGas = 100 gwei
+    ///         (HIGH) and maxFeePerGas = 10 gwei (LOW). Canonical compares the real maxFee (LOW = 10)
+    ///         against the cap → 10 < 50 → PASSES. The pre-fix lib compared the priority (100) against
+    ///         the maxFee cap → false FeeTooHigh.
+    function testWSC_FeeCap_ComparesMaxFeeNotPriority_Passes() public {
+        // maxFeePerGas cap 50 gwei; leave priority cap at 0 (unset → skipped) and gas caps at 0.
+        vm.prank(orgAdmin);
+        hub.setFeeCaps(ORG, 50 gwei, 0, 0, 0, 0);
+        // Rule with no hint so only the fee-cap path can gate this op.
+        vm.prank(orgAdmin);
+        hub.setRule(ORG, RULE_TARGET, RULE_SELECTOR, true, 0);
+
+        // Raw canonical gasFees: maxPriorityFeePerGas = 100 gwei (HIGH), maxFeePerGas = 10 gwei (LOW).
+        bytes32 gasFees = bytes32((uint256(uint128(100 gwei)) << 128) | uint256(uint128(10 gwei)));
+        bytes32 accountGasLimits = bytes32((uint256(100_000) << 128) | uint256(100_000));
+        PackedUserOperation memory op = _buildRawGasUserOp(orgAdmin, 0, accountGasLimits, gasFees);
+
+        // real maxFee 10 gwei < 50 gwei cap → must pass. Buggy lib checked priority 100 gwei > 50 → revert.
+        vm.prank(address(ep));
+        (bytes memory ctx,) = hub.validatePaymasterUserOp(op, bytes32(0), 0.001 ether);
+        assertTrue(ctx.length > 0, "op whose real maxFee is under the cap must validate");
+    }
+
     /*═══════════════════════ helpers ═══════════════════════*/
+
+    /// @dev Build a single-call (execute → RULE_TARGET.RULE_SELECTOR) op with RAW gas words supplied by
+    ///      the caller. Unlike _buildUserOp this does NOT derive gas from maxCost — the point is to feed
+    ///      hardcoded canonical accountGasLimits/gasFees so a reversed UserOpLib is observable.
+    function _buildRawGasUserOp(address sender, uint256 nonce, bytes32 accountGasLimits, bytes32 gasFees)
+        internal
+        view
+        returns (PackedUserOperation memory)
+    {
+        bytes memory innerCall = abi.encodeWithSelector(RULE_SELECTOR);
+        bytes memory callData = abi.encodeWithSignature("execute(address,uint256,bytes)", RULE_TARGET, 0, innerCall);
+        bytes memory paymasterData = abi.encodePacked(
+            uint8(1), ORG, SUBJECT_TYPE_ACCOUNT, bytes32(uint256(uint160(sender))), uint32(0), uint64(0)
+        );
+        bytes memory paymasterAndData =
+            abi.encodePacked(address(hub), uint128(200_000), uint128(100_000), paymasterData);
+        return PackedUserOperation({
+            sender: sender,
+            nonce: nonce,
+            initCode: "",
+            callData: callData,
+            accountGasLimits: accountGasLimits,
+            preVerificationGas: 50_000,
+            gasFees: gasFees,
+            paymasterAndData: paymasterAndData,
+            signature: ""
+        });
+    }
+
+    /// @dev Raw canonical gasFees word: maxPriorityFeePerGas HIGH, maxFeePerGas LOW (ERC-4337 v0.7).
+    function _gasFees(uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) internal pure returns (bytes32) {
+        return bytes32((uint256(maxPriorityFeePerGas) << 128) | uint256(maxFeePerGas));
+    }
 
     /// @dev Build an onboarding UserOp (subjectType 0x03, orgId 0) for lens-prediction tests.
     ///      callData / initCode content is irrelevant to the lens (it does not parse them), so a

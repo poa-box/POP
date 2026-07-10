@@ -14,28 +14,35 @@ struct PackedUserOperation {
     bytes signature;
 }
 
+/// @dev ERC-4337 v0.7 canonical packing (mirrors eth-infinitism UserOperationLib): the HIGH
+///      128 bits hold verificationGasLimit / maxPriorityFeePerGas, the LOW 128 bits hold
+///      callGasLimit / maxFeePerGas. This MUST match what the real EntryPoint (and viem/Pimlico/
+///      every bundler) puts on the wire — an earlier revision had all four helpers reversed, which
+///      made org rule gas hints and fee caps compare against the wrong field. Never validate this
+///      encode/decode pair only against its own inverse; the tests carry hardcoded canonical
+///      reference vectors so a re-introduced swap cannot round-trip its way to green.
 library UserOpLib {
     function unpackAccountGasLimits(bytes32 accountGasLimits)
         internal
         pure
         returns (uint128 verificationGasLimit, uint128 callGasLimit)
     {
-        verificationGasLimit = uint128(uint256(accountGasLimits));
-        callGasLimit = uint128(uint256(accountGasLimits >> 128));
+        verificationGasLimit = uint128(uint256(accountGasLimits >> 128));
+        callGasLimit = uint128(uint256(accountGasLimits));
     }
 
     function packAccountGasLimits(uint128 verificationGasLimit, uint128 callGasLimit) internal pure returns (bytes32) {
-        return bytes32(uint256(verificationGasLimit) | (uint256(callGasLimit) << 128));
+        return bytes32((uint256(verificationGasLimit) << 128) | uint256(callGasLimit));
     }
 
-    /// @notice Unpack gasFees into maxPriorityFeePerGas and maxFeePerGas
+    /// @notice Unpack gasFees into maxPriorityFeePerGas (high 128) and maxFeePerGas (low 128)
     function unpackGasFees(bytes32 gasFees) internal pure returns (uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) {
-        maxPriorityFeePerGas = uint128(uint256(gasFees));
-        maxFeePerGas = uint128(uint256(gasFees >> 128));
+        maxPriorityFeePerGas = uint128(uint256(gasFees >> 128));
+        maxFeePerGas = uint128(uint256(gasFees));
     }
 
-    /// @notice Pack maxPriorityFeePerGas and maxFeePerGas into gasFees
+    /// @notice Pack maxPriorityFeePerGas (high 128) and maxFeePerGas (low 128) into gasFees
     function packGasFees(uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) internal pure returns (bytes32) {
-        return bytes32(uint256(maxPriorityFeePerGas) | (uint256(maxFeePerGas) << 128));
+        return bytes32((uint256(maxPriorityFeePerGas) << 128) | uint256(maxFeePerGas));
     }
 }
