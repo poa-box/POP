@@ -111,6 +111,11 @@ both strict. **Keep this invariant until the circuit fix ships.** (Advisory 4 �
 
 ### Fix — bind the From-domain in-circuit (rides the ceremony)
 
+**Full design spec:** `docs/ZKEMAIL_BLOCKER2_DOMAIN_BINDING.md` — and the approach is already **proven**
+by a compiled, witness-tested spike (`circuits/spikes/DomainBindSpike.circom`): in-circuit domain
+extraction produces a `fromDomainHash` matching the off-chain Poseidon commitment, at ~7% constraint
+overhead. Summary:
+
 Neither circuit extracts the domain today, so the fix must **add** From-domain extraction (the fix
 list's "reuse V1's extraction" is a misnomer — V1 has none). Recommended shape:
 
