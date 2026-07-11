@@ -19,8 +19,31 @@ import {
 } from "../src/zkemail/IVerifier.sol";
 import {IDKIMRegistry} from "../src/zkemail/IDKIMRegistry.sol";
 import {WebAuthnLib} from "../src/libs/WebAuthnLib.sol";
+import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 
 /*──────────────────────────────  Mocks  ──────────────────────────────*/
+
+/// @notice Minimal Hats stand-in for the H-03 open-hat gate. Only isEligible is exercised; by default
+///         every hat is GATED (probe → false) so normal claims pass. `setOpen(hatId)` marks a hat
+///         open-to-everyone (probe → true) to exercise the reject path; `setReverting(true)` makes
+///         isEligible revert to exercise the FAIL-CLOSED path.
+contract MockHats {
+    mapping(uint256 => bool) public openHat;
+    bool public reverting;
+
+    function setOpen(uint256 hatId, bool v) external {
+        openHat[hatId] = v;
+    }
+
+    function setReverting(bool v) external {
+        reverting = v;
+    }
+
+    function isEligible(address, uint256 hatId) external view returns (bool) {
+        require(!reverting, "eligibility module down");
+        return openHat[hatId];
+    }
+}
 
 /// @notice Stand-in for the snarkjs `Groth16Verifier` (domain circuit, 3 signals). Ignores the proof
 ///         points entirely and returns a settable `result` (default true) so tests can toggle validity.
@@ -131,6 +154,20 @@ contract MockExecutor is IExecutorHatMinter {
     }
 
     Mint[] private _mints;
+    IHats private _hats;
+
+    constructor() {
+        _hats = IHats(address(new MockHats()));
+    }
+
+    function hats() external view returns (IHats) {
+        return _hats;
+    }
+
+    /// @dev Test hook: reach the underlying MockHats to flip open/reverting flags.
+    function mockHats() external view returns (MockHats) {
+        return MockHats(address(_hats));
+    }
 
     function mintHatsForUser(address user, uint256[] calldata hatIds) external {
         uint256[] memory copy = new uint256[](hatIds.length);
@@ -158,6 +195,15 @@ contract ReentrancyExecutor is IExecutorHatMinter {
     uint256[] internal _hatIds;
     bytes32[] internal _merkleProof;
     bool public attempted;
+    IHats private _hats;
+
+    constructor() {
+        _hats = IHats(address(new MockHats()));
+    }
+
+    function hats() external view returns (IHats) {
+        return _hats;
+    }
 
     function arm(
         ZkEmailInvites _zk,
@@ -554,6 +600,70 @@ contract ZkEmailInvitesTest is Test {
 
         (address mintedTo,) = executorMock.mintAt(0);
         assertEq(mintedTo, user, "hat minted to bound claimer, not relayer");
+    }
+
+    /*────────── H-03 open-hat gate ──────────*/
+
+    function testClaimRoleByDomain_revertOpenHat() public {
+        uint256[] memory hats = _hatIds(42);
+        _activateSingleDomain(hats);
+        // Mark hat 42 open-to-everyone (eligibility module reports the sentinel eligible).
+        executorMock.mockHats().setOpen(42, true);
+
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSignature("HatOpenlyClaimable(uint256)", uint256(42)));
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
+
+        // Reject happens before the state write: nothing minted, nullifier preserved.
+        assertEq(executorMock.mintCount(), 0, "no mint on reject");
+        assertFalse(zk.isNullifierUsed(p.emailNullifier), "nullifier preserved on reject");
+    }
+
+    function testClaimRoleByDomain_multiHat_revertIfAnyOpen() public {
+        uint256[] memory hats = _hatIds(100, 200);
+        _activateSingleDomain(hats);
+        executorMock.mockHats().setOpen(200, true); // second hat is open → whole claim rejected
+
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSignature("HatOpenlyClaimable(uint256)", uint256(200)));
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByDomain_failsClosedWhenProbeReverts() public {
+        uint256[] memory hats = _hatIds(42);
+        _activateSingleDomain(hats);
+        // A non-conforming / missing eligibility module makes isEligible revert → fail CLOSED (reject).
+        executorMock.mockHats().setReverting(true);
+
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSignature("HatOpenlyClaimable(uint256)", uint256(42)));
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByEmail_revertOpenHat() public {
+        uint256[] memory hats = _hatIds(42);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+        executorMock.mockHats().setOpen(42, true);
+
+        ZkEmailProofV2 memory p = _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE);
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSignature("HatOpenlyClaimable(uint256)", uint256(42)));
+        zk.claimRoleByEmail(p, user, hats, _emptyProof());
+    }
+
+    function testClaimRoleByDomain_gatedHatPasses() public {
+        // Explicit positive control: a gated hat (probe → false, the default) sails through the gate.
+        uint256[] memory hats = _hatIds(42);
+        _activateSingleDomain(hats);
+        assertFalse(executorMock.mockHats().openHat(42), "hat is gated by default");
+
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
+        assertEq(executorMock.mintCount(), 1, "gated hat mints normally");
     }
 
     function testClaimRoleByDomain_revertNotInAllowlist_wrongHats() public {

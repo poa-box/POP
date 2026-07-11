@@ -21,9 +21,12 @@ import {
     ZkEmailProofV2
 } from "./zkemail/IVerifier.sol";
 import {IDKIMRegistry} from "./zkemail/IDKIMRegistry.sol";
+import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 
 interface IExecutorHatMinter {
     function mintHatsForUser(address user, uint256[] calldata hatIds) external;
+    /// @notice The org's Hats instance the Executor mints through (added as an Executor view getter).
+    function hats() external view returns (IHats);
 }
 
 interface IUniversalAccountRegistry {
@@ -88,11 +91,22 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     error EmptyHats();
     error ZeroClaimer();
     error PasskeyFactoryNotSet();
+    /// @dev H-03 parity: a hat that is OPEN-TO-EVERYONE (default-eligible for an arbitrary address) must
+    ///      not be mintable via the email-claim path — that is the same self-mint escalation the audit
+    ///      closed on QuickJoin (an allowlisted open hat like ELIGIBILITY_ADMIN → org takeover).
+    error HatOpenlyClaimable(uint256 hatId);
 
     /* ───────── Constants ────── */
     bytes4 public constant MODULE_ID = bytes4(keccak256("ZkEmailInvites"));
     uint8 private constant LEAF_DOMAIN = 0;
     uint8 private constant LEAF_EMAIL = 1;
+
+    /// @dev H-03 probe: a domain-separated sentinel that can never be a legitimate wearer/vouched
+    ///      address. If the org's eligibility module reports it eligible for a hat, that hat is
+    ///      default-open (self-mintable by anyone) and is rejected on the claim path. Gated role hats
+    ///      report it NOT eligible, so they pass and remain subject to the per-user eligibility check
+    ///      inside Hats.mintHat. Distinct constant from QuickJoin's — same construction, module-scoped.
+    address private constant _CLAIM_PROBE = address(uint160(uint256(keccak256("poa.zkemailinvites.claim.probe"))));
 
     /* ───────── Passkey enrollment (mirrors QuickJoin shape) ───────── */
     struct PasskeyEnrollment {
@@ -324,6 +338,7 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         if (!l.domainVerifier.verifyProof(proof.pA, proof.pB, proof.pC, signals)) revert InvalidProof();
 
         _verifyLeaf(l.merkleRoot, _leaf(LEAF_DOMAIN, dh, hatIds), merkleProof);
+        _rejectOpenClaimHats(l.executor, hatIds);
         l.usedNullifiers[proof.emailNullifier] = true;
         IExecutorHatMinter(l.executor).mintHatsForUser(claimer, hatIds);
     }
@@ -346,8 +361,26 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         if (!l.emailVerifier.verifyProof(proof.pA, proof.pB, proof.pC, signals)) revert InvalidProof();
 
         _verifyLeaf(l.merkleRoot, _leaf(LEAF_EMAIL, proof.emailHash, hatIds), merkleProof);
+        _rejectOpenClaimHats(l.executor, hatIds);
         l.usedNullifiers[proof.emailNullifier] = true;
         IExecutorHatMinter(l.executor).mintHatsForUser(claimer, hatIds);
+    }
+
+    /// @dev H-03 parity gate. Reverts {HatOpenlyClaimable} if any requested hat is open-to-everyone
+    ///      (the org's eligibility module marks the domain-separated {_CLAIM_PROBE} sentinel eligible).
+    ///      FAIL CLOSED: a reverting probe (eligibility module missing / non-conforming) cannot prove the
+    ///      hat is gated, so it is rejected too. Reads the Hats instance from the Executor (single source
+    ///      of truth) rather than a duplicate field in this module's storage — so the fix ships as a pure
+    ///      impl upgrade with no migration of already-deployed proxies.
+    function _rejectOpenClaimHats(address executor_, uint256[] calldata hatIds) private view {
+        IHats hatsContract = IExecutorHatMinter(executor_).hats();
+        for (uint256 i; i < hatIds.length; ++i) {
+            try hatsContract.isEligible(_CLAIM_PROBE, hatIds[i]) returns (bool probeEligible) {
+                if (probeEligible) revert HatOpenlyClaimable(hatIds[i]);
+            } catch {
+                revert HatOpenlyClaimable(hatIds[i]);
+            }
+        }
     }
 
     /// @dev Cheap, shared pre-checks: non-zero claimer + hats, active allowlist, fresh nullifier, valid

@@ -10,6 +10,14 @@ import {ZkEmailProof, ZkEmailProofV2} from "../src/zkemail/IVerifier.sol";
 import {Groth16Verifier} from "../src/zkemail/vendor/Groth16Verifier.sol";
 import {Groth16VerifierV2} from "../src/zkemail/vendor/Groth16VerifierV2.sol";
 import {PoaDKIMRegistry} from "../src/zkemail/PoaDKIMRegistry.sol";
+import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
+
+/// @dev Minimal Hats stand-in — the H-03 gate probes isEligible; all hats gated (probe → false) by default.
+contract RealProofMockHats {
+    function isEligible(address, uint256) external pure returns (bool) {
+        return false;
+    }
+}
 
 /// @notice Records `mintHatsForUser` calls so the test can assert what ZkEmailInvites minted, AND acts
 ///         as the org executor (governance) so it can activate the allowlist.
@@ -17,6 +25,15 @@ contract RecordingExecutor is IExecutorHatMinter {
     address public lastUser;
     uint256[] public lastHats;
     uint256 public mintCount;
+    IHats private _hats;
+
+    constructor() {
+        _hats = IHats(address(new RealProofMockHats()));
+    }
+
+    function hats() external view returns (IHats) {
+        return _hats;
+    }
 
     function mintHatsForUser(address user, uint256[] calldata hatIds) external {
         lastUser = user;

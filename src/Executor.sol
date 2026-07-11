@@ -283,6 +283,19 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         return _layout().allowedCaller;
     }
 
+    /// @notice The org's Hats Protocol instance.
+    /// @dev    Exposed so authorized hat-minter modules (e.g. ZkEmailInvites) can reach the same Hats
+    ///         reference the Executor mints through — without carrying a duplicate, migration-sensitive
+    ///         Hats field in their own ERC-7201 storage. Pure getter: safe to add via impl upgrade.
+    function hats() external view returns (IHats) {
+        return _layout().hats;
+    }
+
+    /// @notice Whether `minter` is authorized to request hat minting via {mintHatsForUser}.
+    function isAuthorizedHatMinter(address minter) external view returns (bool) {
+        return _layout().authorizedHatMinters[minter];
+    }
+
     /* accept ETH for payable calls within a batch */
     receive() external payable {}
 }

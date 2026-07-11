@@ -31,6 +31,7 @@ import {IDKIMRegistry} from "../src/zkemail/IDKIMRegistry.sol";
 import {OrgDeployer, ITaskManagerBootstrap} from "../src/OrgDeployer.sol";
 import {ModulesFactory} from "../src/factories/ModulesFactory.sol";
 import {ModuleTypes} from "../src/libs/ModuleTypes.sol";
+import {EligibilityModule} from "../src/EligibilityModule.sol";
 import {RoleConfigStructs} from "../src/libs/RoleConfigStructs.sol";
 import {IHybridVotingInit} from "../src/libs/ModuleDeploymentLib.sol";
 import {PaymasterHub} from "../src/PaymasterHub.sol";
@@ -316,8 +317,21 @@ contract ZkEmailOrgFlowTest is DeployerTest {
 
         ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
 
-        uint256 targetHat = orgRegistry.getRoleHat(ZK_ORG_ID, 0); // DEFAULT role hat
-        assertTrue(targetHat != 0, "default role hat exists");
+        // A real zk-email invite grants a GATED role hat, not an open one — mirrors live Test6, where
+        // the Member hat is default-INeligible and the specific claimer is made eligible by governance.
+        // (The H-03 gate deliberately rejects granting an open-to-everyone hat: see the reject test.)
+        // Take any genesis role hat and GATE it explicitly, then grant this claimer eligibility.
+        uint256 targetHat = orgRegistry.getRoleHat(ZK_ORG_ID, 0);
+        assertTrue(targetHat != 0, "role hat exists");
+
+        address eligibilityModule = orgRegistry.getOrgContract(ZK_ORG_ID, ModuleTypes.ELIGIBILITY_MODULE_ID);
+        address claimer = address(0xC0FFEE);
+        // Gate the hat (default-ineligible) and grant this claimer eligibility — governance (executor)
+        // is the eligibility-module superAdmin.
+        vm.startPrank(result.executor);
+        EligibilityModule(eligibilityModule).setDefaultEligibility(targetHat, false, false);
+        EligibilityModule(eligibilityModule).setWearerEligibility(claimer, targetHat, true, true);
+        vm.stopPrank();
 
         uint256[] memory hats = new uint256[](1);
         hats[0] = targetHat;
@@ -330,7 +344,6 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         zk.setActiveAllowlist(root, CID);
 
         // Build a proof addressed to a fresh claimer.
-        address claimer = address(0xC0FFEE);
         ZkEmailProof memory p = _buildDomainProof("anthropic.com", bytes32(uint256(0xBEEF)));
 
         vm.prank(claimer);
@@ -341,6 +354,42 @@ contract ZkEmailOrgFlowTest is DeployerTest {
 
         // Nullifier was consumed.
         assertTrue(zk.isNullifierUsed(p.emailNullifier), "nullifier consumed");
+    }
+
+    /// @notice H-03 parity: an allowlist that grants an OPEN-to-everyone hat (default-eligible for an
+    ///         arbitrary address — e.g. the deployer's genesis index-0 role, or ELIGIBILITY_ADMIN on
+    ///         live orgs) must be rejected on the claim path. Otherwise anyone in the domain could
+    ///         self-mint an administrative hat and escalate to org takeover.
+    function testEndToEndClaimByDomain_rejectsOpenHat() public {
+        _registerZkBeacon();
+        _wireZkInfra();
+        OrgDeployer.DeploymentResult memory result = _deployZkOrg(ZK_ORG_ID);
+
+        ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
+
+        // The genesis index-0 role hat is default-eligible (open) in the deployer config — an attacker's
+        // target. Allowlist it and try to claim: the gate must reject it fail-closed.
+        uint256 openHat = orgRegistry.getRoleHat(ZK_ORG_ID, 0);
+        assertTrue(openHat != 0, "default role hat exists");
+
+        uint256[] memory hats = new uint256[](1);
+        hats[0] = openHat;
+
+        bytes32 domainHash = keccak256(bytes("anthropic.com"));
+        bytes32 root = _leaf(LEAF_DOMAIN, domainHash, hats);
+        vm.prank(result.executor);
+        zk.setActiveAllowlist(root, CID);
+
+        address claimer = address(0xC0FFEE);
+        ZkEmailProof memory p = _buildDomainProof("anthropic.com", bytes32(uint256(0xBEEF)));
+
+        vm.prank(claimer);
+        vm.expectRevert(abi.encodeWithSignature("HatOpenlyClaimable(uint256)", openHat));
+        zk.claimRoleByDomain(p, claimer, hats, _emptyProof());
+
+        // Nothing minted, nullifier NOT consumed — the reject happened before the state write.
+        assertFalse(IHats(SEPOLIA_HATS).isWearerOfHat(claimer, openHat), "no hat minted on reject");
+        assertFalse(zk.isNullifierUsed(p.emailNullifier), "nullifier preserved on reject");
     }
 
     /*──────────── Deploy-time activation (ZkEmailConfig root/cid) end-to-end ────────────*/
