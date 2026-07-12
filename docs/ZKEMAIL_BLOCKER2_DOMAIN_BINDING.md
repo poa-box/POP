@@ -68,10 +68,18 @@ the single domain identity used for BOTH the DKIM registry lookup and the domain
   the signed email is actually *from*.
 
 ### `PoaDKIMRegistry.sol`
-- Key the registry by the **Poseidon** domain hash instead of `keccak256`. `domainHashOf(domain)` (the
-  on-chain keccak helper) is removed from the hot path; seeding passes the **pre-computed**
-  `Poseidon(packBytes(lower(domain),192))` (on-chain Poseidon is impractical; the frontend/scripts have
-  circomlibjs). Keep the rotation/expiry API from the committed Advisory-5 change unchanged.
+- **No contract change** — it is `bytes32`-keyed and stores whatever it is given. What changes is *what
+  we pass*: seed by the **Poseidon** domain hash (`setKeyHash(poseidonDomainHash, keyHash, ...)`), not
+  `setKeyForDomain(domain, ...)` (which keccacs). On-chain Poseidon is impractical, so the hashes are
+  pre-computed off-chain. Keep the Advisory-5 rotation/expiry API unchanged.
+- **Production domain hashes** (`Poseidon(packBytes(lower(domain),192))`) — the deploy wave seeds these
+  (recompute: `node -e` with circomlibjs, or via `allowlist.js` `domainHash`):
+
+  | domain | fromDomainHash (registry key + leaf id) |
+  |--------|------------------------------------------|
+  | `gmail.com` | `0x14d46e073cbff5944a738ea295de6c7447606fa5a270571229d8a4b1e7ca77e5` |
+  | `ku.edu` | `0x256f370d0033263e95a6c486e2a0280c7843b2e0d586e92e6557382f776d6c58` |
+  | `opacitylabs.com` | `0x29e7dedcdb5e509c3f276fb5d689700f0eaaa74bfaa75259b4c545cd2241a5c2` |
 
 ### Off-chain (`poa-app/src/lib/zkemail/allowlist.js` + gen-inputs + prover)
 - `domainHash(domain)` switches from `keccak256(stringToBytes(norm(domain)))` to the **Poseidon**
