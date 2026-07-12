@@ -87,7 +87,7 @@ abstract contract RedeployBase is Script {
         ];
         p.pubkeyHash = 0x280b10886d6d3cb6a9f870d942996b420bbfc51e3bd1f430e18690a6859b6d8f;
         p.emailNullifier = 0x1b451e09f9b080499e788da278eda7a8d16c6c4d69f7280476bb2be9fadac236;
-        p.domainName = "gmail.com";
+        p.fromDomainHash = keccak256(bytes("gmail.com"));
     }
 
     function _userClaimArgs() internal pure returns (uint256[] memory hats, bytes32[] memory merkle) {

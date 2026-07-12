@@ -38,7 +38,7 @@ import {PaymasterHub} from "../src/PaymasterHub.sol";
 
 /*──────────────────────────────  Mocks  ──────────────────────────────*/
 
-/// @notice Domain Groth16 verifier stub (3 signals) that always verifies. Lets the org-flow test
+/// @notice Domain Groth16 verifier stub (4 signals) that always verifies. Lets the org-flow test
 ///         exercise a real domain claim end-to-end without a genuine proof.
 contract MockZkEmailDomainVerifier is IZkEmailGroth16Verifier {
     bool public result = true;
@@ -47,7 +47,7 @@ contract MockZkEmailDomainVerifier is IZkEmailGroth16Verifier {
         result = v;
     }
 
-    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[3] calldata)
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
         external
         view
         returns (bool)
@@ -56,7 +56,7 @@ contract MockZkEmailDomainVerifier is IZkEmailGroth16Verifier {
     }
 }
 
-/// @notice Email Groth16 verifier stub (4 signals) that always verifies.
+/// @notice Email Groth16 verifier stub (5 signals) that always verifies.
 contract MockZkEmailEmailVerifier is IZkEmailGroth16VerifierV2 {
     bool public result = true;
 
@@ -64,7 +64,7 @@ contract MockZkEmailEmailVerifier is IZkEmailGroth16VerifierV2 {
         result = v;
     }
 
-    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[5] calldata)
         external
         view
         returns (bool)
@@ -591,15 +591,16 @@ contract ZkEmailOrgFlowTest is DeployerTest {
     }
 
     /// @dev Builds a `ZkEmailProof` for the domain circuit. The Groth16 points are dummy bytes (the
-    ///      mock verifier ignores them); `pubkeyHash` matches the DKIM fixture and `domainName`
-    ///      is what the registry binds to that key hash. The claimer address is supplied to the
-    ///      claim function as the third public signal, so it is NOT carried in the struct.
+    ///      mock verifier ignores them); `pubkeyHash` matches the DKIM fixture and `fromDomainHash` is
+    ///      the circuit-proven domain commitment the registry + domain leaf bind to. Leaves here key the
+    ///      domain by `keccak256(bytes(domain))`, so mirror that (any consistent bytes32 works with the
+    ///      mock verifier + mock DKIM registry). The claimer address is the third public signal.
     function _buildDomainProof(string memory domain, bytes32 nullifier) internal pure returns (ZkEmailProof memory p) {
         p.pA = [uint256(1), uint256(2)];
         p.pB = [[uint256(3), uint256(4)], [uint256(5), uint256(6)]];
         p.pC = [uint256(7), uint256(8)];
         p.pubkeyHash = KEY_HASH;
         p.emailNullifier = nullifier;
-        p.domainName = domain;
+        p.fromDomainHash = keccak256(bytes(domain));
     }
 }

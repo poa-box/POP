@@ -118,7 +118,7 @@ abstract contract DeployInfraBase is Script {
             pC: [uint256(5), uint256(6)],
             pubkeyHash: keyHash,
             emailNullifier: bytes32(uint256(7)),
-            domainName: domain
+            fromDomainHash: keccak256(bytes(domain))
         });
     }
 
@@ -129,7 +129,7 @@ abstract contract DeployInfraBase is Script {
             pC: [uint256(5), uint256(6)],
             pubkeyHash: keyHash,
             emailNullifier: bytes32(uint256(7)),
-            domainName: domain,
+            fromDomainHash: keccak256(bytes(domain)),
             emailHash: bytes32(uint256(8))
         });
     }

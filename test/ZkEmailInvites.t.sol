@@ -54,7 +54,7 @@ contract MockDomainVerifier is IZkEmailGroth16Verifier {
         result = v;
     }
 
-    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[3] calldata)
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
         external
         view
         returns (bool)
@@ -71,7 +71,7 @@ contract MockEmailVerifier is IZkEmailGroth16VerifierV2 {
         result = v;
     }
 
-    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[5] calldata)
         external
         view
         returns (bool)
@@ -333,22 +333,24 @@ contract ZkEmailInvitesTest is Test {
     }
 
     /// @dev Builds a `ZkEmailProof`. The mock verifier ignores `pA/pB/pC`, so they stay zero; only
-    ///      `pubkeyHash`, `emailNullifier`, and `domainName` carry meaning here.
-    function _makeProof(bytes32 nullifier) internal pure returns (ZkEmailProof memory p) {
-        return _makeProof(nullifier, DOMAIN);
+    ///      `pubkeyHash`, `emailNullifier`, and `fromDomainHash` carry meaning here. `fromDomainHash` is
+    ///      the circuit-proven domain commitment used as BOTH the DKIM lookup key and the domain leaf id
+    ///      — so it must equal the allowlisted domain id (DOMAIN_HASH).
+    function _makeProof(bytes32 nullifier) internal view returns (ZkEmailProof memory p) {
+        return _makeProof(nullifier, DOMAIN_HASH);
     }
 
-    function _makeProof(bytes32 nullifier, string memory domain) internal pure returns (ZkEmailProof memory p) {
+    function _makeProof(bytes32 nullifier, bytes32 fromDomainHash) internal pure returns (ZkEmailProof memory p) {
         p.pubkeyHash = KEY_HASH;
         p.emailNullifier = nullifier;
-        p.domainName = domain;
+        p.fromDomainHash = fromDomainHash;
     }
 
-    function _makeProofV2(bytes32 nullifier, bytes32 emailHash) internal pure returns (ZkEmailProofV2 memory p) {
+    function _makeProofV2(bytes32 nullifier, bytes32 emailHash) internal view returns (ZkEmailProofV2 memory p) {
         p.pubkeyHash = KEY_HASH;
         p.emailNullifier = nullifier;
-        p.domainName = DOMAIN;
         p.emailHash = emailHash;
+        p.fromDomainHash = DOMAIN_HASH;
     }
 
     function _enroll() internal pure returns (ZkEmailInvites.PasskeyEnrollment memory e) {
@@ -577,16 +579,19 @@ contract ZkEmailInvitesTest is Test {
         assertEq(minted[1], 200);
     }
 
-    function testClaimRoleByDomain_normalizesCase() public {
-        // Leaf is keyed on keccak(lower(domain)). Proof reports a mixed-case domain that lowercases
-        // to the same hash, so the leaf (and thus merkle proof) still match.
+    function testClaimRoleByDomain_wrongDomainHashReverts() public {
+        // Blocker 2: the domain identity is the circuit-proven `fromDomainHash`, used as BOTH the DKIM
+        // key and the domain leaf id. A proof committing to a DIFFERENT domain than the allowlisted one
+        // fails the merkle check (NotInAllowlist) — an attacker can't retarget the claim to another org's
+        // domain. (Case-normalization is now in-circuit/off-chain, not an on-chain concern.)
         uint256[] memory hats = _hatIds(7);
-        _activateSingleDomain(hats);
+        _activateSingleDomain(hats); // allowlists DOMAIN_HASH
 
-        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)), "ANTHROPIC.com");
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)), keccak256("evil.com"));
         vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.NotInAllowlist.selector);
         zk.claimRoleByDomain(p, user, hats, _emptyProof());
-        assertEq(executorMock.mintCount(), 1);
+        assertEq(executorMock.mintCount(), 0);
     }
 
     function testClaimRoleByDomain_permissionlessRelayer() public {

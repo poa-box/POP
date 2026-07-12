@@ -99,7 +99,7 @@ interface IHatsLike {
 
 /* ─────────────────────── Sim-only mocks ─────────────────────── */
 contract SimMockVerifier is IZkEmailGroth16Verifier {
-    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[3] calldata)
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
         external
         pure
         returns (bool)
@@ -109,7 +109,7 @@ contract SimMockVerifier is IZkEmailGroth16Verifier {
 }
 
 contract SimMockVerifierV2 is IZkEmailGroth16VerifierV2 {
-    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[4] calldata)
+    function verifyProof(uint256[2] calldata, uint256[2][2] calldata, uint256[2] calldata, uint256[5] calldata)
         external
         pure
         returns (bool)
@@ -418,7 +418,7 @@ contract SimIntegrateZkEmailTest6 is Test6Base {
         p.pC = [uint256(5), uint256(6)];
         p.pubkeyHash = bytes32(uint256(0xAA));
         p.emailNullifier = keccak256(abi.encode("nullifier", claimer));
-        p.domainName = INVITE_DOMAIN;
+        p.fromDomainHash = keccak256(bytes(INVITE_DOMAIN));
     }
 }
 

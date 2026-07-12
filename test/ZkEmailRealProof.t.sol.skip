@@ -53,6 +53,14 @@ contract RecordingExecutor is IExecutorHatMinter {
 }
 
 /**
+ * @notice PENDING THE CEREMONY (renamed to .t.sol.skip). The Blocker 2 circuit change made the domain
+ *         circuit 4-signal / email circuit 5-signal (adds the proven `fromDomainHash`), so the GENUINE
+ *         proofs + vendored verifiers below are stale. They must be regenerated from the PRODUCTION
+ *         (multi-party ceremony) verifier — not a throwaway dev key — so this test is intentionally
+ *         parked until `circuits/ceremony/` runs and the new verifiers are vendored. The circuit itself
+ *         is already validated (a genuine proof verifies with the correct fromDomainHash — see the
+ *         Blocker 2 commit); the mock-based ZkEmailInvites/ZkEmailOrgFlow suites cover the contract ABI.
+ *
  * @title ZkEmailRealProofTest
  * @notice End-to-end "no mock" spike for the merkle-allowlist model. BOTH proofs below are GENUINE
  *         Groth16 proofs produced off-chain by snarkjs:

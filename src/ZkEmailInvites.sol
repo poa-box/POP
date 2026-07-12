@@ -58,9 +58,9 @@ interface IUniversalPasskeyAccountFactory {
  * @dev    Allowlist = a JSON file on IPFS (domains + specific emails -> role hat IDs). Its merkle root
  *         + CID are the on-chain `merkleRoot`/`allowlistCid` (set by the executor = governance, or at
  *         deploy). A claim carries a merkle proof for the claimer's entry; the contract verifies:
- *           - the Groth16 email proof (domain circuit: 3 signals; specific-email circuit: 4 signals,
- *             the 4th being `emailHash`, a commitment to the From address),
- *           - the DKIM key for the sending domain (`PoaDKIMRegistry.isKeyHashValid`),
+ *           - the Groth16 email proof (domain circuit: 4 signals; specific-email circuit: 5 signals),
+ *             both exposing `fromDomainHash` — a Poseidon commitment to the PROVEN From-address domain,
+ *           - the DKIM key for that PROVEN domain (`PoaDKIMRegistry.isKeyHashValid(fromDomainHash, ..)`),
  *           - the merkle proof that `(kind, identifier, hatIds)` is in the active allowlist root,
  *           - a single-use nullifier,
  *         then mints `hatIds` to the in-circuit-bound claimer. Two-phase authority: a metadata admin
@@ -69,7 +69,8 @@ interface IUniversalPasskeyAccountFactory {
  *
  *         Leaf encoding matches OpenZeppelin `StandardMerkleTree` / `PaymentManager`:
  *         `keccak256(bytes.concat(keccak256(abi.encode(uint8 kind, bytes32 id, uint256[] hatIds))))`
- *         with `kind 0 = domain (id = keccak256(lower(domain)))`, `kind 1 = email (id = emailHash)`.
+ *         with `kind 0 = domain (id = fromDomainHash)`, `kind 1 = email (id = emailHash)`. Both ids are
+ *         circuit-proven Poseidon commitments, so the domain is no longer caller-supplied (Blocker 2).
  *
  *         Dormant until a root is set (`merkleRoot == 0` -> every claim reverts), so a deployed-but-
  *         unactivated module is inert and existing org flows are unaffected.
@@ -329,12 +330,13 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         bytes32[] calldata merkleProof
     ) private returns (bytes32 dh) {
         Layout storage l = _layout();
-        dh = _commonPreChecks(l, claimer, proof.emailNullifier, proof.domainName, proof.pubkeyHash, hatIds.length);
+        dh = _commonPreChecks(l, claimer, proof.emailNullifier, proof.fromDomainHash, proof.pubkeyHash, hatIds.length);
 
-        uint256[3] memory signals;
+        uint256[4] memory signals;
         signals[0] = uint256(proof.pubkeyHash);
         signals[1] = uint256(proof.emailNullifier);
         signals[2] = uint256(uint160(claimer));
+        signals[3] = uint256(proof.fromDomainHash);
         if (!l.domainVerifier.verifyProof(proof.pA, proof.pB, proof.pC, signals)) revert InvalidProof();
 
         _verifyLeaf(l.merkleRoot, _leaf(LEAF_DOMAIN, dh, hatIds), merkleProof);
@@ -350,14 +352,15 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         bytes32[] calldata merkleProof
     ) private {
         Layout storage l = _layout();
-        // Domain still bound (anti-forgery: a real signing domain), but identity is `emailHash`.
-        _commonPreChecks(l, claimer, proof.emailNullifier, proof.domainName, proof.pubkeyHash, hatIds.length);
+        // Domain still bound (anti-forgery: the PROVEN signing domain), but identity is `emailHash`.
+        _commonPreChecks(l, claimer, proof.emailNullifier, proof.fromDomainHash, proof.pubkeyHash, hatIds.length);
 
-        uint256[4] memory signals;
+        uint256[5] memory signals;
         signals[0] = uint256(proof.pubkeyHash);
         signals[1] = uint256(proof.emailNullifier);
         signals[2] = uint256(uint160(claimer));
         signals[3] = uint256(proof.emailHash);
+        signals[4] = uint256(proof.fromDomainHash);
         if (!l.emailVerifier.verifyProof(proof.pA, proof.pB, proof.pC, signals)) revert InvalidProof();
 
         _verifyLeaf(l.merkleRoot, _leaf(LEAF_EMAIL, proof.emailHash, hatIds), merkleProof);
@@ -384,12 +387,14 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     }
 
     /// @dev Cheap, shared pre-checks: non-zero claimer + hats, active allowlist, fresh nullifier, valid
-    ///      DKIM key for the claimed domain. Returns the domain hash.
+    ///      DKIM key for the PROVEN From-domain. `fromDomainHash` is a circuit public signal (verified by
+    ///      the Groth16 check in the caller), so the DKIM key is bound to the actual sending domain — not
+    ///      a caller-supplied string. Returns it for use as the domain merkle-leaf identity.
     function _commonPreChecks(
         Layout storage l,
         address claimer,
         bytes32 nullifier,
-        string calldata domainName,
+        bytes32 fromDomainHash,
         bytes32 pubkeyHash,
         uint256 hatCount
     ) private view returns (bytes32 dh) {
@@ -397,7 +402,7 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         if (hatCount == 0) revert EmptyHats();
         if (l.merkleRoot == bytes32(0)) revert AllowlistNotActive();
         if (l.usedNullifiers[nullifier]) revert NullifierAlreadyUsed();
-        dh = keccak256(bytes(_lower(domainName)));
+        dh = fromDomainHash;
         if (!l.dkimRegistry.isKeyHashValid(dh, pubkeyHash)) revert InvalidDKIMKey();
     }
 
@@ -409,6 +414,9 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     function _verifyLeaf(bytes32 root, bytes32 leaf, bytes32[] calldata merkleProof) private pure {
         if (!MerkleProof.verifyCalldata(merkleProof, root, leaf)) revert NotInAllowlist();
     }
+
+    // (domain identity is now the circuit-proven `fromDomainHash` Poseidon commitment; the old ASCII
+    //  `_lower` helper for hashing a caller-supplied domain string is no longer needed.)
 
     function _registerAndCreateAccount(
         PasskeyEnrollment calldata passkey,
@@ -434,17 +442,6 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         // Idempotent: returns the existing address if the account is already deployed.
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
-    }
-
-    /// @dev ASCII lowercase — domain names are ASCII per RFC 1035.
-    function _lower(string memory s) private pure returns (string memory) {
-        bytes memory b = bytes(s);
-        for (uint256 i; i < b.length; ++i) {
-            if (b[i] >= 0x41 && b[i] <= 0x5A) {
-                b[i] = bytes1(uint8(b[i]) + 32);
-            }
-        }
-        return string(b);
     }
 
     /* ───────── Views ─────── */
