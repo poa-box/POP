@@ -93,7 +93,15 @@ const main = async () => {
   inputs.fromWindowIndex = String(fromWindowIndex);
   inputs.emailIndexInWindow = String(emailIdx - fromWindowIndex);
 
-  fs.writeFileSync('build/input.json', JSON.stringify(inputs));
+  // 5c. (v1 + v2 Blocker 2) '@' position WITHIN the extracted From address, for the in-circuit domain
+  // split. FromAddrRegex reveals the address left-aligned, so atIndex = the local-part length.
+  inputs.atIndex = String(EMAIL.indexOf('@'));
+
+  fs.writeFileSync('build/input.json', JSON.stringify(inputs)); // == v2 (full); kept for back-compat
+  fs.writeFileSync('build/input-v2.json', JSON.stringify(inputs));
+  // V1 uses the same fields — it commits the domain, and also extracts the address (emailHash unused),
+  // so it needs emailIndexInWindow too. Both circuits accept identical input; keep a v1 file for clarity.
+  fs.writeFileSync('build/input-v1.json', JSON.stringify(inputs));
   fs.writeFileSync('build/test-key.json', JSON.stringify(
     { domain: DOMAIN, selector: SELECTOR, claimer: CLAIMER, privateKeyPem: privPem, pubSpkiB64: pubB64 }, null, 2));
 

@@ -9,36 +9,49 @@ that trust by proving the From-domain **in-circuit**.
 > Must land **before** the ceremony (it changes the `.r1cs`). It also changes domain-leaf semantics, so
 > it invalidates any live root — see Migration.
 
-## Proven approach (spike)
+## Implementation (built + validated)
 
-`circuits/spikes/DomainBindSpike.circom` (+ `check.mjs`) is a compiled, witness-tested proof of the
-core mechanism — mirroring V2's existing email-address extraction, but for the domain:
+Implemented in `circuits/from_domain.circom` (`FromAddrCommit`), used by both `PopRoleClaim.circom`
+(V1) and `PopRoleClaimV2.circom` (V2). Both circuits compile (~992k constraints, under 2^20) and pass
+witness + soundness validation with a real DKIM-signed email.
+
+**Design note — why NOT a standalone domain regex.** An early spike (`circuits/spikes/DomainBindSpike.circom`)
+used `EmailDomainRegex`, which turned out to reveal **every** `@domain` in the header (from:, to:,
+message-id), so it is *not* From-anchored and can't bind the sender. The shipped design instead derives
+the domain from the address that **`FromAddrRegex`** extracts (which anchors to the line-start `from:`,
+the unique signed From field), then splits it at its single `@` in-circuit:
 
 ```
-EmailDomainRegex(WIN)  →  SelectRegexReveal(WIN, DMAX)  →  ToLower  →  PackBytes(192)  →  Poseidon(7)  =  fromDomainHash
+FromAddrRegex(WIN) → SelectRegexReveal → ToLower  ─┬─ PackBytes(192)→Poseidon(7) = emailHash      (full address)
+                                                   └─ mask≤@, VarShiftLeft past @, PackBytes→Poseidon = fromDomainHash
 ```
 
-Result (reproduce: `cd ~/pop-zk-work && node spike/check.mjs`):
-- **Correct + reproducible:** for `from:Alice <ALICE@Example.COM>` the circuit outputs
-  `fromDomainHash` == the off-chain `Poseidon(packBytes(lower("example.com"), 192))` (the exact
-  machinery `allowlist.js` already uses for `emailHash`). Mixed case + a display name are handled.
-- **Cheap:** ~52.6k non-linear constraints — ≈7% on top of V2's ~1.2M. Acceptable.
+The `@`-split is sound: `atIndex` (a prover hint) is constrained to be an `@` with no earlier `@`, so it
+is forced to the real (only) `@`. `VarShiftLeft` is a *circular* rotate, so the local part is masked to
+zero before the shift, leaving a clean `domain + trailing zeros` buffer.
 
-So the domain identity can be a **Poseidon commitment the circuit proves**, consumed identically
-on-chain and by the off-chain allowlist builder.
+Validated (reproduce from `~/pop-zk-work`, after compiling + `node scripts/gen-inputs.mjs`):
+- **Correct + reproducible:** circuit `fromDomainHash` == off-chain `Poseidon(packBytes(lower(domain),192))`
+  (the exact machinery `allowlist.js` uses for `emailHash`); `emailHash` still matches too; V1 and V2
+  emit the **same** `fromDomainHash` for the same email.
+- **Sound:** a wrong `atIndex` (mid-local-part, into the domain, or 0) is rejected by the `@` constraint.
+- **From-anchored:** the domain comes from the From address, never a to:/message-id domain.
+- **Cost:** ~992k non-linear constraints for both circuits (V1 grew because it now extracts the From
+  address too; both still fit pot20/pot21).
 
 ## Full design — domain identity = `Poseidon(packBytes(lower(domain), 192))` everywhere
 
 The caller-supplied `domainName` disappears; `fromDomainHash` (a proven public signal) replaces it as
 the single domain identity used for BOTH the DKIM registry lookup and the domain merkle leaf.
 
-### Circuits
-- **`PopRoleClaimV2.circom`**: add the extraction above; expose `fromDomainHash` as a new public
-  signal. Public signals `4 → 5`: `[pubkeyHash, emailNullifier, claimerAddress, emailHash, fromDomainHash]`.
-- **`PopRoleClaim.circom` (V1)**: today extracts *no* domain. Add the same From-window + EmailDomainRegex
-  extraction and expose `fromDomainHash`. Public signals `3 → 4`:
-  `[pubkeyHash, emailNullifier, claimerAddress, fromDomainHash]`. (This is the soundness-critical path.)
-- New prover inputs: the From window + `domainIndexInWindow` (same shape as V2's existing From hints).
+### Circuits (DONE)
+- **`PopRoleClaimV2.circom`**: expose `fromDomainHash` — public signals `4 → 5`:
+  `[pubkeyHash, emailNullifier, claimerAddress, emailHash, fromDomainHash]`.
+- **`PopRoleClaim.circom` (V1)**: extracted *no* domain before; now runs the shared `FromAddrCommit` and
+  exposes `fromDomainHash` — public signals `3 → 4`:
+  `[pubkeyHash, emailNullifier, claimerAddress, fromDomainHash]`. (The soundness-critical path.)
+- New prover inputs (both): `fromWindowIndex`, `emailIndexInWindow`, `atIndex` (all From-field hints;
+  `gen-inputs.mjs` emits them). V1 and V2 accept identical input JSON.
 
 ### Verifiers / ABI (rides the ceremony)
 - `IZkEmailGroth16Verifier.verifyProof(..., uint256[3])` → `uint256[4]`; V2 `uint256[4]` → `uint256[5]`.

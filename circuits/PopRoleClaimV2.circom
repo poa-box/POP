@@ -8,6 +8,7 @@ include "@zk-email/circuits/utils/bytes.circom";
 include "@zk-email/zk-regex-circom/circuits/common/from_addr_regex.circom";
 include "circomlib/circuits/comparators.circom";
 include "circomlib/circuits/poseidon.circom";
+include "from_domain.circom";
 
 /// @title HexCharToNibble — decode one ASCII hex char (0-9,a-f,A-F) to its 0..15 nibble (asserts valid).
 template HexCharToNibble() {
@@ -32,25 +33,20 @@ template HexCharToNibble() {
     nibble <== tD + tU + tL;
 }
 
-/// @title ToLower — ASCII-lowercase one byte (A-Z -> a-z; other bytes unchanged).
-template ToLower() {
-    signal input c;
-    signal output out;
-    signal ge <== GreaterEqThan(8)([c, 65]);
-    signal le <== LessEqThan(8)([c, 90]);
-    signal isUpper <== ge * le;
-    out <== c + isUpper * 32;
-}
+// ToLower is provided by from_domain.circom (shared with the domain extraction).
 
 /// @title PopRoleClaimV2
 /// @notice v2 of the POP client-side ZK Email role-claim circuit. Same DKIM verification + subject
 ///         address binding as v1, plus an in-circuit commitment to the sender's From email address so
 ///         the contract can enforce SPECIFIC-address allowlist entries (not just whole domains).
-/// @dev Public outputs (order fixed): [pubkeyHash, emailNullifier, claimerAddress, emailHash].
-///      Signals 0..2 are byte-identical to v1; emailHash is appended.
+/// @dev Public outputs (order fixed):
+///      [pubkeyHash, emailNullifier, claimerAddress, emailHash, fromDomainHash].
+///      Signals 0..2 are byte-identical to v1; emailHash then fromDomainHash are appended.
 ///      - emailHash = Poseidon(packBytes(lowercase(From email address), 192)) — matches the off-chain
 ///        builder (gen-inputs.mjs / the frontend), which lowercases + zero-pads to EMAX=192 bytes (-> 7
 ///        31-byte field chunks) identically. The 192 here MUST match `EMAX` below and the off-chain code.
+///      - fromDomainHash = Poseidon commitment of the PROVEN From-address DOMAIN (Blocker 2). Lets the
+///        contract bind the DKIM registry lookup to the actual sending domain, same as v1.
 /// @param maxHeadersLength canonicalized signed-header length (multiple of 64).
 /// @param n RSA chunk bit width (121). @param k RSA chunk count (17) -> RSA-2048.
 template PopRoleClaimV2(maxHeadersLength, n, k) {
@@ -61,11 +57,13 @@ template PopRoleClaimV2(maxHeadersLength, n, k) {
     signal input commandIndex;       // start of "Claim POP role for 0x" within emailHeader
     signal input fromWindowIndex;    // start of a small window containing the From field (prover hint)
     signal input emailIndexInWindow; // start of the From email address within that window
+    signal input atIndex;            // index of '@' within the extracted From address (prover hint)
 
     signal output pubkeyHash;
     signal output emailNullifier;
     signal output claimerAddress;
     signal output emailHash;
+    signal output fromDomainHash;
 
     // --- 1. DKIM signature verification over the header (body ignored) ---
     component ev = EmailVerifier(maxHeadersLength, 64, n, k, 1, 0, 0, 0);
@@ -103,32 +101,12 @@ template PopRoleClaimV2(maxHeadersLength, n, k) {
     }
     claimerAddress <== acc[ADDR_HEX];
 
-    // --- 4. From-email commitment (specific-address allowlist support) ---
-    // Run the (expensive) From-address regex over a small WINDOW around the From field rather than the
-    // whole header — ~4x fewer constraints. Soundness: FromAddrRegex anchors to a line-start `from:`,
-    // which is the unique DKIM-signed From field, so a match can only land on the real From email; the
-    // prover-supplied window just has to contain it. FromAddrRegex matches both "from:Name <addr>" and
-    // bare "from:addr" (relaxed-canonicalized) and reveals only the email address bytes.
-    var FROM_WINDOW = 256;
-    var EMAX = 192; // generous bound for a real email address (< FROM_WINDOW)
-
-    signal fromWindow[FROM_WINDOW] <==
-        SelectSubArray(maxHeadersLength, FROM_WINDOW)(emailHeader, fromWindowIndex, FROM_WINDOW);
-    signal (fromOut, fromReveal[FROM_WINDOW]) <== FromAddrRegex(FROM_WINDOW)(fromWindow);
-    fromOut === 1;
-
-    signal emailBuf[EMAX] <== SelectRegexReveal(FROM_WINDOW, EMAX)(fromReveal, emailIndexInWindow);
-
-    signal emailLower[EMAX];
-    component tl[EMAX];
-    for (var i = 0; i < EMAX; i++) {
-        tl[i] = ToLower();
-        tl[i].c <== emailBuf[i];
-        emailLower[i] <== tl[i].out;
-    }
-
-    signal emailPacked[7] <== PackBytes(EMAX)(emailLower); // ceil(192/31) = 7 field elements
-    emailHash <== Poseidon(7)(emailPacked);
+    // --- 4. From-address commitments (specific-address allowlist support + Blocker 2 domain binding) ---
+    // One from-anchored extraction yields BOTH emailHash (full address, for specific-address entries) and
+    // fromDomainHash (its domain, bound to the DKIM signer). See from_domain.circom for the soundness of
+    // deriving the domain from the FromAddrRegex address (vs a standalone, non-anchored domain regex).
+    (emailHash, fromDomainHash) <==
+        FromAddrCommit(maxHeadersLength)(emailHeader, fromWindowIndex, emailIndexInWindow, atIndex);
 }
 
 component main = PopRoleClaimV2(1024, 121, 17);

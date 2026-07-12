@@ -4,6 +4,7 @@ include "@zk-email/circuits/email-verifier.circom";
 include "@zk-email/circuits/helpers/email-nullifier.circom";
 include "@zk-email/circuits/utils/array.circom";
 include "circomlib/circuits/comparators.circom";
+include "from_domain.circom";
 
 /// @title HexCharToNibble
 /// @notice Decode one ASCII hex character (0-9, a-f, A-F) into its 0..15 nibble value.
@@ -38,11 +39,15 @@ template HexCharToNibble() {
 /// @notice Client-side ZK Email role-claim circuit for POP.
 /// @notice Proves: an email was DKIM-signed by some domain (exposes pubkeyHash), and the signed
 ///         headers contain the command "Claim POP role for 0x<addr>"; binds and exposes <addr>.
-/// @dev Header-only (body hash ignored). Public outputs: [pubkeyHash, emailNullifier, claimerAddress].
-///      - pubkeyHash    : Poseidon hash of the DKIM RSA pubkey (the contract maps domain->this hash
-///                        via PoaDKIMRegistry, so the domain need not be extracted in-circuit).
+/// @dev Header-only (body hash ignored). Public outputs (order fixed):
+///      [pubkeyHash, emailNullifier, claimerAddress, fromDomainHash].
+///      - pubkeyHash    : Poseidon hash of the DKIM RSA pubkey (the signer).
 ///      - emailNullifier: poseidon(poseidon(signature)) — single-use replay guard.
 ///      - claimerAddress: uint160 of the address parsed from the signed command (binds the claim).
+///      - fromDomainHash: Poseidon commitment of the PROVEN From-address domain (Blocker 2). The
+///                        contract binds registry[fromDomainHash]==pubkeyHash AND the domain merkle
+///                        leaf to this value, so a domain claim can only mint for the domain the signed
+///                        email is actually FROM — not a caller-supplied string.
 /// @param maxHeadersLength Max canonicalized signed-header length (multiple of 64).
 /// @param n RSA chunk bit width (121).
 /// @param k RSA chunk count (17) -> supports RSA-2048.
@@ -51,11 +56,15 @@ template PopRoleClaim(maxHeadersLength, n, k) {
     signal input emailHeaderLength;
     signal input pubkey[k];
     signal input signature[k];
-    signal input commandIndex; // start index of "Claim POP role for 0x" within emailHeader
+    signal input commandIndex;       // start index of "Claim POP role for 0x" within emailHeader
+    signal input fromWindowIndex;    // start of a window containing the From field (prover hint)
+    signal input emailIndexInWindow; // start of the From address within that window (prover hint)
+    signal input atIndex;            // index of '@' within the extracted From address (prover hint)
 
     signal output pubkeyHash;
     signal output emailNullifier;
     signal output claimerAddress;
+    signal output fromDomainHash;
 
     // --- 1. DKIM signature verification over the header (body ignored) ---
     component ev = EmailVerifier(maxHeadersLength, 64, n, k, 1, 0, 0, 0);
@@ -98,6 +107,12 @@ template PopRoleClaim(maxHeadersLength, n, k) {
         acc[i + 1] <== acc[i] * 16 + nib[i].nibble;
     }
     claimerAddress <== acc[ADDR_HEX];
+
+    // --- 4. Bind the PROVEN From-address domain (Blocker 2) ---
+    // Same from-anchored extraction as v2; v1 commits only the domain (emailHash is unused here).
+    signal emailHashUnused;
+    (emailHashUnused, fromDomainHash) <==
+        FromAddrCommit(maxHeadersLength)(emailHeader, fromWindowIndex, emailIndexInWindow, atIndex);
 }
 
 component main = PopRoleClaim(1024, 121, 17);
