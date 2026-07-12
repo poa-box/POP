@@ -22,6 +22,7 @@ destroys their entropy. More independent contributors = stronger. 3–5 unaffili
 | `phase2-contribute.sh` | each contributor, own machine | one `zkey contribute` of private entropy; prints + logs the contribution hash |
 | `phase2-finalize.sh` | coordinator, once/circuit | public beacon → `zkey verify` (OK) → export vkey + solidity verifier |
 | `rehearse.sh` | anyone | runs the **entire** flow on a tiny circuit with a locally-generated ptau (no download) — prove the mechanics before the real run |
+| `verify-ceremony.sh` | anyone (contributor / outsider) | **independent audit** — re-derives everything and confirms the final key is an untampered product of the recorded ceremony (+ optionally that the on-chain verifier and beacon match). Exit 0 = trustworthy, 1 = do not deploy |
 
 Verify the mechanics any time: `./rehearse.sh` → must print `REHEARSAL PASSED`.
 
@@ -86,7 +87,30 @@ $CER/phase2-finalize.sh PopRoleClaimV2 \
    `ZkEmailInvites.setDomainVerifier` / `setEmailVerifier` (onlyExecutor = governance; remember the
    `announceWinner --gas-limit 3000000` gotcha). Update `OrgDeployer`'s zk-config verifier addresses so
    future org deploys use the ceremony keys.
-6. **Audit:** anyone can re-verify the on-chain vkey against the transcript — export the vkey from the
-   published `_final.zkey`, confirm its constants match the deployed verifier bytecode (the same
-   fingerprint method that proved the dev key was live), and confirm every contributor's published
-   hash is in the transcript.
+## Auditing (anyone, anytime) — `verify-ceremony.sh`
+
+The point of a ceremony is that you don't have to *trust* the coordinator — you *verify*. After the
+run, publish `ceremony-out/*/` (final zkey + verifier + transcript) and let anyone re-check it:
+
+```sh
+circuits/ceremony/verify-ceremony.sh PopRoleClaimV2 \
+    build/PopRoleClaimV2.r1cs ptau/powersOfTau28_hez_final_21.ptau \
+    ceremony-out/v2/PopRoleClaimV2_final.zkey ceremony-out/v2/PopRoleClaimV2.transcript.txt \
+    --expect-ptau-sha256 <the-hash-you-cross-checked>
+```
+
+What it checks (exit 0 = trustworthy, 1 = do NOT deploy):
+- **ptau** hashes to the value you cross-checked against the published table, and matches the transcript.
+- **`snarkjs zkey verify`** independently re-validates the ENTIRE contribution chain + beacon against
+  the r1cs + ptau — the load-bearing cryptographic check.
+- the **final zkey** matches the sha256 the transcript recorded (nothing swapped after finalize).
+
+Optional flags:
+- `--my-hash <hex>` — a contributor pastes the hash snarkjs printed for THEIR step; confirms it's in
+  the final key (their contribution was actually included).
+- `--onchain <verifier-addr> --rpc <url>` — confirms the DEPLOYED verifier's bytecode embeds this
+  ceremony's verifying key (delta + IC points) — i.e. what's live on-chain IS this ceremony's output.
+- `--beacon-block <N> --rpc <url>` — confirms the transcript's beacon == Ethereum block N's hash.
+
+It's tamper-tested: it PASSES a clean run and FAILS a corrupted zkey, a swapped transcript hash, or a
+contributor hash that isn't really in the ceremony.
