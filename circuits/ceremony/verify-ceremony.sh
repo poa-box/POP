@@ -26,6 +26,10 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/lib.sh"
+# lib.sh enables `set -e`; the auditor runs EVERY check and tallies pass/fail itself (via `bad`), so a
+# single failing check (or a missing transcript field) must NOT abort the run. Turn errexit back off;
+# hard errors still exit via the explicit `err`/`|| err` calls below.
+set +e
 
 [[ $# -ge 5 ]] || err "usage: verify-ceremony.sh <circuit-name> <r1cs> <ptau> <final.zkey> <transcript> [options]"
 NAME="$1"; R1CS="$2"; PTAU="$3"; FINAL="$4"; TS="$5"; shift 5
@@ -48,8 +52,8 @@ PASS=1
 ok()   { printf '  \033[1;32m[OK]\033[0m   %s\n' "$*"; }
 bad()  { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; PASS=0; }
 skip() { printf '  \033[1;33m[skip]\033[0m %s\n' "$*"; }
-# Pull a `key:  value` field out of the transcript (first match), trimming whitespace.
-tfield() { grep -m1 "^$1" "$TS" | sed "s/^$1//" | tr -d ' \t' | grep -oiE '[0-9a-fx]+' | head -1; }
+# Pull a `key:  value` field out of the transcript (first match), trimming whitespace. Empty if absent.
+tfield() { grep -m1 "^$1" "$TS" 2>/dev/null | sed "s/^$1//" | tr -d ' \t' | grep -oiE '[0-9a-fx]+' | head -1 || true; }
 
 log "Auditing ${NAME} ceremony"
 log "  final zkey:  $FINAL"

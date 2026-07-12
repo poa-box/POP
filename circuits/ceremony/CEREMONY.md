@@ -20,7 +20,9 @@ destroys their entropy. More independent contributors = stronger. 3–5 unaffili
 |--------|-------------|--------------|
 | `phase2-begin.sh` | coordinator, once/circuit | `groth16 setup` → initial `_0000.zkey` + starts the transcript |
 | `phase2-contribute.sh` | each contributor, own machine | one `zkey contribute` of private entropy; prints + logs the contribution hash |
-| `phase2-finalize.sh` | coordinator, once/circuit | public beacon → `zkey verify` (OK) → export vkey + solidity verifier |
+| `beacon-announce.sh` | coordinator, before finalizing | pins the beacon to a FUTURE Ethereum block + the current contribution state; prints a commitment you post publicly (anti-grinding) |
+| `beacon-finalize.sh` | coordinator, after that block is mined | checks the block exists + contributions are unchanged, fetches its hash, and runs the finalize |
+| `phase2-finalize.sh` | (used by beacon-finalize, or standalone) | beacon → `zkey verify` (OK) → export vkey + solidity verifier |
 | `rehearse.sh` | anyone | runs the **entire** flow on a tiny circuit with a locally-generated ptau (no download) — prove the mechanics before the real run |
 | `verify-ceremony.sh` | anyone (contributor / outsider) | **independent audit** — re-derives everything and confirms the final key is an untampered product of the recorded ceremony (+ optionally that the on-chain verifier and beacon match). Exit 0 = trustworthy, 1 = do not deploy |
 
@@ -66,14 +68,28 @@ circuits/ceremony/phase2-contribute.sh PopRoleClaimV2 \
 Contributor #2 builds on `_0001.zkey` → `_0002.zkey`, etc. Contributors should verify the file they
 received before contributing: `snarkjs zkey verify build/PopRoleClaimV2.r1cs <ptau> <received.zkey>`.
 
-Coordinator finalizes with a **public** beacon (choose a future randomness source — e.g. a specified
-future Ethereum block hash — and publish which one *before* the ceremony ends):
+Coordinator finalizes with a **public beacon** — randomness nobody can predict or grind. Two steps,
+automated by `beacon-announce.sh` (commit to a future block now) then `beacon-finalize.sh` (fold its
+hash in once mined). Say the last contribution is `_0005.zkey`:
+
 ```sh
-$CER/phase2-finalize.sh PopRoleClaimV2 \
-    ceremony-out/v2/PopRoleClaimV2_0003.zkey build/PopRoleClaimV2.r1cs \
-    ptau/powersOfTau28_hez_final_21.ptau ceremony-out/v2 <BEACON_HEX> 10
+RPC=https://ethereum-rpc.publicnode.com   # any eth mainnet RPC
+
+# (a) COMMIT — pins the beacon to a block ~1h out (300 blocks) + the current contribution state.
+#     POST the printed commitment publicly BEFORE that block is mined (that's the anti-grind proof).
+$CER/beacon-announce.sh PopRoleClaimV2 ceremony-out/v2/PopRoleClaimV2_0005.zkey 300 --rpc $RPC
+
+# (b) FINALIZE — after the committed block is mined, this checks it exists + the contributions are
+#     unchanged, fetches the block hash, and finalizes.
+$CER/beacon-finalize.sh ceremony-out/v2/PopRoleClaimV2.beacon-commit.txt \
+    ceremony-out/v2/PopRoleClaimV2_0005.zkey build/PopRoleClaimV2.r1cs \
+    ptau/powersOfTau28_hez_final_21.ptau ceremony-out/v2 --rpc $RPC
 # → PopRoleClaimV2_final.zkey, vkey_PopRoleClaimV2.json, Groth16VerifierV2.sol; transcript appended
 ```
+
+Prefer to skip the future-block wait? Call `phase2-finalize.sh <circuit> <last.zkey> <r1cs> <ptau>
+<out> <beacon-hex> 10` directly with any agreed public randomness (the setup is already secure from
+the 1-of-N honest contributors; the beacon is defense-in-depth).
 
 ## After the ceremony — integrate (the v2 deploy wave)
 
