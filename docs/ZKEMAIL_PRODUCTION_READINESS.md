@@ -14,7 +14,7 @@ source, or a local proof, not assumed).
 | # | Item | Severity | Status |
 |---|------|----------|--------|
 | 1 | Groth16 verifiers hold a **DEV single-contributor** trusted setup | 🔴 Blocker | **OPEN** — confirmed live on-chain; needs a multi-party ceremony (human) |
-| 2 | Circuit does not bind the From-address domain to the DKIM signer | 🔴 Blocker (reframed) | **OPEN** — mitigated in practice; circuit fix rides the ceremony |
+| 2 | Circuit does not bind the From-address domain to the DKIM signer | 🔴 Blocker (reframed) | **CODE DONE** — circuit + contracts built & validated; ceremony re-vendor + frontend prover remain |
 | 3 | Email-claim path bypassed the H-03 open-hat gate | 🟠 Should-fix | ✅ **DONE** (this branch) |
 | 4 | One-domain-per-keyHash assumption undocumented | 🟡 Advisory | Subsumed by #2; documented below |
 | 5 | No DKIM key rotation / staleness handling | 🟡 Advisory | ✅ **DONE** (this branch) |
@@ -180,17 +180,24 @@ ASCII).
 
 Everything below moves together; do not activate a production org until it is complete.
 
-1. **Circuit change (Blocker 2)** — edit `PopRoleClaim{,V2}.circom`, prove locally with real `.eml`
-   fixtures, finalize the r1cs.
-2. **Contract changes** — Blocker 2 signal wiring in `ZkEmailInvites` (+ the already-committed H-03
-   gate and DKIM rotation). Land + fork-sim per `CLAUDE.md`.
-3. **Ceremony (Blocker 1)** — multi-party phase-2 on the final circuits; export + re-vendor verifiers;
-   commit vkeys + transcript.
-4. **Deploy** — new verifiers + `PoaDKIMRegistry` + `ZkEmailInvites` impl; re-pin artifacts + bump
-   manifest CIDs; update `OrgDeployer` zk-config addresses.
-5. **Governance repoint** — `setDomainVerifier` / `setEmailVerifier` / `setDKIMRegistry` on each live
-   module (remember the `announceWinner --gas-limit 3000000` gotcha for non-trivial batches).
-6. **Frontend** — ship the Advisory 6 lowercase fix + new manifest CIDs.
+1. ✅ **Circuit change (Blocker 2)** — DONE. `PopRoleClaim{,V2}.circom` bind `fromDomainHash`; validated
+   with a real DKIM email (witness + genuine proof verify; commit `84ff40be`).
+2. ✅ **Contract changes** — DONE. Blocker 2 signal wiring in `ZkEmailInvites` + verifier ABI (commit
+   `c7435fc5`), on top of the committed H-03 gate + DKIM rotation. 210 mock tests green. (Fork-sims of
+   the deploy scripts re-run at step 4, once the ceremony verifier addresses exist.)
+3. **Ceremony (Blocker 1)** — multi-party phase-2 on the final circuits (`circuits/ceremony/`); export +
+   re-vendor `Groth16Verifier{,V2}.sol`; commit vkeys + transcript.
+4. **Frontend prover + deploy seeding (Blocker 2 tail)** — switch `allowlist.js` domain leaf id to the
+   Poseidon commitment (== `fromDomainHash`); `prover.js` domain proof outputs `fromDomainHash`, drops
+   `domainName`; seed `PoaDKIMRegistry` by the **Poseidon** domain hash (`setKeyHash`), not keccak. This
+   is code, not ceremony-gated, but coupled to the new proof shape.
+5. **Deploy** — new verifiers + `PoaDKIMRegistry` + `ZkEmailInvites` impl; re-pin artifacts + bump
+   manifest CIDs; update `OrgDeployer` zk-config addresses; un-skip `ZkEmailRealProof` with production
+   proofs; re-run the deploy-script fork-sims.
+6. **Governance repoint** — `setDomainVerifier` / `setEmailVerifier` / `setDKIMRegistry` on each live
+   module (remember the `announceWinner --gas-limit 3000000` gotcha for non-trivial batches); **re-stage
+   the Test6 domain root** (domain leaf id changed keccak→Poseidon).
+7. **Frontend ship** — Advisory 6 lowercase fix (already committed) + new manifest CIDs.
 
 ## Go / no-go checklist to activate a production org
 
