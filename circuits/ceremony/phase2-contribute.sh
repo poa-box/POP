@@ -22,7 +22,8 @@ log "  input:  $IN ($(sha256_of "$IN"))"
 
 if [[ -n "${CEREMONY_ENTROPY:-}" ]]; then
   # Non-interactive path (rehearsal / CI). NB snarkjs wants `-e=value` (equals), not `-e value`.
-  sj zkey contribute "$IN" "$OUT" --name="$WHO" -e="$CEREMONY_ENTROPY"
+  # `</dev/null` so snarkjs never touches stdin (matters inside run-contributions' loop — see below).
+  sj zkey contribute "$IN" "$OUT" --name="$WHO" -e="$CEREMONY_ENTROPY" </dev/null
 else
   # Interactive: read the contributor's entropy with echo OFF (read -rs) — nothing shows on screen, so
   # the coordinator / a shoulder-surfer / a screen recording never sees it, and it isn't in shell
@@ -33,7 +34,10 @@ else
   printf '\033[1;36m[ceremony]\033[0m  %s: smash the keyboard with RANDOM keys — HIDDEN, nothing will show — then Enter: ' "$WHO" >&2
   read -rs ENTROPY_INPUT; printf '\n' >&2
   [[ ${#ENTROPY_INPUT} -ge 8 ]] || err "need at least a few random characters — your entropy is what makes this secure"
-  sj zkey contribute "$IN" "$OUT" --name="$WHO" -e="$ENTROPY_INPUT"
+  log "  contributing… (this takes ~1–2 min for the real key — don't touch anything)"
+  # `</dev/null`: snarkjs must NOT read the terminal, or in run-contributions' loop it would swallow
+  # the NEXT contributor's keystrokes and the loop couldn't prompt them. Entropy is already in `-e=`.
+  sj zkey contribute "$IN" "$OUT" --name="$WHO" -e="$ENTROPY_INPUT" </dev/null
   unset ENTROPY_INPUT
 fi
 
