@@ -57,6 +57,9 @@ $CER/phase2-begin.sh PopRoleClaimV2 build/PopRoleClaimV2.r1cs \
 # → ceremony-out/v2/PopRoleClaimV2_0000.zkey + PopRoleClaimV2.transcript.txt
 ```
 
+Entropy is read with echo OFF and piped to snarkjs via stdin, so it never shows on screen, never
+lands in shell history, and never appears in `ps`/argv — safe even on the single-machine model.
+
 Each contributor, on their **own** machine, in sequence (pass the zkey along):
 ```sh
 # leave CEREMONY_ENTROPY UNSET so snarkjs prompts — nothing hits shell history / process listing

@@ -21,11 +21,18 @@ log "Contribution by '${WHO}' on ${NAME}"
 log "  input:  $IN ($(sha256_of "$IN"))"
 
 if [[ -n "${CEREMONY_ENTROPY:-}" ]]; then
-  # Non-interactive path (rehearsal / CI). Real contributors should leave CEREMONY_ENTROPY unset and
-  # type entropy at the prompt so it never lands in a shell history or process listing.
-  sj zkey contribute "$IN" "$OUT" --name="$WHO" -e="$CEREMONY_ENTROPY"
+  # Non-interactive path (rehearsal / CI). Fed via stdin, NOT `-e`, so it never lands in the process
+  # list. Real contributors leave CEREMONY_ENTROPY unset and type at the hidden prompt below.
+  printf '%s\n' "$CEREMONY_ENTROPY" | sj zkey contribute "$IN" "$OUT" --name="$WHO"
 else
-  sj zkey contribute "$IN" "$OUT" --name="$WHO"
+  # Interactive: read the contributor's entropy with echo OFF (read -rs) — nothing shows on screen, so
+  # the coordinator / a shoulder-surfer / a screen recording never sees it, and it isn't in shell
+  # history. It's then piped to snarkjs via stdin (NOT `-e`), so it never appears in `ps`/argv either.
+  printf '\033[1;36m[ceremony]\033[0m  %s: smash the keyboard with RANDOM keys (hidden), then Enter: ' "$WHO" >&2
+  read -rs ENTROPY_INPUT; printf '\n' >&2
+  [[ ${#ENTROPY_INPUT} -ge 8 ]] || err "need at least a few random characters — your entropy is what makes this secure"
+  printf '%s\n' "$ENTROPY_INPUT" | sj zkey contribute "$IN" "$OUT" --name="$WHO"
+  unset ENTROPY_INPUT
 fi
 
 CONTRIB_SHA="$(sha256_of "$OUT")"

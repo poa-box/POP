@@ -29,7 +29,7 @@ for i in $(seq 1 "$N"); do
   OUTZ=$(printf "%s/%s_%04d.zkey" "$OUT" "$CIRCUIT" "$i")
   echo
   log "══════ Contributor ${i}/${N}: ${WHO} — hand them the keyboard ══════"
-  log "Type RANDOM keystrokes only you know, then Enter (nothing is echoed or saved)."
+  log "Type RANDOM keys, then Enter. Input is HIDDEN — not shown on screen, not saved, not in \`ps\`."
   if [[ -n "${CEREMONY_ENTROPY:-}" ]]; then
     CEREMONY_ENTROPY="${CEREMONY_ENTROPY}-${i}-${WHO}" "${HERE}/phase2-contribute.sh" "$CIRCUIT" "$IN" "$OUTZ" "$WHO" "$TS"
   else
