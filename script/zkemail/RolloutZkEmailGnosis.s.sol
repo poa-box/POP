@@ -181,10 +181,19 @@ contract SimRolloutGnosis is Script {
         registry = new PoaDKIMRegistry(HUDSON);
 
         ZkEmailProof memory bogus = _bogusProof();
-        uint256[3] memory dSignals =
-            [uint256(bogus.pubkeyHash), uint256(bogus.emailNullifier), uint256(uint160(address(0)))];
-        uint256[4] memory eSignals =
-            [uint256(bogus.pubkeyHash), uint256(bogus.emailNullifier), uint256(uint160(address(0))), uint256(0xE)];
+        uint256[4] memory dSignals = [
+            uint256(bogus.pubkeyHash),
+            uint256(bogus.emailNullifier),
+            uint256(uint160(address(0))),
+            uint256(bogus.fromDomainHash)
+        ];
+        uint256[5] memory eSignals = [
+            uint256(bogus.pubkeyHash),
+            uint256(bogus.emailNullifier),
+            uint256(uint160(address(0))),
+            uint256(0xE),
+            uint256(bogus.fromDomainHash)
+        ];
         // Cap gas forwarded to each pairing check. A real Groth16 verify is ~250k gas; forge's script
         // executor otherwise forwards the whole frame to the bn256 precompiles, starving later phases'
         // deploys (OOG). 10M is a generous ceiling that still leaves the script budget intact.
@@ -194,11 +203,11 @@ contract SimRolloutGnosis is Script {
         console.log("    Email verifier:", address(emailVerifier));
     }
 
-    function _verifyDomainBogus(ZkEmailProof memory bogus, uint256[3] memory signals) internal view returns (bool ok) {
+    function _verifyDomainBogus(ZkEmailProof memory bogus, uint256[4] memory signals) internal view returns (bool ok) {
         ok = domainVerifier.verifyProof{gas: 10_000_000}(bogus.pA, bogus.pB, bogus.pC, signals);
     }
 
-    function _verifyEmailBogus(ZkEmailProof memory bogus, uint256[4] memory signals) internal view returns (bool ok) {
+    function _verifyEmailBogus(ZkEmailProof memory bogus, uint256[5] memory signals) internal view returns (bool ok) {
         ok = emailVerifier.verifyProof{gas: 10_000_000}(bogus.pA, bogus.pB, bogus.pC, signals);
     }
 

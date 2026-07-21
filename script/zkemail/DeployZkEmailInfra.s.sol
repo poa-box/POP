@@ -228,7 +228,12 @@ contract SimInfraArbitrum is DeployInfraBase {
                     bd.pA,
                     bd.pB,
                     bd.pC,
-                    [uint256(bd.pubkeyHash), uint256(bd.emailNullifier), uint256(uint160(address(0)))]
+                    [
+                        uint256(bd.pubkeyHash),
+                        uint256(bd.emailNullifier),
+                        uint256(uint160(address(0))),
+                        uint256(bd.fromDomainHash)
+                    ]
                 ),
             "domain verifier accepted bogus proof"
         );
@@ -243,7 +248,8 @@ contract SimInfraArbitrum is DeployInfraBase {
                         uint256(be.pubkeyHash),
                         uint256(be.emailNullifier),
                         uint256(uint160(address(0))),
-                        uint256(be.emailHash)
+                        uint256(be.emailHash),
+                        uint256(be.fromDomainHash)
                     ]
                 ),
             "email verifier accepted bogus proof"

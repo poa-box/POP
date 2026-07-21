@@ -122,7 +122,8 @@ contract SimRedeployDomainVerifier is RedeployBase {
 
         // 1. The new verifier must accept the user's proof (raw pairing check).
         ZkEmailProof memory p = _userProof();
-        uint256[3] memory signals = [uint256(p.pubkeyHash), uint256(p.emailNullifier), uint256(uint160(CLAIMER))];
+        uint256[4] memory signals =
+            [uint256(p.pubkeyHash), uint256(p.emailNullifier), uint256(uint160(CLAIMER)), uint256(p.fromDomainHash)];
         require(Groth16Verifier(v).verifyProof(p.pA, p.pB, p.pC, signals), "new verifier rejects user proof");
         console.log("  user proof verifies against new verifier");
 
