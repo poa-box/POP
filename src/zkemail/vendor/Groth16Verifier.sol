@@ -1,3 +1,7 @@
+// ⚠️  DO NOT DEPLOY — VOID. This v1 verifier was vendored from a ceremony that ran on a STALE
+// pre-mask-fix circuit (fromDomainHash was corrupted by the local part). The v1 ceremony is being
+// RE-RUN on the correct circuit (r1cs 173b6dd0…); this file will be replaced by the redo output.
+// v2 (Groth16VerifierV2) is unaffected. See circuits/ceremony/records/V1_VOID.md.
 // SPDX-License-Identifier: GPL-3.0
 /*
     Copyright 2021 0KIMS association.
