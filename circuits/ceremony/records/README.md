@@ -12,8 +12,4 @@ not git; the pinned CIDs are in the frontend manifest.
 **Contributors:** alice, bob, carol, dave, erin (5, independent). Beacon = Ethereum mainnet block
 25576383 (v1) / 25576507 (v2) hash.
 
-**Note on the v1 transcript:** `alice` appears three times — she retried twice during early
-prompt friction, so her first two outputs were overwritten before `bob` built on the third. This is
-purely a log of attempts; the authoritative `snarkjs zkey verify` (see `verify-ceremony.sh`) confirms
-the final key contains exactly **5** contributions (one alice), and erin's last contribution
-(`c6f9198f…`) matches the beacon commitment. Both audits: **AUDIT PASSED**.
+Both ceremonies are the FINAL, correct runs (v1 was re-run on the corrected circuit r1cs 173b6dd0…, beacon block 25589657; v2 on 23f94b368…, beacon 25576507). Both audits: AUDIT PASSED, and genuine proofs from both keys verify through the vendored verifiers + contract (test/ZkEmailRealProof.t.sol).
