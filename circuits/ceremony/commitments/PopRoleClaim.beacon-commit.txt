@@ -1,7 +1,7 @@
 POP ceremony beacon commitment
 circuit:                  PopRoleClaim
 chain_id:                 1
-last_contribution_sha256: c6f9198fb538322d8ace92a009f0c6f83a42e3503945fd3c20bcb7d11b99d363
-beacon_block:             25576383
-committed_at_block:       25576083
-committed_at_utc:         2026-07-20T19:42:35Z
+last_contribution_sha256: bdf97c162722b0b27af93055095ce957a50f2b964f58262ec721011e89b15cf7
+beacon_block:             25589657
+committed_at_block:       25589557
+committed_at_utc:         2026-07-22T16:47:59Z
