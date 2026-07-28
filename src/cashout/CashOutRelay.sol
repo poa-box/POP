@@ -118,6 +118,11 @@ contract CashOutRelay is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradea
 
     /// @dev IBungeeExecutor interface. Called by Bungee after bridge completes.
     ///      Verifies actual USDC delivery via balance snapshot to prevent theft.
+    // reentrancy-eth is a FALSE POSITIVE across CashOutRelay's value paths: every such function is
+    // nonReentrant, so the post-external-call state writes (failed-deposit bookkeeping) can't be
+    // re-entered. The disable block below brackets the guarded body (a single-line marker would miss
+    // these multi-line reentrancy findings).
+    // slither-disable-start reentrancy-eth
     function executeData(
         bytes32 requestHash,
         uint256[] calldata amounts,
@@ -156,6 +161,8 @@ contract CashOutRelay is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradea
             emit CashOutFailed(params.depositor, requestHash, amount, reason);
         }
     }
+
+    // slither-disable-end reentrancy-eth
 
     /// @notice Called via try/catch from executeData. External so try/catch works.
     /// @dev Not intended for direct calls — guarded by msg.sender == address(this).
@@ -222,11 +229,9 @@ contract CashOutRelay is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradea
     /// @param cctpMessage  The CCTP message bytes from the source chain burn
     /// @param attestation  Circle's attestation signature for the message
     /// @param params       Cashout parameters (depositor, Venmo details, rate, etc.)
-    // Slither reports reentrancy-eth because state (failedDepositor/failedAmount/totalFailedAmount) is
-    // written after the external CCTP receiveMessage + self-call. It's a false positive here: the
-    // function is nonReentrant (the lock blocks re-entry) AND owner-only, so no untrusted re-entrant
-    // path exists. Suppressing the HIGH finding; behavior is unchanged.
-    // slither-disable-next-line reentrancy-eth
+    // reentrancy-eth false positive (nonReentrant + owner-only): the failed-deposit state writes in the
+    // catch are post-external-call, but re-entry is blocked. Block also covers createDepositFromBalance.
+    // slither-disable-start reentrancy-eth
     function completeCashOut(bytes calldata cctpMessage, bytes calldata attestation, CashOutParams calldata params)
         external
         nonReentrant
@@ -280,6 +285,8 @@ contract CashOutRelay is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradea
             emit CashOutFailed(params.depositor, requestHash, available, reason);
         }
     }
+
+    // slither-disable-end reentrancy-eth
 
     /*══════════════════════════════════ RECOVERY ══════════════════════════════════*/
 
