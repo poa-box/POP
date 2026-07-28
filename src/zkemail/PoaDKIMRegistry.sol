@@ -6,15 +6,22 @@ import {IDKIMRegistry} from "./IDKIMRegistry.sol";
 /**
  * @title PoaDKIMRegistry
  * @notice Owner-managed ERC-7969 DKIM public-key-hash allowlist consumed by ZkEmailInvites.
- * @dev    `ZkEmailInvites` checks `isKeyHashValid(keccak256(lower(domain)), proof.publicKeyHash)`
- *         before accepting any email proof. This registry is the trusted source of "which DKIM
- *         public keys are valid for which domains" — fabricating or misconfiguring an entry would
- *         let forged emails pass, so the setter is owner-gated and entries should mirror the keys
+ * @dev    `ZkEmailInvites` checks `isKeyHashValid(proof.fromDomainHash, proof.publicKeyHash)` before
+ *         accepting any email proof. `fromDomainHash` is the circuit's **Poseidon** commitment to the
+ *         proven From-domain (Blocker-2) — NOT a keccak hash. This registry is the trusted source of
+ *         "which DKIM public keys are valid for which domains" — fabricating or misconfiguring an entry
+ *         would let forged emails pass, so the setter is owner-gated and entries should mirror the keys
  *         published in each domain's DNS TXT records (the same hashes zk-email's own registries hold).
  *
  *         Non-upgradeable by design: if it must be replaced, deploy a fresh instance and repoint via
- *         `ZkEmailInvites.setDKIMRegistry` (governance). Domain hashing matches the module exactly
- *         (`domainHashOf`), so callers can seed by domain string without computing the hash off-chain.
+ *         `ZkEmailInvites.setDKIMRegistry` (governance).
+ *
+ *         SEEDING (important): key entries by the domain's **Poseidon** commitment (the value the
+ *         circuit emits as `fromDomainHash`), via {setKeyHash}/{setKeyHashWithExpiry}. The string-based
+ *         {setKeyForDomain}/{domainHashOf} helpers compute **keccak256** and are LEGACY/pre-Blocker-2 —
+ *         a key seeded through them will never match a claim's Poseidon `fromDomainHash` and every claim
+ *         for that domain reverts `InvalidDKIMKey`. Compute the Poseidon commitment off-chain (see the
+ *         ceremony's domain-commitment tooling) and pass it to `setKeyHash`.
  *
  *         Key lifecycle (rotation/staleness): each (domainHash, keyHash) carries an expiry.
  *         `0` = invalid (unset or revoked), `NO_EXPIRY` = valid until explicitly revoked, any other
@@ -77,9 +84,10 @@ contract PoaDKIMRegistry is IDKIMRegistry {
 
     /*────────────────────────────  Admin writes  ──────────────────────────*/
 
-    /// @notice Set (as permanent) or revoke a DKIM key hash for a pre-hashed domain.
+    /// @notice Set (as permanent) or revoke a DKIM key hash for a pre-hashed domain. THE correct seeder.
     /// @dev    `valid == true` maps to NO_EXPIRY; `valid == false` revokes. For a hard expiry use
-    ///         {setKeyHashWithExpiry}. `domainHash` = keccak256 of the lowercase ASCII domain (`domainHashOf`).
+    ///         {setKeyHashWithExpiry}. `domainHash` MUST be the circuit's Poseidon `fromDomainHash`
+    ///         commitment (NOT keccak) — that is the value `isKeyHashValid` is queried with at claim time.
     function setKeyHash(bytes32 domainHash, bytes32 keyHash, bool valid) external onlyOwner {
         _set(domainHash, keyHash, valid ? NO_EXPIRY : 0);
     }
@@ -91,13 +99,15 @@ contract PoaDKIMRegistry is IDKIMRegistry {
         _set(domainHash, keyHash, validUntil);
     }
 
-    /// @notice Convenience: set (permanent) or revoke a key addressed by the raw domain string.
-    /// @dev Hashes the domain identically to ZkEmailInvites (`keccak256(lower(domain))`).
+    /// @notice DEPRECATED (pre-Blocker-2): sets a key under `keccak256(lower(domain))`. Claims look up by
+    ///         the circuit's **Poseidon** `fromDomainHash`, so a key set here will NEVER match a live claim
+    ///         (every claim for that domain reverts `InvalidDKIMKey`). Use {setKeyHash} with the Poseidon
+    ///         commitment instead. Kept only for ABI stability of the already-deployed instances.
     function setKeyForDomain(string calldata domain, bytes32 keyHash, bool valid) external onlyOwner {
         _set(domainHashOf(domain), keyHash, valid ? NO_EXPIRY : 0);
     }
 
-    /// @notice Convenience: set a key valid until `validUntil`, addressed by the raw domain string.
+    /// @notice DEPRECATED (keccak): see {setKeyForDomain} — use {setKeyHashWithExpiry} with the Poseidon hash.
     function setKeyForDomainWithExpiry(string calldata domain, bytes32 keyHash, uint256 validUntil) external onlyOwner {
         if (validUntil != NO_EXPIRY && validUntil <= block.timestamp) revert ExpiryInPast();
         _set(domainHashOf(domain), keyHash, validUntil);
@@ -143,7 +153,9 @@ contract PoaDKIMRegistry is IDKIMRegistry {
 
     /*────────────────────────────  Helpers  ───────────────────────────────*/
 
-    /// @notice Domain hash exactly as ZkEmailInvites computes it: keccak256 of the lowercased ASCII domain.
+    /// @notice DEPRECATED helper: keccak256 of the lowercased ASCII domain. This is NOT the value claims
+    ///         look up by — the circuit commits the domain with Poseidon (`fromDomainHash`). Retained for
+    ///         ABI stability only; do not use it to derive a seeding key (see {setKeyForDomain}).
     function domainHashOf(string memory domain) public pure returns (bytes32) {
         bytes memory b = bytes(domain);
         for (uint256 i; i < b.length; ++i) {

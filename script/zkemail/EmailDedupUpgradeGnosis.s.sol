@@ -66,7 +66,11 @@ abstract contract EmailDedupBase is Script {
     uint256 internal constant TEST6_MEMBER_HAT =
         29035862971903655586674243772344327311664727652070589302159213246545920;
 
-    string internal constant VERSION = "v-zkemail-5"; // probed FREE on the Gnosis registry
+    // NOTE: v-zkemail-5 is ALREADY LIVE (dedup impl 0x3b93…29 broadcast 2026-07-28; Test6 follows via
+    // Mirror). This sim registers a FRESH impl at the next-free version so it stays re-runnable — the
+    // registry rejects re-registering an existing (type,version) with VersionExists(). Re-probe both the
+    // registry and the CREATE2 slot (CLAUDE.md rule 6) before the next bump.
+    string internal constant VERSION = "v-zkemail-6"; // probed FREE on the Gnosis registry 2026-07-28
     bytes32 internal constant GMAIL_POSEIDON = 0x14d46e073cbff5944a738ea295de6c7447606fa5a270571229d8a4b1e7ca77e5;
     bytes32 internal constant GMAIL_KEYHASH = 0x280b10886d6d3cb6a9f870d942996b420bbfc51e3bd1f430e18690a6859b6d8f;
     uint8 internal constant LEAF_EMAIL = 1;

@@ -1020,6 +1020,40 @@ contract ZkEmailInvitesTest is Test {
         assertEq(minted[0], 21);
     }
 
+    function testRegisterAndClaimByEmailWithPasskey_revertDuplicateRegistration() public {
+        // The PRIMARY onboarding path must dedup too: same emailHash, a fresh email (fresh nullifier)
+        // and a fresh passkey/account cannot register a second time.
+        uint256[] memory hats = _hatIds(21);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+
+        zk.registerAndClaimByEmailWithPasskey(
+            _enroll(),
+            "bob",
+            block.timestamp + 1 hours,
+            0,
+            _emptyAuth(),
+            _makeProofV2(bytes32(uint256(1)), EMAIL_HASH_ALICE),
+            hats,
+            _emptyProof()
+        );
+        assertTrue(zk.isEmailRegistered(EMAIL_HASH_ALICE));
+
+        ZkEmailInvites.PasskeyEnrollment memory passkey2 = _enroll();
+        passkey2.credentialId = bytes32(uint256(0xB0B2)); // different credential -> different account
+        vm.expectRevert(ZkEmailInvites.EmailAlreadyRegistered.selector);
+        zk.registerAndClaimByEmailWithPasskey(
+            passkey2,
+            "carol",
+            block.timestamp + 1 hours,
+            0,
+            _emptyAuth(),
+            _makeProofV2(bytes32(uint256(2)), EMAIL_HASH_ALICE),
+            hats,
+            _emptyProof()
+        );
+        assertEq(executorMock.mintCount(), 1, "duplicate one-step registration must not mint");
+    }
+
     /*────────── Reentrancy ──────────*/
 
     function testReentrancy_isBlocked() public {

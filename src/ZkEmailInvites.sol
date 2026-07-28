@@ -532,6 +532,10 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
 
     /// @notice Re-open a specific email address for registration (governance) — e.g. the member lost
     ///         their wallet and needs to claim again to a new account.
+    /// @dev    This ONLY clears the registration mark; it does NOT revoke the old account. If the intent
+    ///         is recovery (not a second seat), governance must also strip the old wallet's role/standing
+    ///         (EligibilityModule kick + hat burn/renounce) — otherwise one email ends up with two live
+    ///         members. Emits {RegisteredEmailCleared}.
     function clearRegisteredEmail(bytes32 emailHash) external onlyExecutor {
         delete _layout().registeredEmails[emailHash];
         emit RegisteredEmailCleared(emailHash);
