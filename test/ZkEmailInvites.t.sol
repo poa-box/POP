@@ -277,6 +277,7 @@ contract ZkEmailInvitesTest is Test {
 
     event ActiveAllowlistSet(bytes32 indexed merkleRoot, bytes32 indexed allowlistCid);
     event RoleClaimedByDomain(address indexed claimer, bytes32 indexed domainHash, uint256[] hatIds, bytes32 nullifier);
+    event RegisteredEmailCleared(bytes32 indexed emailHash);
     event RoleClaimedByEmail(address indexed claimer, bytes32 indexed emailHash, uint256[] hatIds, bytes32 nullifier);
     event DomainVerifierUpdated(address indexed verifier);
     event EmailVerifierUpdated(address indexed verifier);
@@ -824,6 +825,61 @@ contract ZkEmailInvitesTest is Test {
         (address mintedTo, uint256[] memory mintedHats) = executorMock.mintAt(0);
         assertEq(mintedTo, user);
         assertEq(mintedHats[0], 7);
+    }
+
+    function testClaimRoleByEmail_revertDuplicateRegistration_freshNullifier() public {
+        // The core dedup: same ADDRESS (emailHash), brand-new email (fresh nullifier) must NOT
+        // register twice — the per-message nullifier alone would have allowed this.
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+
+        vm.prank(user);
+        zk.claimRoleByEmail(_makeProofV2(bytes32(uint256(0x2222)), EMAIL_HASH_ALICE), user, hats, _emptyProof());
+        assertTrue(zk.isEmailRegistered(EMAIL_HASH_ALICE));
+
+        address secondAccount = makeAddr("second-account");
+        ZkEmailProofV2 memory p2 = _makeProofV2(bytes32(uint256(0x3333)), EMAIL_HASH_ALICE); // fresh email
+        vm.prank(secondAccount);
+        vm.expectRevert(ZkEmailInvites.EmailAlreadyRegistered.selector);
+        zk.claimRoleByEmail(p2, secondAccount, hats, _emptyProof());
+        assertEq(executorMock.mintCount(), 1, "second registration must not mint");
+    }
+
+    function testClearRegisteredEmail_reopensRegistration() public {
+        // Lost-wallet recovery: governance clears the address, a NEW email re-registers to a NEW account.
+        uint256[] memory hats = _hatIds(7);
+        _activateSingleEmail(EMAIL_HASH_ALICE, hats);
+        vm.prank(user);
+        zk.claimRoleByEmail(_makeProofV2(bytes32(uint256(0x2222)), EMAIL_HASH_ALICE), user, hats, _emptyProof());
+
+        // onlyExecutor gate
+        vm.prank(user);
+        vm.expectRevert(ZkEmailInvites.Unauthorized.selector);
+        zk.clearRegisteredEmail(EMAIL_HASH_ALICE);
+
+        vm.expectEmit(true, false, false, false);
+        emit RegisteredEmailCleared(EMAIL_HASH_ALICE);
+        vm.prank(address(executorMock));
+        zk.clearRegisteredEmail(EMAIL_HASH_ALICE);
+        assertFalse(zk.isEmailRegistered(EMAIL_HASH_ALICE));
+
+        address recovered = makeAddr("recovered-account");
+        vm.prank(recovered);
+        zk.claimRoleByEmail(_makeProofV2(bytes32(uint256(0x4444)), EMAIL_HASH_ALICE), recovered, hats, _emptyProof());
+        assertEq(executorMock.mintCount(), 2, "recovery claim mints to the new account");
+    }
+
+    function testClaimRoleByDomain_unaffectedByEmailDedup() public {
+        // Documented interim behavior: domain entries can still claim repeatedly with fresh emails
+        // (the v1 proof exposes no address commitment) — dedup must not break the domain path.
+        uint256[] memory hats = _hatIds(42);
+        _activateSingleDomain(hats);
+        vm.prank(user);
+        zk.claimRoleByDomain(_makeProof(bytes32(uint256(0x1))), user, hats, _emptyProof());
+        address second = makeAddr("second-domain-claimer");
+        vm.prank(second);
+        zk.claimRoleByDomain(_makeProof(bytes32(uint256(0x2))), second, hats, _emptyProof());
+        assertEq(executorMock.mintCount(), 2);
     }
 
     function testClaimRoleByEmail_revertNotInAllowlist_wrongEmailHash() public {

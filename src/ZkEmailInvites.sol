@@ -106,6 +106,10 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     /// @dev The claimer could not be made eligible for this hat (the hat's eligibility module predates
     ///      the email-verified path, or an explicit bad-standing rule blocks them). Fail closed.
     error ClaimerNotEligible(uint256 hatId);
+    /// @dev This email ADDRESS already registered via a specific-address entry — a fresh email (fresh
+    ///      nullifier) does not grant a second registration. Governance can re-open a specific address
+    ///      via {clearRegisteredEmail} (e.g. lost-wallet recovery).
+    error EmailAlreadyRegistered();
 
     /* ───────── Constants ────── */
     bytes4 public constant MODULE_ID = bytes4(keccak256("ZkEmailInvites"));
@@ -139,6 +143,13 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         bytes32 merkleRoot; // active allowlist root (0 = dormant)
         bytes32 allowlistCid; // active allowlist IPFS CID digest (bytes32 of the CIDv0)
         mapping(bytes32 nullifier => bool) usedNullifiers;
+        // Appended (dedup wave): one REGISTRATION per email ADDRESS for specific-address entries.
+        // The per-message nullifier above only blocks replaying the same .eml — a fresh send yields a
+        // fresh nullifier, so without this an allowlisted address could register unlimited accounts.
+        // Keyed by the v2 circuit's proven `emailHash` (Poseidon commitment of the lowercased From
+        // address). DOMAIN claims can't be deduped this way yet: the v1 proof doesn't expose the
+        // sender's address commitment (tracked follow-up — route domains through v2 or extend v1).
+        mapping(bytes32 emailHash => bool) registeredEmails;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.zkemailinvites.storage");
@@ -168,6 +179,7 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         bytes32 indexed emailHash,
         uint256[] hatIds
     );
+    event RegisteredEmailCleared(bytes32 indexed emailHash);
     event DomainVerifierUpdated(address indexed verifier);
     event EmailVerifierUpdated(address indexed verifier);
     event DKIMRegistryUpdated(address indexed registry);
@@ -375,9 +387,13 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
         if (!l.emailVerifier.verifyProof(proof.pA, proof.pB, proof.pC, signals)) revert InvalidProof();
 
         _verifyLeaf(l.merkleRoot, _leaf(LEAF_EMAIL, proof.emailHash, hatIds), merkleProof);
+        // ONE registration per address: the nullifier only blocks replaying this exact email; the
+        // address commitment blocks a fresh email from registering again.
+        if (l.registeredEmails[proof.emailHash]) revert EmailAlreadyRegistered();
         _rejectOpenClaimHats(l.executor, hatIds);
         _grantEmailEligibility(l.executor, claimer, hatIds);
         l.usedNullifiers[proof.emailNullifier] = true;
+        l.registeredEmails[proof.emailHash] = true;
         IExecutorHatMinter(l.executor).mintHatsForUser(claimer, hatIds);
     }
 
@@ -512,6 +528,18 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
 
     function allowlistCid() external view returns (bytes32) {
         return _layout().allowlistCid;
+    }
+
+    /// @notice Re-open a specific email address for registration (governance) — e.g. the member lost
+    ///         their wallet and needs to claim again to a new account.
+    function clearRegisteredEmail(bytes32 emailHash) external onlyExecutor {
+        delete _layout().registeredEmails[emailHash];
+        emit RegisteredEmailCleared(emailHash);
+    }
+
+    /// @notice Whether this email address (Poseidon commitment) has already registered here.
+    function isEmailRegistered(bytes32 emailHash) external view returns (bool) {
+        return _layout().registeredEmails[emailHash];
     }
 
     function isNullifierUsed(bytes32 n) external view returns (bool) {
