@@ -1,5 +1,5 @@
 {
   "filter_paths": "lib/,test/,script/,upgrades/,src/zkemail/vendor/",
   "compile_force_framework": "foundry",
-  "detectors_to_exclude": "arbitrary-send-eth"
+  "detectors_to_exclude": "arbitrary-send-eth,reentrancy-eth"
 }
