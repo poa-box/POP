@@ -222,6 +222,11 @@ contract CashOutRelay is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradea
     /// @param cctpMessage  The CCTP message bytes from the source chain burn
     /// @param attestation  Circle's attestation signature for the message
     /// @param params       Cashout parameters (depositor, Venmo details, rate, etc.)
+    // Slither reports reentrancy-eth because state (failedDepositor/failedAmount/totalFailedAmount) is
+    // written after the external CCTP receiveMessage + self-call. It's a false positive here: the
+    // function is nonReentrant (the lock blocks re-entry) AND owner-only, so no untrusted re-entrant
+    // path exists. Suppressing the HIGH finding; behavior is unchanged.
+    // slither-disable-next-line reentrancy-eth
     function completeCashOut(bytes calldata cctpMessage, bytes calldata attestation, CashOutParams calldata params)
         external
         nonReentrant
