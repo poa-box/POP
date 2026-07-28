@@ -6,37 +6,50 @@ on:
   pull_request:
   workflow_dispatch:
 
+# pull-requests: write lets the coverage job post its sticky PR comment.
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel superseded CI runs on rapid pushes to a PR. Deploys are serialized
+# inside etherform and never cancelled mid-flight.
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  foundry-cicd:
-    uses: BreadchainCoop/etherform/.github/workflows/_foundry-cicd.yml@e4ef95fbf0a980a069587c729a34bd1947e88bd9
+  cicd:
+    # Latest etherform (main @ 2026-07-24), SHA-pinned. The prior pin targeted a
+    # since-removed input interface (run-upgrade-safety/baseline-path/deploy-on-main/
+    # flatten-contracts) and failed to load at 0s repo-wide; this is the current interface.
+    uses: BreadchainCoop/etherform/.github/workflows/_foundry-cicd.yml@180aa91926a02ce2045f9a7e3ed08be9395ecfab
     with:
-      # CI Options
+      # ── CI ──
       check-formatting: true
       test-verbosity: 'vvv'
 
-      # Slither Analysis
+      # ── Slither (fails on high; arbitrary-send-eth excluded via slither.config.json) ──
       run-slither: true
       slither-fail-on: 'high'
 
-      # Coverage
+      # ── Coverage (threshold 0 = report-only, never fails the job) ──
       run-coverage: true
       coverage-source-filter: ' src/'
 
-      # Upgrade Safety
-      run-upgrade-safety: true
-      baseline-path: 'upgrades/baseline'
-      validation-script: 'script/upgrades/ValidateUpgrade.s.sol'
-
-      # Automatic Deployments
-      deploy-on-pr: false
-      deploy-on-main: false
+      # ── Deploy: TESTNET ONLY, on same-repo PRs. etherform has no mainnet path —
+      #    production/mainnet deploys stay manual via forge script. Targets the
+      #    `testnets` in .github/deploy-networks.json (hoodi). Set a DEPLOY_ENV_VARS
+      #    repo secret to `FOUNDRY_PROFILE=production` if the testnet deploy should use
+      #    production-profile bytecode (optimizer on / cancun) matching mainnet. ──
+      deploy-on-pr: true
       deploy-script: 'script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure'
-      deployment-foundry-profile: 'production'
       network-config-path: '.github/deploy-networks.json'
       indexing-wait: 90
-      flatten-contracts: true
-      upgrades-path: 'upgrades'
+
+      # NOTE: upgrade-safety auto-runs only when .github/upgrades.json exists (new
+      # etherform diffs each listed contract against main). Intentionally not added
+      # here yet — enable it in a follow-up once this branch is on main (so main is the
+      # comparison baseline): add .github/upgrades.json + foundry.toml storageLayout.
     secrets:
       PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
       RPC_URL: ${{ secrets.HOODI_RPC_URL }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
