@@ -18,6 +18,12 @@ import {PoaDKIMRegistry} from "../../src/zkemail/PoaDKIMRegistry.sol";
 
 /*
  * ============================================================================
+ * ⚠️  SUPERSEDED (dev-era). For the PRODUCTION ceremony deploy onto live Test6 use
+ *     script/zkemail/CeremonyDeployTest6Gnosis.s.sol. This script uses the OLD keccak
+ *     domain leaf ids + a single-leaf root + the pre-Blocker-2 claim selectors, and its
+ *     `new Groth16Verifier()` is deployed fresh (not the DD ceremony address). Do NOT
+ *     re-broadcast it against Test6 — kept only as the historical dev-rollout reference.
+ * ============================================================================
  * FULL ROLLOUT SIM — ZK Email invites onto live Test6 (Gnosis fork)
  * ============================================================================
  *

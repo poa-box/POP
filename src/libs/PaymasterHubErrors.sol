@@ -42,7 +42,7 @@ library PaymasterHubErrors {
     /// @notice Rule ID is not a recognized rule type
     error InvalidRuleId();
 
-    /// @notice Subject type byte is not a recognized type (0x00, 0x01, 0x03, 0x04)
+    /// @notice Subject type byte is not a recognized type (0x00, 0x01, 0x03, 0x04, 0x05)
     error InvalidSubjectType();
 
     /// @notice Paymaster data version does not match expected version

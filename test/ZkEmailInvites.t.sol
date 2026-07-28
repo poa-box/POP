@@ -29,7 +29,9 @@ import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 ///         isEligible revert to exercise the FAIL-CLOSED path.
 contract MockHats {
     mapping(uint256 => bool) public openHat;
+    mapping(uint256 => mapping(address => bool)) public emailVerified;
     bool public reverting;
+    bool public blockEmailVerify; // grant becomes a revert → exercises the ClaimerNotEligible fail-closed path
 
     function setOpen(uint256 hatId, bool v) external {
         openHat[hatId] = v;
@@ -39,9 +41,30 @@ contract MockHats {
         reverting = v;
     }
 
-    function isEligible(address, uint256 hatId) external view returns (bool) {
+    function setBlockEmailVerify(bool v) external {
+        blockEmailVerify = v;
+    }
+
+    function isEligible(address wearer, uint256 hatId) external view returns (bool) {
         require(!reverting, "eligibility module down");
-        return openHat[hatId];
+        return openHat[hatId] || emailVerified[hatId][wearer];
+    }
+
+    /// @dev Doubles as the hat's eligibility module (viewHat points here), mirroring the real
+    ///      EligibilityModule's email-verified third path.
+    function setEmailVerified(address wearer, uint256[] calldata hatIds) external {
+        require(!blockEmailVerify, "email verify disabled");
+        for (uint256 i; i < hatIds.length; ++i) {
+            emailVerified[hatIds[i]][wearer] = true;
+        }
+    }
+
+    function viewHat(uint256)
+        external
+        view
+        returns (string memory, uint32, uint32, address, address, string memory, uint16, bool, bool)
+    {
+        return ("", 0, 0, address(this), address(0), "", 0, true, true);
     }
 }
 
@@ -669,6 +692,22 @@ contract ZkEmailInvitesTest is Test {
         vm.prank(user);
         zk.claimRoleByDomain(p, user, hats, _emptyProof());
         assertEq(executorMock.mintCount(), 1, "gated hat mints normally");
+        assertTrue(executorMock.mockHats().emailVerified(42, user), "claim marked the claimer email-verified");
+    }
+
+    function testClaimRoleByDomain_revertWhenEligibilityUngrantable() public {
+        // FAIL-CLOSED: if the hat's eligibility module cannot grant email-verified eligibility (e.g. a
+        // pre-upgrade module without the third path), the claim must revert with a clear error — not
+        // reach mintHat and revert cryptically there.
+        uint256[] memory hats = _hatIds(42);
+        _activateSingleDomain(hats);
+        executorMock.mockHats().setBlockEmailVerify(true);
+
+        ZkEmailProof memory p = _makeProof(bytes32(uint256(1)));
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(ZkEmailInvites.ClaimerNotEligible.selector, 42));
+        zk.claimRoleByDomain(p, user, hats, _emptyProof());
+        assertEq(executorMock.mintCount(), 0, "nothing minted when eligibility cannot be granted");
     }
 
     function testClaimRoleByDomain_revertNotInAllowlist_wrongHats() public {

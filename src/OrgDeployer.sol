@@ -949,9 +949,11 @@ contract OrgDeployer is Initializable {
                 ? _buildDefaultPaymasterRules(result, params.educationHubConfig.enabled, params.registryAddr)
                 : (new address[](0), new bytes4[](0), new bool[](0), new uint32[](0));
 
-            // Build per-role-hat budgets if configured
+            // Build per-role-hat budgets if configured (+ the zk-email CLAIM budget when the module deploys)
             (bytes32[] memory budgetKeys, uint128[] memory budgetCaps, uint32[] memory budgetEpochLens) = hasBudgets
-                ? _buildDefaultBudgets(roleHatIds, pmCfg.defaultBudgetCapPerEpoch, pmCfg.defaultBudgetEpochLen)
+                ? _buildDefaultBudgets(
+                    roleHatIds, result.zkEmailInvites, pmCfg.defaultBudgetCapPerEpoch, pmCfg.defaultBudgetEpochLen
+                )
                 : (new bytes32[](0), new uint128[](0), new uint32[](0));
 
             IPaymasterHub.DeployConfig memory config = IPaymasterHub.DeployConfig({
@@ -1294,27 +1296,39 @@ contract OrgDeployer is Initializable {
     }
 
     /**
-     * @notice Build default per-role-hat budget entries
-     * @dev Creates a budget for each role hat using SUBJECT_TYPE_HAT (0x01)
+     * @notice Build default per-role-hat budget entries (+ the zk-email CLAIM budget when enabled)
+     * @dev Creates a budget for each role hat using SUBJECT_TYPE_HAT (0x01). When the org deploys with
+     *      ZkEmailInvites, also appends a SUBJECT_TYPE_CLAIM (0x05) budget keyed to the module address —
+     *      without it, gasless self-service email claims revert BudgetExceeded (the CLAIM subject has no
+     *      eligibility pre-check, so the budget is the org's spend backstop and MUST exist).
      * @param roleHatIds Array of hat IDs for each role
-     * @param capPerEpoch Default spending cap per epoch for each hat
+     * @param zkEmailInvites The org's ZkEmailInvites proxy (0 = module not enabled, no claim budget)
+     * @param capPerEpoch Default spending cap per epoch for each subject
      * @param epochLen Default epoch length in seconds
      */
-    function _buildDefaultBudgets(uint256[] memory roleHatIds, uint128 capPerEpoch, uint32 epochLen)
-        internal
-        pure
-        returns (bytes32[] memory subjectKeys, uint128[] memory caps, uint32[] memory epochLens)
-    {
-        uint256 count = roleHatIds.length;
+    function _buildDefaultBudgets(
+        uint256[] memory roleHatIds,
+        address zkEmailInvites,
+        uint128 capPerEpoch,
+        uint32 epochLen
+    ) internal pure returns (bytes32[] memory subjectKeys, uint128[] memory caps, uint32[] memory epochLens) {
+        bool hasClaimBudget = zkEmailInvites != address(0);
+        uint256 count = roleHatIds.length + (hasClaimBudget ? 1 : 0);
         subjectKeys = new bytes32[](count);
         caps = new uint128[](count);
         epochLens = new uint32[](count);
 
-        for (uint256 i = 0; i < count; i++) {
+        for (uint256 i = 0; i < roleHatIds.length; i++) {
             // SUBJECT_TYPE_HAT = 0x01, subjectId = bytes32(hatId)
             subjectKeys[i] = keccak256(abi.encodePacked(uint8(0x01), bytes32(roleHatIds[i])));
             caps[i] = capPerEpoch;
             epochLens[i] = epochLen;
+        }
+        if (hasClaimBudget) {
+            // SUBJECT_TYPE_CLAIM = 0x05, subjectId = bytes32(module address)
+            subjectKeys[count - 1] = keccak256(abi.encodePacked(uint8(0x05), bytes32(uint256(uint160(zkEmailInvites)))));
+            caps[count - 1] = capPerEpoch;
+            epochLens[count - 1] = epochLen;
         }
     }
 }

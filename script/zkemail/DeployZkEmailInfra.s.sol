@@ -14,6 +14,13 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
 
 /*
  * ============================================================================
+ * ⚠️  STALE DKIM SEEDING (keccak). `_seedKeys` uses setKeyForDomain(...) which keys the
+ *     registry by keccak256(domain); post-Blocker-2 the module looks up by the circuit's
+ *     POSEIDON fromDomainHash, so those keys never match. For the Gnosis Test6 deploy use
+ *     script/zkemail/CeremonyDeployTest6Gnosis.s.sol (Poseidon-keyed via setKeyHash). If
+ *     reviving this cross-chain infra path (Arbitrum), replace _seedKeys with setKeyHash by
+ *     the precomputed Poseidon domain hashes first, and bump VERSION off v-zkemail-1 (VOID).
+ * ============================================================================
  * Deploy the ZK Email cryptographic infrastructure — CROSS-CHAIN
  * ============================================================================
  *

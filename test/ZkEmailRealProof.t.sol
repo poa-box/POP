@@ -12,10 +12,28 @@ import {Groth16VerifierV2} from "../src/zkemail/vendor/Groth16VerifierV2.sol";
 import {PoaDKIMRegistry} from "../src/zkemail/PoaDKIMRegistry.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 
-/// @dev Minimal Hats stand-in — the H-03 gate probes isEligible; all hats gated (probe → false) by default.
+/// @dev Minimal Hats + eligibility-module stand-in — all hats GATED (probe → false) by default; the
+///      claim contract's email-verified grant (viewHat → this module; setEmailVerified) makes ONLY the
+///      claimer eligible, mirroring the real EligibilityModule's third path.
 contract RealProofMockHats {
-    function isEligible(address, uint256) external pure returns (bool) {
-        return false;
+    mapping(uint256 => mapping(address => bool)) public emailVerified;
+
+    function isEligible(address wearer, uint256 hatId) external view returns (bool) {
+        return emailVerified[hatId][wearer];
+    }
+
+    function setEmailVerified(address wearer, uint256[] calldata hatIds) external {
+        for (uint256 i; i < hatIds.length; ++i) {
+            emailVerified[hatIds[i]][wearer] = true;
+        }
+    }
+
+    function viewHat(uint256)
+        external
+        view
+        returns (string memory, uint32, uint32, address, address, string memory, uint16, bool, bool)
+    {
+        return ("", 0, 0, address(this), address(0), "", 0, true, true);
     }
 }
 

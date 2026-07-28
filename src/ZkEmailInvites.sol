@@ -29,6 +29,13 @@ interface IExecutorHatMinter {
     function hats() external view returns (IHats);
 }
 
+/// @notice The org EligibilityModule's email-verified path (THIRD eligibility path, alongside
+///         hierarchy rules + vouching). This contract is authorized to set it because the org's
+///         Executor lists it as an authorized hat minter — no extra per-org configuration.
+interface IEligibilityEmailVerify {
+    function setEmailVerified(address wearer, uint256[] calldata hatIds) external;
+}
+
 interface IUniversalAccountRegistry {
     function registerAccountByPasskeySig(
         bytes32 credentialId,
@@ -96,6 +103,9 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
     ///      not be mintable via the email-claim path — that is the same self-mint escalation the audit
     ///      closed on QuickJoin (an allowlisted open hat like ELIGIBILITY_ADMIN → org takeover).
     error HatOpenlyClaimable(uint256 hatId);
+    /// @dev The claimer could not be made eligible for this hat (the hat's eligibility module predates
+    ///      the email-verified path, or an explicit bad-standing rule blocks them). Fail closed.
+    error ClaimerNotEligible(uint256 hatId);
 
     /* ───────── Constants ────── */
     bytes4 public constant MODULE_ID = bytes4(keccak256("ZkEmailInvites"));
@@ -341,6 +351,7 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
 
         _verifyLeaf(l.merkleRoot, _leaf(LEAF_DOMAIN, dh, hatIds), merkleProof);
         _rejectOpenClaimHats(l.executor, hatIds);
+        _grantEmailEligibility(l.executor, claimer, hatIds);
         l.usedNullifiers[proof.emailNullifier] = true;
         IExecutorHatMinter(l.executor).mintHatsForUser(claimer, hatIds);
     }
@@ -365,6 +376,7 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
 
         _verifyLeaf(l.merkleRoot, _leaf(LEAF_EMAIL, proof.emailHash, hatIds), merkleProof);
         _rejectOpenClaimHats(l.executor, hatIds);
+        _grantEmailEligibility(l.executor, claimer, hatIds);
         l.usedNullifiers[proof.emailNullifier] = true;
         IExecutorHatMinter(l.executor).mintHatsForUser(claimer, hatIds);
     }
@@ -383,6 +395,31 @@ contract ZkEmailInvites is Initializable, ContextUpgradeable, ReentrancyGuardUpg
             } catch {
                 revert HatOpenlyClaimable(hatIds[i]);
             }
+        }
+    }
+
+    /// @dev The verified email IS the eligibility grant: after the Groth16 proof + allowlist + open-hat
+    ///      gate pass, mark the claimer email-verified on each hat's own eligibility module (the module's
+    ///      THIRD path, ORed alongside hierarchy rules + vouching) so `Hats.mintHat`'s eligibility check
+    ///      passes for allowlisted-but-gated hats. Module resolved per hat from Hats (single source of
+    ///      truth, no new storage); this contract is authorized because the Executor lists it as a hat
+    ///      minter. Hats already eligible (open-default orgs, prior grants) are skipped; if a hat still
+    ///      isn't eligible afterwards (pre-upgrade module, explicit bad standing) revert fail-closed with
+    ///      a clear error instead of letting mintHat revert cryptically.
+    function _grantEmailEligibility(address executor_, address claimer, uint256[] calldata hatIds) private {
+        IHats hatsContract = IExecutorHatMinter(executor_).hats();
+        uint256[] memory one = new uint256[](1);
+        for (uint256 i; i < hatIds.length; ++i) {
+            if (hatsContract.isEligible(claimer, hatIds[i])) continue;
+            (,,, address eligibilityModule,,,,,) = hatsContract.viewHat(hatIds[i]);
+            one[0] = hatIds[i];
+            // Code-length guard: try/catch cannot catch the no-code check for an EOA/empty module —
+            // without it a hat with a code-less eligibility module would revert raw instead of the
+            // clear ClaimerNotEligible below.
+            if (eligibilityModule.code.length != 0) {
+                try IEligibilityEmailVerify(eligibilityModule).setEmailVerified(claimer, one) {} catch {}
+            }
+            if (!hatsContract.isEligible(claimer, hatIds[i])) revert ClaimerNotEligible(hatIds[i]);
         }
     }
 

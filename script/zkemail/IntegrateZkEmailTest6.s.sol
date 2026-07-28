@@ -15,6 +15,13 @@ import {HybridVoting} from "../../src/HybridVoting.sol";
 
 /*
  * ============================================================================
+ * ⚠️  SUPERSEDED (dev-era retrofit). Test6's ZkEmailInvites proxy now EXISTS; the
+ *     production ceremony cutover is script/zkemail/CeremonyDeployTest6Gnosis.s.sol.
+ *     This script builds a single-leaf keccak("gmail.com") root and sets paymaster rules
+ *     under the pre-Blocker-2 claim selectors (`...,bytes32,string`) — both stale after the
+ *     ceremony deploy. Do NOT re-broadcast against Test6; kept as the original-integration
+ *     reference only.
+ * ============================================================================
  * Integrate ZkEmailInvites into the live Test6 org (Gnosis)
  * ============================================================================
  *
