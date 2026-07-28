@@ -21,9 +21,19 @@ import {OrgDeployer} from "../../src/OrgDeployer.sol";
  * ============================================================================
  *
  * Brings the Arbitrum side up to the Gnosis production state so FUTURE Arbitrum orgs deploy with the
- * ceremony stack. Probed live 2026-07-28: all five protocol beacons exist, but the Arbitrum OrgDeployer
- * is still wired to the VOID v-zkemail-1 DEV infra (forgeable dev verifiers + keccak registry), and
- * every impl predates the production waves.
+ * ceremony stack.
+ *
+ * ┌── STATUS (probed live 2026-07-28) ────────────────────────────────────────────────────────────┐
+ * │ ALREADY BROADCAST + verified on Arbitrum: ceremony infra deployed at the cross-chain parity     │
+ * │ addresses (0x82aF/0x159c/0xC2dd), Poseidon gmail+ku keys seeded, OrgDeployer re-wired off the    │
+ * │ VOID dev infra, and all five beacons at their v-zkemail-4 impls. Re-running                       │
+ * │ BroadcastArbitrumZkEmailRollout now REVERTS VersionExists (v4 taken on the Arbitrum registry).    │
+ * │ The Gnosis OrgDeployer addendum (BroadcastOrgDeployerUpgradeGnosis) ALSO landed (v4 live).        │
+ * │                                                                                                  │
+ * │ OUTSTANDING: the email-address DEDUP shipped to Gnosis AFTER this rollout, so Arbitrum still runs │
+ * │ the PRE-DEDUP ZkEmailInvites (9141 B, no isEmailRegistered). Close it with the dedup upgrade at   │
+ * │ the bottom of this file (SimArbitrumEmailDedup / BroadcastArbitrumEmailDedup, v-zkemail-5).       │
+ * └──────────────────────────────────────────────────────────────────────────────────────────────┘
  *
  *   1. DD-deploy (CREATE3) the CEREMONY verifiers + Poseidon-keyed PoaDKIMRegistry at v-zkemail-3 —
  *      the SAME addresses as Gnosis (0x82aF…, 0x159c…, 0xC2dd…), by construction.
@@ -231,6 +241,9 @@ contract SimArbitrumZkEmailRollout is ArbitrumZkBase {
 
 /* ════════════════════════════ BROADCAST (Arbitrum) ════════════════════════════ */
 
+/// @notice ⚠️ ALREADY BROADCAST + verified live (2026-07-28). Re-running reverts VersionExists (all five
+///         v-zkemail-4 registrations exist on the Arbitrum registry). Kept for provenance. For the
+///         outstanding dedup, use {BroadcastArbitrumEmailDedup} below.
 contract BroadcastArbitrumZkEmailRollout is ArbitrumZkBase {
     function run() public {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
@@ -293,6 +306,8 @@ contract SimOrgDeployerUpgradeGnosis is ArbitrumZkBase {
     }
 }
 
+/// @notice ⚠️ ALREADY BROADCAST + verified live (2026-07-28): Gnosis OrgDeployer runs the v-zkemail-4
+///         claim-budget impl. Re-running reverts VersionExists. Kept for provenance.
 contract BroadcastOrgDeployerUpgradeGnosis is ArbitrumZkBase {
     function run() public {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
@@ -304,5 +319,115 @@ contract BroadcastOrgDeployerUpgradeGnosis is ArbitrumZkBase {
         require(_implOf(GNOSIS_POA_MANAGER, "OrgDeployer") == odImpl, "OrgDeployer beacon not upgraded");
         require(_odAddr(10) == EXPECTED_DOMAIN_VERIFIER, "zk wiring lost after upgrade");
         console.log("Done: new Gnosis orgs now get the automatic CLAIM budget.");
+    }
+}
+
+/* ════════════ ARBITRUM: email-address DEDUP upgrade (ZkEmailInvites v-zkemail-5) ════════════ */
+
+/*
+ * The v-zkemail-4 rollout above shipped the PRE-DEDUP ZkEmailInvites to Arbitrum. The dedup
+ * (registeredEmails[emailHash] — one registration per specific-address entry; clearRegisteredEmail for
+ * recovery) landed on Gnosis afterward at v-zkemail-5. This wave brings Arbitrum to parity: upgrade the
+ * ZkEmailInvites beacon to the dedup impl via the Arbitrum home-chain Hub, at the SAME version label as
+ * Gnosis (v-zkemail-5 = dedup on both chains). The other four beacons are unchanged since v-zkemail-4.
+ *
+ * Only ZkEmailInvites moves — selectors are unchanged (internal check), so no paymaster rule churn, and
+ * no infra/DKIM/OrgDeployer changes. Beacon impls deploy via `new` (CREATE), so the only collision
+ * surface is the registry: v-zkemail-5 probed FREE for ZkEmailInvites on Arbitrum (2026-07-28).
+ *
+ * Dedup BEHAVIOR is proven by the Gnosis fork sim (EmailDedupUpgradeGnosis) + 1673 unit tests on the
+ * identical bytecode; this sim proves the Arbitrum-specific UPGRADE MECHANICS (Hub.upgradeBeaconLocal
+ * auth + version freeness + beacon repoint) and that the live surface gains the dedup functions.
+ *
+ * Usage:
+ *   FOUNDRY_PROFILE=production forge script \
+ *     script/zkemail/ArbitrumZkEmailRollout.s.sol:SimArbitrumEmailDedup --fork-url arbitrum -vvv
+ *   source .env && FOUNDRY_PROFILE=production forge script \
+ *     script/zkemail/ArbitrumZkEmailRollout.s.sol:BroadcastArbitrumEmailDedup --rpc-url arbitrum --broadcast --slow
+ */
+
+interface IZkEmailDedupSurface {
+    function isEmailRegistered(bytes32 emailHash) external view returns (bool);
+}
+
+abstract contract ArbitrumDedupBase is ArbitrumZkBase {
+    string internal constant DEDUP_VERSION = "v-zkemail-5"; // FREE on Arbitrum; == Gnosis dedup label
+
+    /// @dev The four beacons that must NOT move in the dedup wave (assert unchanged before/after).
+    function _snapshotOtherFour() internal view returns (address[4] memory impls) {
+        impls[0] = _implOf(ARB_POA_MANAGER, "Executor");
+        impls[1] = _implOf(ARB_POA_MANAGER, "EligibilityModule");
+        impls[2] = _implOf(ARB_POA_MANAGER, "PaymasterHub");
+        impls[3] = _implOf(ARB_POA_MANAGER, "OrgDeployer");
+    }
+
+    function _requireOtherFourUnchanged(address[4] memory before) internal view {
+        address[4] memory now_ = _snapshotOtherFour();
+        require(now_[0] == before[0], "Executor beacon moved");
+        require(now_[1] == before[1], "EligibilityModule beacon moved");
+        require(now_[2] == before[2], "PaymasterHub beacon moved");
+        require(now_[3] == before[3], "OrgDeployer beacon moved");
+    }
+}
+
+contract SimArbitrumEmailDedup is ArbitrumDedupBase {
+    function run() public {
+        console.log("\n=== SIM: Arbitrum ZkEmailInvites dedup upgrade (v-zkemail-5) ===");
+        IHubA hub = IHubA(ARB_HUB);
+        require(hub.owner() == HUDSON, "Hub owner != Hudson");
+
+        // BEFORE: current impl must be the pre-dedup one (no isEmailRegistered surface).
+        address beforeImpl = _implOf(ARB_POA_MANAGER, "ZkEmailInvites");
+        require(!_hasDedupSurface(beforeImpl), "live Arbitrum impl already has dedup?");
+        address[4] memory otherFour = _snapshotOtherFour();
+        console.log("[0] Pre-dedup ZkEmailInvites live:", beforeImpl);
+
+        // Deploy dedup impl BEFORE the prank (`new` would consume it).
+        address zkImpl = address(new ZkEmailInvites());
+        require(_hasDedupSurface(zkImpl), "freshly built impl lacks dedup surface");
+
+        vm.prank(HUDSON);
+        hub.upgradeBeaconLocal("ZkEmailInvites", zkImpl, DEDUP_VERSION);
+
+        // AFTER: beacon repoints to the dedup impl; the surface is now live; nothing else moved.
+        address afterImpl = _implOf(ARB_POA_MANAGER, "ZkEmailInvites");
+        require(afterImpl == zkImpl, "beacon did not repoint to dedup impl");
+        require(afterImpl != beforeImpl, "impl unchanged");
+        require(_hasDedupSurface(afterImpl), "dedup surface not live after upgrade");
+        _requireOtherFourUnchanged(otherFour);
+        console.log("[1] ZkEmailInvites beacon -> dedup impl:", afterImpl);
+        console.log("[2] Dedup surface live; other four beacons untouched.");
+
+        console.log("\nPASS: Arbitrum dedup upgrade verified on a real Arbitrum fork.");
+    }
+
+    /// @dev True iff the impl exposes isEmailRegistered (a view over a mapping — never reverts when the
+    ///      selector is present, reverts when absent). A clean present/absent probe for the dedup surface.
+    function _hasDedupSurface(address impl) internal view returns (bool ok) {
+        try IZkEmailDedupSurface(impl).isEmailRegistered(bytes32(uint256(1))) returns (bool) {
+            ok = true;
+        } catch {
+            ok = false;
+        }
+    }
+}
+
+contract BroadcastArbitrumEmailDedup is ArbitrumDedupBase {
+    function run() public {
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
+        require(vm.addr(key) == HUDSON, "Sender must be Hudson (Hub owner)");
+        IHubA hub = IHubA(ARB_HUB);
+        address[4] memory otherFour = _snapshotOtherFour();
+
+        vm.startBroadcast(key);
+        address zkImpl = address(new ZkEmailInvites());
+        hub.upgradeBeaconLocal("ZkEmailInvites", zkImpl, DEDUP_VERSION);
+        vm.stopBroadcast();
+
+        require(_implOf(ARB_POA_MANAGER, "ZkEmailInvites") == zkImpl, "beacon not upgraded");
+        require(IZkEmailDedupSurface(zkImpl).isEmailRegistered(bytes32(uint256(1))) == false, "dedup surface not live");
+        _requireOtherFourUnchanged(otherFour);
+        console.log("  new dedup ZkEmailInvites impl:", zkImpl);
+        console.log("Done: Arbitrum ZkEmailInvites at v-zkemail-5 (dedup) - parity with Gnosis.");
     }
 }
