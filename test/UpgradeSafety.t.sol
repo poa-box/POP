@@ -98,7 +98,7 @@ contract UpgradeSafetyTest is Test {
         address[] memory targets = new address[](0);
         HybridVoting.ClassConfig[] memory classes = new HybridVoting.ClassConfig[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(HATS, OWNER, hats, targets, 51, classes);
+        impl.initialize(HATS, OWNER, hats, targets, 51, 100, classes);
     }
 
     function testDirectDemocracyVotingImplCannotBeInitialized() public {

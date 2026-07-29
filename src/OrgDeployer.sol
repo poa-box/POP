@@ -347,6 +347,7 @@ contract OrgDeployer is Initializable {
         bytes regSignature; // User's EIP-712 ECDSA signature for username registration
         bool autoUpgrade;
         uint8 hybridThresholdPct;
+        uint8 hybridEarlyCloseTurnoutPct; // 1..100; default 100 (wait for everyone). See HybridVoting.earlyCloseTurnoutPct.
         uint8 ddThresholdPct;
         IHybridVotingInit.ClassConfig[] hybridClasses;
         address[] ddInitialTargets;
@@ -765,6 +766,7 @@ contract OrgDeployer is Initializable {
         govParams.regSignature = params.regSignature;
         govParams.autoUpgrade = params.autoUpgrade;
         govParams.hybridThresholdPct = params.hybridThresholdPct;
+        govParams.hybridEarlyCloseTurnoutPct = params.hybridEarlyCloseTurnoutPct;
         govParams.ddThresholdPct = params.ddThresholdPct;
         govParams.hybridClasses = params.hybridClasses;
         govParams.hybridProposalCreatorRolesBitmap = params.roleAssignments.hybridProposalCreatorRolesBitmap;
@@ -800,6 +802,7 @@ contract OrgDeployer is Initializable {
         votingParams.participationToken = participationToken;
         votingParams.autoUpgrade = params.autoUpgrade;
         votingParams.hybridThresholdPct = params.hybridThresholdPct;
+        votingParams.hybridEarlyCloseTurnoutPct = params.hybridEarlyCloseTurnoutPct;
         votingParams.ddThresholdPct = params.ddThresholdPct;
         votingParams.hybridClasses = params.hybridClasses;
         votingParams.hybridProposalCreatorRolesBitmap = params.roleAssignments.hybridProposalCreatorRolesBitmap;

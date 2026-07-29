@@ -7,6 +7,11 @@ contract MockHats is IHats {
     mapping(address => mapping(uint256 => bool)) public wearers;
     mapping(address => mapping(uint256 => bool)) public eligibles;
     mapping(uint256 => bool) public activeHats;
+    // Task #441: track per-hat wearer count so hatSupply returns real values
+    // (was hardcoded to 0; broke async-majority early-close tests). Increment
+    // in mintHat / decrement in removeHat / transferHat. setHatWearerStatus
+    // and renounceHat updated similarly.
+    mapping(uint256 => uint32) public hatSupplies;
 
     // IHatsIdUtilities implementations
     function buildHatId(uint256 _admin, uint16 _newHat) external pure returns (uint256 id) {
@@ -99,6 +104,9 @@ contract MockHats is IHats {
     }
 
     function mintHat(uint256 _hatId, address _wearer) external returns (bool success) {
+        if (!wearers[_wearer][_hatId]) {
+            hatSupplies[_hatId]++;
+        }
         wearers[_wearer][_hatId] = true;
         if (!activeHats[_hatId]) {
             activeHats[_hatId] = true;
@@ -123,7 +131,11 @@ contract MockHats is IHats {
         external
         returns (bool updated)
     {
-        wearers[_wearer][_hatId] = _eligible && _standing;
+        bool wasWearer = wearers[_wearer][_hatId];
+        bool nowWearer = _eligible && _standing;
+        if (wasWearer && !nowWearer) hatSupplies[_hatId]--;
+        if (!wasWearer && nowWearer) hatSupplies[_hatId]++;
+        wearers[_wearer][_hatId] = nowWearer;
         return true;
     }
 
@@ -132,10 +144,20 @@ contract MockHats is IHats {
     }
 
     function renounceHat(uint256 _hatId) external {
+        if (wearers[msg.sender][_hatId]) hatSupplies[_hatId]--;
         wearers[msg.sender][_hatId] = false;
     }
 
     function transferHat(uint256 _hatId, address _from, address _to) external {
+        if (wearers[_from][_hatId] && !wearers[_to][_hatId]) {
+            // net zero — count stays the same
+        } else if (wearers[_from][_hatId] && wearers[_to][_hatId]) {
+            // _from loses, _to already had it
+            hatSupplies[_hatId]--;
+        } else if (!wearers[_from][_hatId] && !wearers[_to][_hatId]) {
+            // _to gains, _from didn't have it
+            hatSupplies[_hatId]++;
+        }
         wearers[_from][_hatId] = false;
         wearers[_to][_hatId] = true;
     }
@@ -219,7 +241,7 @@ contract MockHats is IHats {
     }
 
     function hatSupply(uint256 _hatId) external view returns (uint32 supply) {
-        return 0;
+        return hatSupplies[_hatId];
     }
 
     function getImageURIForHat(uint256 _hatId) external view returns (string memory _uri) {

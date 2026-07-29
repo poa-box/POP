@@ -161,7 +161,7 @@ contract GovernanceCrossChainUpgradeTest is Test {
                         address(hvBeacon),
                         abi.encodeCall(
                             HybridVoting.initialize,
-                            (address(hats), address(executor), creatorHats, targets, uint8(50), classes)
+                            (address(hats), address(executor), creatorHats, targets, uint8(50), uint8(50), classes)
                         )
                     )
                 ))

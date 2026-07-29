@@ -80,6 +80,7 @@ contract GovernanceFactory {
         bytes regSignature; // User's EIP-712 ECDSA signature for username registration
         bool autoUpgrade;
         uint8 hybridThresholdPct; // Support threshold for HybridVoting
+        uint8 hybridEarlyCloseTurnoutPct; // Min turnout % for early-close (1..100; 100 = wait for everyone)
         uint8 ddThresholdPct; // Support threshold for DirectDemocracyVoting
         IHybridVotingInit.ClassConfig[] hybridClasses; // Voting class configuration
         uint256 hybridProposalCreatorRolesBitmap; // Bit N set = Role N can create proposals
@@ -265,7 +266,13 @@ contract GovernanceFactory {
             });
 
             hybridVoting = ModuleDeploymentLib.deployHybridVoting(
-                config, executor, creatorHats, params.hybridThresholdPct, finalClasses, hybridBeacon
+                config,
+                executor,
+                creatorHats,
+                params.hybridThresholdPct,
+                params.hybridEarlyCloseTurnoutPct,
+                finalClasses,
+                hybridBeacon
             );
         }
 

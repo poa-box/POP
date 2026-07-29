@@ -22,6 +22,7 @@ library VotingErrors {
     error EmptyBatch();
     error InvalidThreshold();
     error InvalidQuorum();
+    error InvalidTurnoutPct();
     error Paused();
     error Overflow();
     error InvalidClassCount();

@@ -26,6 +26,11 @@ library HybridVotingProposals {
         uint256[] hatIds
     );
 
+    /// Per-proposal early-close config. turnoutPctOverride==0 means use org default.
+    event ProposalEarlyCloseConfig(
+        uint256 indexed id, uint64 snapshotEligibleVoters, uint8 turnoutPctOverride, bool isTimerOnly
+    );
+
     function _layout() private pure returns (HybridVoting.Layout storage s) {
         bytes32 slot = _STORAGE_SLOT;
         assembly {
@@ -33,6 +38,9 @@ library HybridVotingProposals {
         }
     }
 
+    /// Default proposal creation. Snapshots on-chain eligibility from the
+    /// effective hat array (pollHatIds when restricted, creatorHatIds when
+    /// not) so async-majority early-close is enabled out of the box.
     function createProposal(
         bytes calldata title,
         bytes32 descriptionHash,
@@ -41,9 +49,62 @@ library HybridVotingProposals {
         IExecutor.Call[][] calldata batches,
         uint256[] calldata hatIds
     ) external {
-        uint256 id = _initProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds);
+        uint256 id = _initProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds, 0, 0);
 
         uint64 endTs = _layout()._proposals[id].endTimestamp;
+
+        if (hatIds.length > 0) {
+            emit NewHatProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp), hatIds);
+        } else {
+            emit NewProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp));
+        }
+    }
+
+    /// Snapshot = max(callerEligibleHint, on-chain hatSupply sum). Caller can
+    /// only ratchet UP. Sentinel: callerEligibleHint == type(uint64).max
+    /// disables early-close entirely (timer-only opt-out).
+    function createProposalWithEligibleSnapshot(
+        bytes calldata title,
+        bytes32 descriptionHash,
+        uint32 minutesDuration,
+        uint8 numOptions,
+        IExecutor.Call[][] calldata batches,
+        uint256[] calldata hatIds,
+        uint64 callerEligibleHint
+    ) external {
+        uint256 id = _initProposal(
+            title, descriptionHash, minutesDuration, numOptions, batches, hatIds, callerEligibleHint, 0
+        );
+
+        uint64 endTs = _layout()._proposals[id].endTimestamp;
+
+        if (hatIds.length > 0) {
+            emit NewHatProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp), hatIds);
+        } else {
+            emit NewProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp));
+        }
+    }
+
+    /// Per-proposal turnout override in [orgDefault, 100]. Ratchet UP only.
+    function createProposalWithTurnoutPct(
+        bytes calldata title,
+        bytes32 descriptionHash,
+        uint32 minutesDuration,
+        uint8 numOptions,
+        IExecutor.Call[][] calldata batches,
+        uint256[] calldata hatIds,
+        uint8 turnoutPctOverride
+    ) external {
+        HybridVoting.Layout storage l = _layout();
+        uint8 orgDefault = l.earlyCloseTurnoutPct == 0 ? 100 : l.earlyCloseTurnoutPct;
+        if (turnoutPctOverride < orgDefault || turnoutPctOverride > 100) {
+            revert VotingErrors.InvalidTurnoutPct();
+        }
+
+        uint256 id =
+            _initProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds, 0, turnoutPctOverride);
+
+        uint64 endTs = l._proposals[id].endTimestamp;
 
         if (hatIds.length > 0) {
             emit NewHatProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp), hatIds);
@@ -58,7 +119,9 @@ library HybridVotingProposals {
         uint32 minutesDuration,
         uint8 numOptions,
         IExecutor.Call[][] calldata batches,
-        uint256[] calldata hatIds
+        uint256[] calldata hatIds,
+        uint64 callerEligibleHint,
+        uint8 turnoutPctOverride
     ) internal returns (uint256) {
         ValidationLib.requireValidTitle(title);
         if (numOptions == 0) revert VotingErrors.LengthMismatch();
@@ -120,7 +183,55 @@ library HybridVotingProposals {
             }
         }
 
+        // type(uint64).max sentinel disables early-close. Empty hatIds list +
+        // hint==0 resolves to snapshot=0, which the gate treats as timer-only.
+        if (callerEligibleHint == type(uint64).max) {
+            p.snapshotEligibleVoters = type(uint64).max;
+        } else {
+            uint64 onChainUpperBound = p.restricted
+                ? _eligibleVotersUpperBoundCalldata(hatIds)
+                : _eligibleVotersUpperBoundStorage(l.creatorHatIds);
+            p.snapshotEligibleVoters = callerEligibleHint > onChainUpperBound ? callerEligibleHint : onChainUpperBound;
+        }
+
+        if (turnoutPctOverride != 0) {
+            p.turnoutPctOverride = turnoutPctOverride;
+        }
+
+        emit ProposalEarlyCloseConfig(
+            id, p.snapshotEligibleVoters, turnoutPctOverride, p.snapshotEligibleVoters == type(uint64).max
+        );
+
         return id;
+    }
+
+    function _eligibleVotersUpperBoundCalldata(uint256[] calldata hatIds) internal view returns (uint64) {
+        HybridVoting.Layout storage l = _layout();
+        uint256 total;
+        uint256 len = hatIds.length;
+        for (uint256 i; i < len;) {
+            total += l.hats.hatSupply(hatIds[i]);
+            unchecked {
+                ++i;
+            }
+        }
+        // Clamp to max-1; max is reserved as the timer-only sentinel.
+        return total >= uint256(type(uint64).max) ? uint64(type(uint64).max - 1) : uint64(total);
+    }
+
+    /// Note: overlapping-hat wearers are double-counted (safe direction:
+    /// over-counting raises the threshold).
+    function _eligibleVotersUpperBoundStorage(uint256[] storage hatIds) internal view returns (uint64) {
+        HybridVoting.Layout storage l = _layout();
+        uint256 total;
+        uint256 len = hatIds.length;
+        for (uint256 i; i < len;) {
+            total += l.hats.hatSupply(hatIds[i]);
+            unchecked {
+                ++i;
+            }
+        }
+        return total >= uint256(type(uint64).max) ? uint64(type(uint64).max - 1) : uint64(total);
     }
 
     function _validateDuration(uint32 minutesDuration) internal pure {

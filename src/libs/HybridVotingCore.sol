@@ -58,6 +58,9 @@ library HybridVotingCore {
         // Validate weights
         VotingMath.validateWeights(VotingMath.Weights({idxs: idxs, weights: weights, optionsLen: p.options.length}));
 
+        // CEI: set hasVoted before the IERC20.balanceOf call below.
+        p.hasVoted[voter] = true;
+
         // Calculate raw power for each class
         uint256 classCount = p.classesSnapshot.length;
         uint256[] memory classRawPowers = new uint256[](classCount);
@@ -111,11 +114,37 @@ library HybridVotingCore {
             }
         }
 
-        p.hasVoted[voter] = true;
         unchecked {
             p.voterCount++;
         }
         emit VoteCast(id, voter, idxs, weights, classRawPowers, uint64(block.timestamp));
+    }
+
+    /// Turnout-only gate. True iff voterCount has reached
+    /// ceil(snapshot * effectivePct / 100) and quorum (if set) is satisfied.
+    /// snapshot==0 means legacy pre-upgrade; snapshot==max means opt-out.
+    /// effectivePct: turnoutPctOverride if set, else org default; 0 -> 100.
+    function _isEarlyCloseEligible(uint256 id) internal view returns (bool) {
+        HybridVoting.Layout storage l = _layout();
+        if (id >= l._proposals.length) return false;
+        HybridVoting.Proposal storage p = l._proposals[id];
+
+        if (p.snapshotEligibleVoters == 0) return false;
+        if (p.snapshotEligibleVoters == type(uint64).max) return false;
+
+        // Resolve effective turnout percent: per-proposal override > org default;
+        // 0 (legacy back-compat sentinel) -> 100.
+        uint8 pct = p.turnoutPctOverride != 0 ? p.turnoutPctOverride : l.earlyCloseTurnoutPct;
+        if (pct == 0) pct = 100;
+
+        // Ceiling division: threshold = ceil(eligible * pct / 100).
+        // Max eligible (uint64) * 100 = 1.8e21, well under uint256.max.
+        uint256 threshold = (uint256(p.snapshotEligibleVoters) * pct + 99) / 100;
+        if (uint256(p.voterCount) < threshold) return false;
+
+        if (l.quorum > 0 && p.voterCount < l.quorum) return false;
+
+        return true;
     }
 
     function _calculateClassPower(address voter, HybridVoting.ClassConfig memory cls, HybridVoting.Layout storage l)
