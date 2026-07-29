@@ -4,11 +4,16 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import "../OrgRegistry.sol";
 import {ModuleTypes} from "./ModuleTypes.sol";
+import {ZkEmailInvites} from "../ZkEmailInvites.sol";
 
 // Moved interfaces here to break circular dependency
 interface IPoaManager {
     function getBeaconById(bytes32 typeId) external view returns (address);
     function getCurrentImplementationById(bytes32 typeId) external view returns (address);
+    /// @dev Public `beacons` mapping getter. Unlike `getBeaconById`, returns address(0)
+    ///      for an unregistered type instead of reverting `TypeUnknown` — lets callers
+    ///      probe for optional module types without bricking on absence.
+    function beacons(bytes32 typeId) external view returns (address);
 }
 
 interface IHybridVotingInit {
@@ -93,6 +98,9 @@ interface IPasskeyAccountFactoryInit {
     function initialize(address poaManager_, address accountBeacon_, address poaGuardian_, uint48 recoveryDelay_)
         external;
 }
+
+// ZkEmailInvites init uses the contract's own struct types (InitDomainRule/InitEmailRule),
+// so we reference ZkEmailInvites directly rather than a micro-interface.
 
 library ModuleDeploymentLib {
     error InvalidAddress();
@@ -303,5 +311,17 @@ library ModuleDeploymentLib {
             IPasskeyAccountFactoryInit.initialize.selector, poaManager, accountBeacon, poaGuardian, recoveryDelay
         );
         factoryProxy = deployCore(config, ModuleTypes.PASSKEY_ACCOUNT_FACTORY_ID, init, factoryBeacon);
+    }
+
+    /// @notice Deploy a module proxy WITHOUT initializing it. The caller initializes it AFTER the
+    ///         module is registered in OrgRegistry, so a per-org subgraph data-source template (created
+    ///         on ContractRegistered) catches the config/rule events that initialize() emits — avoiding
+    ///         eth_calls and indexing the deploy-time snapshot. (See CLAUDE.md "Events & subgraph indexing".)
+    function deployUninitializedProxy(DeployConfig memory config, bytes32 typeId, address beacon)
+        internal
+        returns (address proxy)
+    {
+        proxy = address(new BeaconProxy(beacon, ""));
+        emit ModuleDeployed(config.orgId, typeId, proxy, beacon, config.autoUpgrade, config.moduleOwner);
     }
 }

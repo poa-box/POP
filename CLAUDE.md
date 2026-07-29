@@ -20,6 +20,7 @@
 - Every upgradeable contract constructor MUST call `_disableInitializers()`
 - Use named imports only: `import {Foo} from "./Foo.sol";` — never `import "./Foo.sol";`
 - Commit style: conventional commits with PR numbers — `feat: description (#123)`, `fix: ...`, `refactor: ...`
+- Emit an event for EVERY state change the subgraph might index — including inside `initialize()` and every setter, not just "loud" mutations. The subgraph indexes from event logs; never make it fall back to `eth_call`s (they slow indexing, require an archive node, and fail silently). If `initialize` sets config or seeds rules, emit the same events the setters do (mirror them). See **Events & subgraph indexing** under Subgraph for the per-org-module template-ordering caveat.
 
 ## Gotchas
 
@@ -29,6 +30,7 @@
 - **PaymasterHub tests are skipped** — files ending `.t.sol.skip` require an EntryPoint fork. Rename to `.t.sol` to run locally.
 - **HybridVoting uses a v2 storage namespace** — the slot is `keccak256("poa.hybridvoting.v2.storage")`. Its three library files (`HybridVotingCore`, `HybridVotingConfig`, `HybridVotingProposals`) share this slot — changes must stay in sync.
 - **Pragma versions vary** — contracts range from `^0.8.17` to `^0.8.30`. Match the existing pragma when modifying a file; do not bump without testing all dependents.
+- **`HybridVoting.announceWinner` needs an explicit gas buffer** — it wraps the winning batch's `executor.execute()` in a `try/catch` (`HybridVotingCore`), so `eth_estimateGas` / wallets / `cast send` price only the cheap *caught-failure* path and under-fund the tx. An expensive batch (module deploy/init, `registerOrgContract` + `initialize` + `setActiveAllowlist`, etc.) then hits **OutOfGas** in a sub-call and is silently skipped: `announceWinner` still returns success with `didExecute=false` (emits `ProposalExecutionFailed` carrying `Executor.CallFailed(index, 0x)`), the proposal is marked `executed`, and **nothing happened** (proxy stays uninitialized, root unset). Always pass an explicit high gas limit — `cast send ... announceWinner <id> --gas-limit 3000000` — for any proposal with a non-trivial batch; the frontend's `announceWinner` call must add the same buffer. Confirmed live on Test6 (2026-07): proposal #23 no-op'd at ~29k gas for `setActiveAllowlist`; #24 re-run with a 3M limit.
 
 ## Architecture
 
@@ -148,6 +150,13 @@ When you need to find an org's deployed contract addresses (TaskManager, Executo
 - Manifest (chain network names + start blocks): https://github.com/poa-box/subgraph-pop/blob/main/pop-subgraph/subgraph.yaml
 
 Each chain runs its own subgraph — Poa governance lives on Arbitrum, KUBI/Test6/etc. on Gnosis. Query the chain where the org was deployed.
+
+### Events & subgraph indexing
+
+When adding or changing a contract the subgraph indexes, emit events for ALL state changes (config, rules, wiring) so mappings read them from logs — never make the subgraph `eth_call` to recover state (slow, needs an archive node, fails silently). Two things that bite here:
+
+- **Emit in `initialize()` too, not just setters.** A setter that emits while `initialize()` sets the same state silently makes the deploy-time snapshot invisible to indexers. Mirror the setter's event inside `initialize` (e.g. `ZkEmailInvites.initialize` emits `VerifierUpdated`/`DKIMRegistryUpdated`/… next to the rule events).
+- **Per-org module template-ordering — register BEFORE initialize.** A per-org module's subgraph data-source template is created when the module is registered in `OrgRegistry` (`ContractRegistered`). If `initialize()` runs *before* registration (the naive order), its config/rule events predate the template and are lost. **Fix: register the proxy, then initialize it.** `ModulesFactory.deployModules` deploys ZkEmailInvites *uninitialized*, batch-registers it, and calls `initialize()` afterward (existing orgs do the same via one governance batch: `registerOrgContract` → `initialize` → authorize). The init events then follow `ContractRegistered`, so the template indexes the full deploy-time snapshot with **no `eth_call`s**. Apply this pattern to any new per-org module whose deploy-time config must be indexed. (`ZkEmailInvitesContract` config fields are nullable only because they're unset for the instant between registration and the same-tx `initialize`.)
 
 Quick recipe — find an org's TaskManager + Executor + QuickJoin from its `orgId`:
 

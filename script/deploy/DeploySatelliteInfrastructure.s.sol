@@ -25,6 +25,7 @@ import {EligibilityModule} from "../../src/EligibilityModule.sol";
 import {ToggleModule} from "../../src/ToggleModule.sol";
 import {PasskeyAccount} from "../../src/PasskeyAccount.sol";
 import {PasskeyAccountFactory} from "../../src/PasskeyAccountFactory.sol";
+import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
 
 /**
  * @title DeploySatelliteInfrastructure
@@ -107,6 +108,7 @@ contract DeploySatelliteInfrastructure is Script {
         _deployIfNeeded(dd, "ToggleModule", "v1", type(ToggleModule).creationCode);
         _deployIfNeeded(dd, "PasskeyAccount", "v1", type(PasskeyAccount).creationCode);
         _deployIfNeeded(dd, "PasskeyAccountFactory", "v1", type(PasskeyAccountFactory).creationCode);
+        _deployIfNeeded(dd, "ZkEmailInvites", "v1", type(ZkEmailInvites).creationCode);
     }
 
     function _deployIfNeeded(DeterministicDeployer dd, string memory typeName, string memory version, bytes memory code)
@@ -138,6 +140,9 @@ contract DeploySatelliteInfrastructure is Script {
         _registerType(pm, dd, "ToggleModule", "v1");
         _registerType(pm, dd, "PasskeyAccount", "v1");
         _registerType(pm, dd, "PasskeyAccountFactory", "v1");
+        // ZkEmailInvites beacon registered unconditionally; the per-org module stays dormant
+        // until OrgDeployer.setZkEmailInfrastructure wires the verifier + DKIM registry.
+        _registerType(pm, dd, "ZkEmailInvites", "v1");
     }
 
     function _registerType(PoaManager pm, DeterministicDeployer dd, string memory typeName, string memory version)

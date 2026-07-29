@@ -667,7 +667,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
     }
 
     /*══════════════════════════════════════════ SET‑UP ══════════════════════════════════════════*/
-    function setUp() public {
+    function setUp() public virtual {
         // Fork Sepolia using the RPC URL from foundry.toml
         vm.createSelectFork("hoodi");
 

@@ -13,6 +13,15 @@ interface IToggleModule {
 }
 
 /**
+ * @notice Minimal view of the org Executor (this module's superAdmin) used to authorize
+ *         email-verified eligibility grants: any contract the org has governance-approved as a hat
+ *         minter (e.g. ZkEmailInvites) may mark wearers email-verified — same trust level as minting.
+ */
+interface IHatMinterAuthority {
+    function isAuthorizedHatMinter(address minter) external view returns (bool);
+}
+
+/**
  * @title EligibilityModule
  * @notice A hat-based module for configuring eligibility and standing
  *         on a per-hat basis in the Hats Protocol, controlled by admin hats.
@@ -40,6 +49,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     error ApplicationAlreadyExists();
     error NoActiveApplication();
     error InvalidApplicationHash();
+    error NotAuthorizedEmailVerifier();
 
     /*═════════════════════════════════════════ STRUCTS ═════════════════════════════════════════*/
 
@@ -101,6 +111,10 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         mapping(uint256 => mapping(address => mapping(address => uint256))) voucherRecordEpoch; // hatId => wearer => voucher => epoch
         // Configurable daily vouch limit (0 = use DEFAULT_MAX_DAILY_VOUCHES)
         uint32 maxDailyVouches;
+        // Email-verified eligibility (THIRD path, alongside hierarchy rules + vouching): set by the
+        // org's authorized claim contracts (e.g. ZkEmailInvites) after a valid zk-email proof. Appended
+        // for upgrade safety (ERC-7201 append-only).
+        mapping(uint256 => mapping(address => bool)) emailVerified; // hatId => wearer => verified
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.eligibilitymodule.storage");
@@ -157,6 +171,8 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         address indexed wearer, uint256 indexed hatId, bool eligible, bool standing, address indexed admin
     );
     event DefaultEligibilityUpdated(uint256 indexed hatId, bool eligible, bool standing, address indexed admin);
+    event EmailVerifiedSet(address indexed wearer, uint256 indexed hatId, address indexed verifier);
+    event EmailVerifiedCleared(address indexed wearer, uint256 indexed hatId, address indexed admin);
 
     event BulkWearerEligibilityUpdated(
         address[] wearers, uint256 indexed hatId, bool eligible, bool standing, address indexed admin
@@ -257,6 +273,55 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         delete l.wearerRules[wearer][hatId];
         delete l.hasSpecificWearerRules[wearer][hatId];
         emit WearerEligibilityUpdated(wearer, hatId, false, false, msg.sender);
+    }
+
+    /*═══════════════════════════════ EMAIL-VERIFIED ELIGIBILITY ═══════════════════════════════════*/
+
+    /**
+     * @notice Mark `wearer` email-verified for each hat in `hatIds` — the THIRD eligibility path,
+     *         alongside hierarchy rules and vouching. Set by the org's claim contracts (e.g.
+     *         ZkEmailInvites) after a valid zk-email proof against the org's allowlist (whole-domain
+     *         or specific-address entries alike), so allowlisted claimers become mintable without
+     *         opening the hat's default eligibility or entangling with vouch quorums.
+     * @dev AUTH: the superAdmin (org Executor) itself, or any contract the Executor has
+     *      governance-approved as a hat minter (`isAuthorizedHatMinter`) — granting eligibility is the
+     *      same trust level as minting. In {getWearerStatus} the flag confers eligibility + standing
+     *      ONLY when the wearer has no EXPLICIT per-wearer rule, so a kick/ban
+     *      (`setWearerEligibility(wearer, hat, false, false)`) always wins over email verification.
+     */
+    function setEmailVerified(address wearer, uint256[] calldata hatIds) external whenNotPaused {
+        if (wearer == address(0)) revert ZeroAddress();
+        Layout storage l = _layout();
+        if (msg.sender != l.superAdmin && !_isAuthorizedHatMinter(l.superAdmin, msg.sender)) {
+            revert NotAuthorizedEmailVerifier();
+        }
+        for (uint256 i = 0; i < hatIds.length; i++) {
+            l.emailVerified[hatIds[i]][wearer] = true;
+            emit EmailVerifiedSet(wearer, hatIds[i], msg.sender);
+        }
+    }
+
+    /// @notice Revoke a wearer's email-verified eligibility for `hatId` (superAdmin/governance only).
+    function clearEmailVerified(address wearer, uint256 hatId) external onlySuperAdmin whenNotPaused {
+        if (wearer == address(0)) revert ZeroAddress();
+        delete _layout().emailVerified[hatId][wearer];
+        emit EmailVerifiedCleared(wearer, hatId, msg.sender);
+    }
+
+    /// @notice Whether `wearer` is email-verified for `hatId`.
+    function isEmailVerified(address wearer, uint256 hatId) external view returns (bool) {
+        return _layout().emailVerified[hatId][wearer];
+    }
+
+    /// @dev The superAdmin may be an EOA or an older Executor without the getter — fail closed. The
+    ///      code-length guard is required: try/catch cannot catch the no-code check for an EOA target.
+    function _isAuthorizedHatMinter(address superAdmin_, address caller) private view returns (bool ok) {
+        if (superAdmin_.code.length == 0) return false;
+        try IHatMinterAuthority(superAdmin_).isAuthorizedHatMinter(caller) returns (bool authorized) {
+            ok = authorized;
+        } catch {
+            ok = false;
+        }
     }
 
     function setBulkWearerEligibility(address[] calldata wearers, uint256 hatId, bool _eligible, bool _standing)
@@ -957,6 +1022,16 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         } else {
             eligible = hierarchyEligible;
             standing = hierarchyStanding;
+        }
+
+        // THIRD path: email-verified (set by the org's authorized claim contracts after a valid
+        // zk-email proof). An affirmative, org-sanctioned grant (allowlist + proof), so it confers
+        // eligibility AND standing — but ONLY when the org has no EXPLICIT per-wearer rule: an explicit
+        // rule (e.g. a kick/ban via `setWearerEligibility(wearer, hat, false, false)`) always wins over
+        // email verification via the standing check below.
+        if (l.emailVerified[hatId][wearer] && !l.hasSpecificWearerRules[wearer][hatId]) {
+            eligible = true;
+            standing = true;
         }
 
         // If standing is false, eligibility MUST also be false per IHatsEligibility interface
