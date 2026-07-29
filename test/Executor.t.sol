@@ -117,6 +117,58 @@ contract ExecutorTest is Test {
         exec.mintHatsForUser(user, hatIds);
     }
 
+    /// @notice The path-A capability: a governance batch can self-authorize a hat minter even after
+    ///         ownership is renounced (the exact live-org condition, e.g. Test6).
+    function testGovernanceSelfAuthorizesHatMinter() public {
+        exec.renounceOwnership();
+        assertEq(exec.owner(), address(0));
+
+        address minter = address(0xABCD);
+        address user = address(0x3);
+        uint256[] memory hatIds = new uint256[](1);
+        hatIds[0] = 1;
+
+        // Before authorization the minter cannot mint.
+        vm.prank(minter);
+        vm.expectRevert(Executor.UnauthorizedCaller.selector);
+        exec.mintHatsForUser(user, hatIds);
+
+        // Governance batch self-targets setHatMinterAuthorization — impossible before this upgrade.
+        IExecutor.Call[] memory batch = new IExecutor.Call[](1);
+        batch[0] = IExecutor.Call({
+            target: address(exec),
+            value: 0,
+            data: abi.encodeWithSelector(Executor.setHatMinterAuthorization.selector, minter, true)
+        });
+        vm.prank(caller);
+        exec.execute(1, batch);
+
+        // Now authorized: the minter can mint.
+        vm.prank(minter);
+        exec.mintHatsForUser(user, hatIds);
+        assertTrue(hats.isWearerOfHat(user, 1));
+    }
+
+    /// @notice Self-targeting any OTHER admin selector still reverts TargetSelf (narrow allowlist).
+    function testSelfTargetNonAllowlistedSelectorStillReverts() public {
+        IExecutor.Call[] memory batch = new IExecutor.Call[](1);
+        batch[0] = IExecutor.Call({
+            target: address(exec), value: 0, data: abi.encodeWithSelector(Executor.setCaller.selector, address(0xDEAD))
+        });
+        vm.prank(caller);
+        vm.expectRevert(Executor.TargetSelf.selector);
+        exec.execute(1, batch);
+    }
+
+    /// @notice The msg.sender==address(this) acceptance must not open an external hole: a stranger
+    ///         calling setHatMinterAuthorization directly still reverts even after renounce.
+    function testDirectMinterAuthFromStrangerStillReverts() public {
+        exec.renounceOwnership();
+        vm.prank(address(0x99));
+        vm.expectRevert(Executor.UnauthorizedCaller.selector);
+        exec.setHatMinterAuthorization(address(0xABCD), true);
+    }
+
     function testSetCallerUnauthorizedReverts() public {
         address random = address(0x99);
         vm.prank(random);

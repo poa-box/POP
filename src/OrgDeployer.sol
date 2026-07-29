@@ -144,6 +144,11 @@ contract OrgDeployer is Initializable {
         address universalPasskeyFactory; // Universal PasskeyAccountFactory for all orgs
         uint256 _status; // manual reentrancy guard
         IHats hatsV2; // upgrade-safe hats reference (inside ERC-7201 namespace)
+        // ZK Email protocol infra (set once per chain via PoaManager). If unset, ZkEmailInvites
+        // module deployment is skipped per-org and the feature is gracefully unavailable.
+        address zkEmailDomainVerifier; // 3-signal PopRoleClaim verifier (domain claims)
+        address zkEmailEmailVerifier; // 4-signal PopRoleClaimV2 verifier (specific-address claims)
+        address zkEmailDkimRegistry;
     }
 
     /// @dev Legacy slot-0 hats variable. Kept for ABI compatibility with existing proxies.
@@ -216,6 +221,47 @@ contract OrgDeployer is Initializable {
         l.universalPasskeyFactory = _universalFactory;
     }
 
+    /// @notice Wire the per-chain ZK Email protocol infra. Once all are non-zero, every new
+    ///         org gets a ZkEmailInvites proxy alongside its other modules.
+    /// @dev Only callable by PoaManager. Passing address(0) for any field is a no-op for that field;
+    ///      pass all non-zero to enable the feature. Two verifiers are wired: a 3-signal domain verifier
+    ///      (PopRoleClaim) and a 4-signal specific-address verifier (PopRoleClaimV2, exposes emailHash).
+    function setZkEmailInfrastructure(address domainVerifier, address emailVerifier, address dkimRegistry) external {
+        Layout storage l = _layout();
+        if (msg.sender != l.poaManager) revert InvalidAddress();
+        if (domainVerifier != address(0)) l.zkEmailDomainVerifier = domainVerifier;
+        if (emailVerifier != address(0)) l.zkEmailEmailVerifier = emailVerifier;
+        if (dkimRegistry != address(0)) l.zkEmailDkimRegistry = dkimRegistry;
+    }
+
+    /// @notice Re-point the deployer at a freshly-deployed ModulesFactory.
+    /// @dev ModulesFactory is a plain (non-proxy) contract referenced by address, so a beacon
+    ///      upgrade of this OrgDeployer keeps the OLD factory in storage. After deploying a new
+    ///      ModulesFactory (e.g. to add the ZkEmailInvites deploy path), call this to switch.
+    ///      Only callable by PoaManager (via Hub/Satellite adminCall).
+    function setModulesFactory(address _modulesFactory) external {
+        Layout storage l = _layout();
+        if (msg.sender != l.poaManager) revert InvalidAddress();
+        if (_modulesFactory == address(0)) revert InvalidAddress();
+        l.modulesFactory = ModulesFactory(_modulesFactory);
+    }
+
+    /// @notice Re-point the deployer at freshly-deployed Governance/Access factories.
+    /// @dev Same rationale as setModulesFactory. Only callable by PoaManager.
+    function setGovernanceFactory(address _governanceFactory) external {
+        Layout storage l = _layout();
+        if (msg.sender != l.poaManager) revert InvalidAddress();
+        if (_governanceFactory == address(0)) revert InvalidAddress();
+        l.governanceFactory = GovernanceFactory(_governanceFactory);
+    }
+
+    function setAccessFactory(address _accessFactory) external {
+        Layout storage l = _layout();
+        if (msg.sender != l.poaManager) revert InvalidAddress();
+        if (_accessFactory == address(0)) revert InvalidAddress();
+        l.accessFactory = AccessFactory(_accessFactory);
+    }
+
     /*════════════════  DEPLOYMENT STRUCTS  ════════════════*/
 
     struct DeploymentResult {
@@ -228,6 +274,9 @@ contract OrgDeployer is Initializable {
         address educationHub;
         address paymentManager;
         address eligibilityModule;
+        // address(0) on chains where ZK Email protocol infra (verifier + DKIM registry)
+        // has not been wired into the OrgDeployer yet — the module is skipped.
+        address zkEmailInvites;
     }
 
     struct RoleAssignments {
@@ -358,13 +407,36 @@ contract OrgDeployer is Initializable {
 
     /*════════════════  MAIN DEPLOYMENT FUNCTION  ════════════════*/
 
+    /// @notice Deploy a full org without ZK Email invites (backwards-compatible entrypoint).
     function deployFullOrg(DeploymentParams calldata params) external payable returns (DeploymentResult memory result) {
+        // Empty (disabled) ZK Email config — module is skipped.
+        ModulesFactory.ZkEmailConfig memory emptyZk;
+        result = _deployFullOrgGuarded(params, emptyZk);
+    }
+
+    /// @notice Deploy a full org and opt into ZK Email role invitations with an initial allowlist.
+    /// @dev The ZkEmailInvites module deploys only if `zkConfig.enabled` AND the chain has the ZK
+    ///      Email infra wired (verifier + DKIM registry via setZkEmailInfrastructure) AND the
+    ///      ZkEmailInvites beacon is registered. Domain/email rules use role-index bitmaps,
+    ///      resolved to hat IDs at deploy. Rules are applied atomically before ownership renounce.
+    function deployFullOrgWithZkEmail(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig calldata zkConfig)
+        external
+        payable
+        returns (DeploymentResult memory result)
+    {
+        result = _deployFullOrgGuarded(params, zkConfig);
+    }
+
+    function _deployFullOrgGuarded(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig memory zkConfig)
+        internal
+        returns (DeploymentResult memory result)
+    {
         // Manual reentrancy guard
         Layout storage l = _layout();
         if (l._status == 2) revert Reentrant();
         l._status = 2;
 
-        result = _deployFullOrgInternal(params);
+        result = _deployFullOrgInternal(params, zkConfig);
 
         // Reset reentrancy guard
         l._status = 1;
@@ -374,7 +446,7 @@ contract OrgDeployer is Initializable {
 
     /*════════════════  INTERNAL ORCHESTRATION  ════════════════*/
 
-    function _deployFullOrgInternal(DeploymentParams calldata params)
+    function _deployFullOrgInternal(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig memory zkConfig)
         internal
         returns (DeploymentResult memory result)
     {
@@ -470,13 +542,20 @@ contract OrgDeployer is Initializable {
                 roleHatIds: gov.roleHatIds,
                 autoUpgrade: params.autoUpgrade,
                 roleAssignments: moduleRoles,
-                educationHubConfig: params.educationHubConfig
+                educationHubConfig: params.educationHubConfig,
+                zkEmailDomainVerifier: l.zkEmailDomainVerifier,
+                zkEmailEmailVerifier: l.zkEmailEmailVerifier,
+                zkEmailDkimRegistry: l.zkEmailDkimRegistry,
+                accountRegistry: params.registryAddr,
+                universalFactory: l.universalPasskeyFactory,
+                zkEmailConfig: zkConfig
             });
 
             modules = l.modulesFactory.deployModules(moduleParams);
             result.taskManager = modules.taskManager;
             result.educationHub = modules.educationHub;
             result.paymentManager = modules.paymentManager;
+            result.zkEmailInvites = modules.zkEmailInvites;
         }
 
         /* 7. Deploy Voting Mechanisms (HybridVoting, DirectDemocracyVoting) */
@@ -525,6 +604,11 @@ contract OrgDeployer is Initializable {
 
         /* 9. Authorize QuickJoin to mint hats */
         IExecutorAdmin(result.executor).setHatMinterAuthorization(result.quickJoin, true);
+
+        /* 9b. Authorize ZkEmailInvites to mint hats (only if the module was deployed) */
+        if (result.zkEmailInvites != address(0)) {
+            IExecutorAdmin(result.executor).setHatMinterAuthorization(result.zkEmailInvites, true);
+        }
 
         /* 10. Link executor to governor */
         IExecutorAdmin(result.executor).setCaller(result.hybridVoting);
@@ -870,9 +954,11 @@ contract OrgDeployer is Initializable {
                 )
                 : (new address[](0), new bytes4[](0), new bool[](0), new uint32[](0));
 
-            // Build per-role-hat budgets if configured
+            // Build per-role-hat budgets if configured (+ the zk-email CLAIM budget when the module deploys)
             (bytes32[] memory budgetKeys, uint128[] memory budgetCaps, uint32[] memory budgetEpochLens) = hasBudgets
-                ? _buildDefaultBudgets(roleHatIds, pmCfg.defaultBudgetCapPerEpoch, pmCfg.defaultBudgetEpochLen)
+                ? _buildDefaultBudgets(
+                    roleHatIds, result.zkEmailInvites, pmCfg.defaultBudgetCapPerEpoch, pmCfg.defaultBudgetEpochLen
+                )
                 : (new bytes32[](0), new uint128[](0), new uint32[](0));
 
             IPaymasterHub.DeployConfig memory config = IPaymasterHub.DeployConfig({
@@ -918,9 +1004,11 @@ contract OrgDeployer is Initializable {
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
     {
-        // Count: QuickJoin(6) + TaskManager(16) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4)
+        // Count: QuickJoin(6) + TaskManager(16) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 4)
         uint256 count = 43;
         if (educationEnabled) count += 4;
+        bool zkEmailEnabled = result.zkEmailInvites != address(0);
+        if (zkEmailEnabled) count += 4;
 
         targets = new address[](count);
         selectors = new bytes4[](count);
@@ -949,10 +1037,65 @@ contract OrgDeployer is Initializable {
             i += 4;
         }
 
-        // Set all rules to allowed with 0 gas hint (use default)
+        if (zkEmailEnabled) {
+            i = _appendZkEmailInvitesRules(targets, selectors, gasHints, result.zkEmailInvites, i);
+        }
+
+        // Set all rules to allowed (gas hints already populated where non-zero).
         for (uint256 j = 0; j < count; j++) {
             allowed[j] = true;
         }
+    }
+
+    /// @dev ZkEmailProof tuple (domain): (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string)
+    ///      ZkEmailProofV2 tuple (email): (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32)
+    ///      PasskeyEnrollment tuple: (bytes32,bytes32,bytes32,uint256)
+    ///      WebAuthnAuth tuple: (bytes,bytes,uint256,uint256,bytes32,bytes32)
+    ///      4 selectors: domain claim, specific-address claim, and the two passkey register-and-claim variants.
+    function _appendZkEmailInvitesRules(
+        address[] memory targets,
+        bytes4[] memory selectors,
+        uint32[] memory gasHints,
+        address zk,
+        uint256 i
+    ) private pure returns (uint256) {
+        // Bare domain claim: Groth16 verify (~250k) + DKIM lookup + merkle proof + hat mint.
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
+            )
+        );
+        gasHints[i] = 800_000;
+        i++;
+        // Bare specific-address claim (v2 proof carries emailHash).
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "claimRoleByEmail((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),address,uint256[],bytes32[])"
+            )
+        );
+        gasHints[i] = 800_000;
+        i++;
+        // Combined register + domain claim: passkey registration + account create + proof + merkle + mint.
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),uint256[],bytes32[])"
+            )
+        );
+        gasHints[i] = 1_200_000;
+        i++;
+        // Combined register + specific-address claim.
+        targets[i] = zk;
+        selectors[i] = bytes4(
+            keccak256(
+                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),uint256[],bytes32[])"
+            )
+        );
+        gasHints[i] = 1_200_000;
+        i++;
+        return i;
     }
 
     function _appendQuickJoinRules(address[] memory targets, bytes4[] memory selectors, address qj, uint256 i)
@@ -1170,27 +1313,39 @@ contract OrgDeployer is Initializable {
     }
 
     /**
-     * @notice Build default per-role-hat budget entries
-     * @dev Creates a budget for each role hat using SUBJECT_TYPE_HAT (0x01)
+     * @notice Build default per-role-hat budget entries (+ the zk-email CLAIM budget when enabled)
+     * @dev Creates a budget for each role hat using SUBJECT_TYPE_HAT (0x01). When the org deploys with
+     *      ZkEmailInvites, also appends a SUBJECT_TYPE_CLAIM (0x05) budget keyed to the module address —
+     *      without it, gasless self-service email claims revert BudgetExceeded (the CLAIM subject has no
+     *      eligibility pre-check, so the budget is the org's spend backstop and MUST exist).
      * @param roleHatIds Array of hat IDs for each role
-     * @param capPerEpoch Default spending cap per epoch for each hat
+     * @param zkEmailInvites The org's ZkEmailInvites proxy (0 = module not enabled, no claim budget)
+     * @param capPerEpoch Default spending cap per epoch for each subject
      * @param epochLen Default epoch length in seconds
      */
-    function _buildDefaultBudgets(uint256[] memory roleHatIds, uint128 capPerEpoch, uint32 epochLen)
-        internal
-        pure
-        returns (bytes32[] memory subjectKeys, uint128[] memory caps, uint32[] memory epochLens)
-    {
-        uint256 count = roleHatIds.length;
+    function _buildDefaultBudgets(
+        uint256[] memory roleHatIds,
+        address zkEmailInvites,
+        uint128 capPerEpoch,
+        uint32 epochLen
+    ) internal pure returns (bytes32[] memory subjectKeys, uint128[] memory caps, uint32[] memory epochLens) {
+        bool hasClaimBudget = zkEmailInvites != address(0);
+        uint256 count = roleHatIds.length + (hasClaimBudget ? 1 : 0);
         subjectKeys = new bytes32[](count);
         caps = new uint128[](count);
         epochLens = new uint32[](count);
 
-        for (uint256 i = 0; i < count; i++) {
+        for (uint256 i = 0; i < roleHatIds.length; i++) {
             // SUBJECT_TYPE_HAT = 0x01, subjectId = bytes32(hatId)
             subjectKeys[i] = keccak256(abi.encodePacked(uint8(0x01), bytes32(roleHatIds[i])));
             caps[i] = capPerEpoch;
             epochLens[i] = epochLen;
+        }
+        if (hasClaimBudget) {
+            // SUBJECT_TYPE_CLAIM = 0x05, subjectId = bytes32(module address)
+            subjectKeys[count - 1] = keccak256(abi.encodePacked(uint8(0x05), bytes32(uint256(uint160(zkEmailInvites)))));
+            caps[count - 1] = capPerEpoch;
+            epochLens[count - 1] = epochLen;
         }
     }
 }

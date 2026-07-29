@@ -8,6 +8,7 @@ import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {IERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol";
 import {PaymasterHubErrors} from "./libs/PaymasterHubErrors.sol";
 import {PaymasterGraceLib} from "./libs/PaymasterGraceLib.sol";
+import {PaymasterCalldataLib} from "./libs/PaymasterCalldataLib.sol";
 
 // Storage structs matching PaymasterHub
 struct OrgConfig {
@@ -108,6 +109,7 @@ contract PaymasterHubLens {
     uint8 private constant SUBJECT_TYPE_HAT = 0x01;
     uint8 private constant SUBJECT_TYPE_POA_ONBOARDING = 0x03;
     uint8 private constant SUBJECT_TYPE_ORG_DEPLOY = 0x04;
+    uint8 private constant SUBJECT_TYPE_CLAIM = 0x05; // sponsor calls TO an org claim contract (no eligibility pre-check)
 
     uint32 private constant RULE_ID_GENERIC = 0x00000000;
     uint32 private constant RULE_ID_COARSE = 0x000000FF;
@@ -285,6 +287,13 @@ contract PaymasterHubLens {
             if (!active) {
                 return (false, "Ineligible");
             }
+            subjectKey = keccak256(abi.encodePacked(subjectType, subjectId));
+        } else if (subjectType == SUBJECT_TYPE_CLAIM) {
+            // Mirrors PaymasterHub: no wearer-eligibility pre-check — the claim contract is the gate.
+            // Bind the sponsorship to the claim contract: callData must be execute(subjectId, 0, ...).
+            (bool validClaim,) =
+                PaymasterCalldataLib.parseExecuteCall(userOp.callData, address(uint160(uint256(subjectId))));
+            if (!validClaim) return (false, "Ineligible");
             subjectKey = keccak256(abi.encodePacked(subjectType, subjectId));
         } else {
             return (false, "InvalidSubjectType");

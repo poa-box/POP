@@ -18,6 +18,7 @@ import {EligibilityModule} from "../../src/EligibilityModule.sol";
 import {ToggleModule} from "../../src/ToggleModule.sol";
 import {PasskeyAccount} from "../../src/PasskeyAccount.sol";
 import {PasskeyAccountFactory} from "../../src/PasskeyAccountFactory.sol";
+import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {OrgDeployer} from "../../src/OrgDeployer.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
@@ -45,12 +46,17 @@ abstract contract DeployHelper is Script {
     address public constant POA_GUARDIAN = address(0);
     uint256 public constant INITIAL_SOLIDARITY_FUND = 0.005 ether;
 
-    /// @notice Canonical list of the 13 application contract types.
+    /// @notice Canonical list of the 14 application contract types.
     ///         Infrastructure types (ImplementationRegistry, OrgRegistry,
     ///         OrgDeployer, PaymasterHub) are handled separately because they
     ///         require special initialization (beacon proxies, ownership, etc.).
+    /// @dev    ZkEmailInvites is registered here so its beacon exists on every chain.
+    ///         The module only *activates* once OrgDeployer.setZkEmailInfrastructure wires the
+    ///         verifier + DKIM registry; until then the per-org gate in ModulesFactory skips it.
+    ///         Registering the beacon unconditionally costs one extra impl deploy but removes the
+    ///         ordering hazard where enabling infra before the beacon would brick org deploys.
     function _contractTypes() internal pure returns (ContractType[] memory types) {
-        types = new ContractType[](13);
+        types = new ContractType[](14);
         types[0] = ContractType("HybridVoting", type(HybridVoting).creationCode);
         types[1] = ContractType("DirectDemocracyVoting", type(DirectDemocracyVoting).creationCode);
         types[2] = ContractType("Executor", type(Executor).creationCode);
@@ -64,6 +70,7 @@ abstract contract DeployHelper is Script {
         types[10] = ContractType("ToggleModule", type(ToggleModule).creationCode);
         types[11] = ContractType("PasskeyAccount", type(PasskeyAccount).creationCode);
         types[12] = ContractType("PasskeyAccountFactory", type(PasskeyAccountFactory).creationCode);
+        types[13] = ContractType("ZkEmailInvites", type(ZkEmailInvites).creationCode);
     }
 
     /// @notice Infrastructure contract types that need beacon registration for cross-chain upgrades.

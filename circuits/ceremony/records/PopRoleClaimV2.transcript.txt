@@ -1,0 +1,17 @@
+POP zk-email phase-2 ceremony transcript
+circuit:        PopRoleClaimV2
+r1cs.sha256:    23f94b368ad73ed500290a52af073e51e1abacccfb854ecfc2c1dc4e6f08bc08
+ptau.sha256:    cdc7c94a6635bc91466d8c7d96faefe1d17ecc98a3596a748ca1e6c895f8c2b4
+0000.sha256:    6e33d74d97708aad721d3dada86a46e081fcc12b32a803751a289ac023c0bfc1
+----- contributions -----
+alice  2cad6dcd0d78f8af496e02434a6c6db0c1cbb7cab35430f8a8b4ebc82f02500b
+bob  cacb192e9dd7bd9b33cc345f14951942818f52be6decf71de26fd4e18cd8dcd0
+carol  cf46bfd0b9c4a39b36325f67c1bfede5ba4e6abf93f92d64dd8bf2de1946efa1
+dave  20e4b364c17b90b8502c4f483bf82259c672e6d1e2bb9c5e54cf6bd432eee328
+erin  5152897b56d0edbd419b26c78bbb639cfef9c4e884dd6ba2309604a5758152bd
+----- finalization -----
+beacon:         1b002a19e83b774e181b2e73c525ef1d33a2629ddca76bb620b81243e06b3ff9 (2^10)
+final.sha256:   5037ade1c5bec8158f926a8323afb9fd23cd1e339b314e2466ffa68f72692f85
+vkey.sha256:    cb99b8f7ddbf5c313598ace31d7a5352e9d182e53eb84bc99abd1912c2011bc0
+verifier.sha256:0f615451966535c814539ac2c49ab156932fb47f7bf63c786b2bd2f2f7902296
+beacon_source:  ethereum chain 1 block 25576507 (committed at block 25576207)

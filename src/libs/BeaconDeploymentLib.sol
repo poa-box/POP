@@ -44,4 +44,18 @@ library BeaconDeploymentLib {
         // Create SwitchableBeacon with appropriate configuration
         beacon = address(new SwitchableBeacon(moduleOwner, poaBeacon, initImpl, beaconMode));
     }
+
+    /**
+     * @notice Returns true if PoaManager has a beacon registered for `typeId`.
+     * @dev Uses the public `beacons` mapping getter, which returns address(0) for an
+     *      unregistered type — unlike `getBeaconById`, it does NOT revert. Callers use this
+     *      to gate *optional* modules: if the protocol-level beacon was never registered on
+     *      this chain, the module is treated as unavailable and skipped, rather than reverting
+     *      the entire org deployment with `TypeUnknown`.
+     * @param typeId Module type identifier from ModuleTypes
+     * @param poaManager Address of the PoaManager contract
+     */
+    function beaconRegistered(bytes32 typeId, address poaManager) internal view returns (bool) {
+        return IPoaManager(poaManager).beacons(typeId) != address(0);
+    }
 }

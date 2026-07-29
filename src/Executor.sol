@@ -140,8 +140,12 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     function setHatMinterAuthorization(address minter, bool authorized) external {
         if (minter == address(0)) revert ZeroAddress();
         Layout storage l = _layout();
-        // Only owner or allowed caller can set authorizations
-        if (msg.sender != owner() && msg.sender != l.allowedCaller) revert UnauthorizedCaller();
+        // Authorized callers: the owner, the allowed caller (governance), or the Executor itself.
+        // The self-call path lets a governance batch authorize a hat minter on an org whose owner
+        // is already renounced — execute() permits self-targeting ONLY this exact function.
+        if (msg.sender != owner() && msg.sender != l.allowedCaller && msg.sender != address(this)) {
+            revert UnauthorizedCaller();
+        }
         l.authorizedHatMinters[minter] = authorized;
         emit HatMinterAuthorized(minter, authorized);
     }
@@ -169,7 +173,13 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         if (len > MAX_CALLS_PER_BATCH) revert TooManyCalls();
 
         for (uint256 i; i < len;) {
-            if (batch[i].target == address(this)) revert TargetSelf();
+            if (batch[i].target == address(this)) {
+                // Self-targeting is forbidden EXCEPT for a narrow allowlist of admin functions that
+                // governance must be able to invoke on the Executor itself (impossible otherwise once
+                // ownership is renounced). Only setHatMinterAuthorization is permitted; every other
+                // self-admin function (setCaller, pause, sweep, …) still reverts TargetSelf.
+                if (bytes4(batch[i].data) != this.setHatMinterAuthorization.selector) revert TargetSelf();
+            }
 
             (bool ok, bytes memory ret) = batch[i].target.call{value: batch[i].value}(batch[i].data);
             if (!ok) revert CallFailed(i, ret);
@@ -304,6 +314,19 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     /* ─────────── View Helpers ─────────── */
     function allowedCaller() external view returns (address) {
         return _layout().allowedCaller;
+    }
+
+    /// @notice The org's Hats Protocol instance.
+    /// @dev    Exposed so authorized hat-minter modules (e.g. ZkEmailInvites) can reach the same Hats
+    ///         reference the Executor mints through — without carrying a duplicate, migration-sensitive
+    ///         Hats field in their own ERC-7201 storage. Pure getter: safe to add via impl upgrade.
+    function hats() external view returns (IHats) {
+        return _layout().hats;
+    }
+
+    /// @notice Whether `minter` is authorized to request hat minting via {mintHatsForUser}.
+    function isAuthorizedHatMinter(address minter) external view returns (bool) {
+        return _layout().authorizedHatMinters[minter];
     }
 
     /* accept ETH for payable calls within a batch */

@@ -17,6 +17,7 @@ import {PaymasterPostOpLib} from "./libs/PaymasterPostOpLib.sol";
 import {PaymasterCalldataLib} from "./libs/PaymasterCalldataLib.sol";
 import {PaymasterAdminLib} from "./libs/PaymasterAdminLib.sol";
 import {PaymasterFinanceLib} from "./libs/PaymasterFinanceLib.sol";
+import {PaymasterSponsorshipLib} from "./libs/PaymasterSponsorshipLib.sol";
 
 /**
  * @title PaymasterHub
@@ -33,6 +34,12 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
     uint8 private constant SUBJECT_TYPE_HAT = 0x01;
     uint8 private constant SUBJECT_TYPE_POA_ONBOARDING = 0x03;
     uint8 private constant SUBJECT_TYPE_ORG_DEPLOY = 0x04;
+    /// @dev Sponsors calls TO an org-designated claim contract (subjectId = its address) with NO
+    ///      validation-time wearer-eligibility pre-check — the claim contract itself is the gate
+    ///      (e.g. ZkEmailInvites: ZK email proof + allowlist + open-hat guard, granting eligibility
+    ///      during execution). Spend is bounded by the org's Budget for keccak(0x05, subjectId) and
+    ///      by target/selector Rules; callData MUST be execute(subjectId, 0, ...) (batch rejected).
+    uint8 private constant SUBJECT_TYPE_CLAIM = 0x05;
 
     // Sponsorship type flags for context encoding
     uint8 private constant SPONSORSHIP_NONE = 0;
@@ -475,7 +482,8 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         }
 
         // Trigger 2: Crossing minimum threshold (based on available balance, not lifetime deposits,
-        // to stay consistent with _checkSolidarityAccess and _updateOrgFinancials)
+        // to stay consistent with PaymasterFinanceLib.checkSolidarityAccessAndReserve and its
+        // _applyFinancials postOp split — both key the solidarity tier off deposited - spent)
         // KNOWN LIMITATION (audit WS-C follow-up): withdrawOrgDeposit (M-04) lets an org admin
         // drop available below minDepositRequired and re-deposit across it to zero
         // solidarityUsedThisPeriod without burning real spend, cheapening the per-period
@@ -576,8 +584,8 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
                 revert PaymasterHubErrors.InvalidOnboardingRequest();
             }
 
-            // Validate POA onboarding eligibility
-            subjectKey = _validateOnboardingEligibility(userOp, maxCost);
+            // Validate POA onboarding eligibility (external delegatecall lib — EIP-170 headroom)
+            subjectKey = PaymasterSponsorshipLib.validateOnboardingEligibility(userOp, maxCost);
             currentEpochStart = uint32(block.timestamp);
             contextOrgId = bytes32(0);
 
@@ -590,8 +598,8 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
                 revert PaymasterHubErrors.InvalidOrgDeployRequest();
             }
 
-            // Validate free org deployment eligibility
-            subjectKey = _validateOrgDeployEligibility(userOp, maxCost);
+            // Validate free org deployment eligibility (external delegatecall lib — EIP-170 headroom)
+            subjectKey = PaymasterSponsorshipLib.validateOrgDeployEligibility(userOp, maxCost);
             currentEpochStart = uint32(block.timestamp);
             contextOrgId = bytes32(0);
         } else {
@@ -600,8 +608,20 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
             if (org.adminHatId == 0) revert PaymasterHubErrors.OrgNotRegistered();
             if (org.paused) revert PaymasterHubErrors.Paused();
 
-            // Validate subject eligibility
-            subjectKey = _validateSubjectEligibility(userOp.sender, subjectType, subjectId);
+            // Validate subject eligibility. CLAIM (0x05) deliberately has NO wearer-eligibility
+            // pre-check — the claim contract grants eligibility DURING execution (its own proof +
+            // allowlist gates are the authorization). Instead, bind the sponsorship to the claim
+            // contract itself: callData must be exactly execute(subjectId, 0, ...) (fail-closed;
+            // batch rejected). Rules below still gate the inner selector, and the org's Budget for
+            // keccak(0x05, subjectId) caps spend — an unset budget blocks the path entirely.
+            if (subjectType == SUBJECT_TYPE_CLAIM) {
+                (bool validClaim,) =
+                    PaymasterCalldataLib.parseExecuteCall(userOp.callData, address(uint160(uint256(subjectId))));
+                if (!validClaim) revert PaymasterHubErrors.Ineligible();
+                subjectKey = keccak256(abi.encodePacked(subjectType, subjectId));
+            } else {
+                subjectKey = _validateSubjectEligibility(userOp.sender, subjectType, subjectId);
+            }
 
             // Validate target/selector rules
             _validateRules(userOp, ruleId, orgId);
@@ -721,13 +741,15 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
                 _sponsorshipPostOpFallback(sponsorshipType, sender, actualGasCost);
                 return;
             }
-            _updateOnboardingUsage(actualGasCost, mode == IPaymaster.PostOpMode.opSucceeded);
+            PaymasterSponsorshipLib.updateOnboardingUsage(actualGasCost, mode == IPaymaster.PostOpMode.opSucceeded);
         } else if (sponsorshipType == SPONSORSHIP_ORG_DEPLOY) {
             if (mode == IPaymaster.PostOpMode.postOpReverted) {
                 _sponsorshipPostOpFallback(sponsorshipType, sender, actualGasCost);
                 return;
             }
-            _updateOrgDeployUsage(sender, actualGasCost, mode == IPaymaster.PostOpMode.opSucceeded);
+            PaymasterSponsorshipLib.updateOrgDeployUsage(
+                sender, actualGasCost, mode == IPaymaster.PostOpMode.opSucceeded
+            );
         } else {
             // If the first postOp call reverted, EntryPoint calls again with postOpReverted.
             // Use a fallback that cannot revert: charge from deposits first, absorb the rest
@@ -739,8 +761,11 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
                 return;
             }
 
-            // Regular org operation: adjust budget, unreserve deposit + solidarity, apply the
-            // actual funding split and collect the solidarity fee.
+            // Regular org operation (also covers SUBJECT_TYPE_CLAIM 0x05, which shares this
+            // org-billed path): adjust budget, unreserve deposit + solidarity, apply the actual
+            // funding split and collect the solidarity fee. This single call subsumes the budget
+            // adjust (_updateUsage) AND the org-financials split (updateOrgFinancials) AND the M-05
+            // solidarity unreservation — so those must NOT also run here or spend double-counts.
             PaymasterFinanceLib.updateUsageAndFinancials(
                 orgId, subjectKey, epochStart, actualGasCost, reservedBudget, reservedOrgBalance, reservedSolidarity
             );
@@ -1428,155 +1453,6 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         }
     }
 
-    /**
-     * @notice Validate POA onboarding eligibility for gasless account creation
-     * @dev Checks onboarding config and daily rate limits
-     * @param userOp The user operation being validated
-     * @param maxCost Maximum gas cost for the operation
-     * @return subjectKey The subject key for tracking
-     */
-    function _validateOnboardingEligibility(PackedUserOperation calldata userOp, uint256 maxCost)
-        private
-        returns (bytes32 subjectKey)
-    {
-        address account = userOp.sender;
-        OnboardingConfig storage onboarding = _getOnboardingStorage();
-
-        // Check onboarding is enabled
-        if (!onboarding.enabled) revert PaymasterHubErrors.OnboardingDisabled();
-
-        // Validate callData targets the account registry with an allowed function.
-        // Allowed: registerAccount (account creation) or setProfileMetadata (profile update).
-        bytes4 innerSelector;
-        if (userOp.callData.length != 0) {
-            innerSelector = _validateOnboardingCallData(userOp.callData, onboarding.accountRegistry);
-        }
-
-        // Account creation (registerAccount) requires initCode for deploying the smart account.
-        // Profile updates (setProfileMetadata) do NOT require initCode — account already exists.
-        bool isProfileUpdate = innerSelector == bytes4(0xde6808b6);
-        if (!isProfileUpdate && userOp.initCode.length == 0) {
-            revert PaymasterHubErrors.InvalidOnboardingRequest();
-        }
-
-        // Onboarding is paid from solidarity fund, so block when distribution is paused
-        SolidarityFund storage solidarity = _getSolidarityStorage();
-        if (solidarity.distributionPaused) revert PaymasterHubErrors.SolidarityDistributionIsPaused();
-
-        // Check gas cost limit
-        if (maxCost > onboarding.maxGasPerCreation) revert PaymasterHubErrors.GasTooHigh();
-
-        // Check per-account lifetime limit. Unlike the daily counter, this is NOT refunded in postOp on failure:
-        // a failed onboarding op still charges the solidarity fund (_updateOnboardingUsage deducts actualGasCost
-        // regardless of success), so every solidarity-charging attempt must consume the cap — otherwise repeated
-        // failing ops would drain the fund while keeping the count at zero. (Validation state only persists when the
-        // op is actually included on-chain, at which point postOp always runs and charges, so count and spend stay
-        // in lockstep.) maxOnboardingsPerAccount == 0 means unlimited; in that mode we skip counting entirely to avoid
-        // uint8 overflow on heavy senders and to keep already-deployed hubs (where the appended field reads 0) working.
-        if (onboarding.maxOnboardingsPerAccount != 0) {
-            mapping(address => uint8) storage counts = _getOnboardingCountsStorage();
-            if (counts[account] >= onboarding.maxOnboardingsPerAccount) {
-                revert PaymasterHubErrors.OnboardingLimitExceeded();
-            }
-            counts[account]++;
-        }
-
-        // Check daily rate limit
-        uint32 today = uint32(block.timestamp / 1 days);
-        if (today != onboarding.currentDay) {
-            onboarding.currentDay = today;
-            onboarding.attemptsToday = 0;
-        }
-        if (onboarding.attemptsToday >= onboarding.dailyCreationLimit) {
-            revert PaymasterHubErrors.OnboardingDailyLimitExceeded();
-        }
-        onboarding.attemptsToday++;
-
-        // Check solidarity fund has sufficient balance
-        if (solidarity.balance < maxCost) revert PaymasterHubErrors.InsufficientFunds();
-
-        // Subject key for onboarding is based on the account address (natural nonce)
-        subjectKey = keccak256(abi.encodePacked(SUBJECT_TYPE_POA_ONBOARDING, bytes20(account)));
-    }
-
-    /// @dev Validates that onboarding callData is execute(registryAddress, 0, registerAccount(...) | setProfileMetadata(...)).
-    /// @return innerSelector The validated inner function selector.
-    function _validateOnboardingCallData(bytes calldata callData, address registry)
-        private
-        pure
-        returns (bytes4 innerSelector)
-    {
-        if (registry == address(0)) revert PaymasterHubErrors.InvalidOnboardingRequest();
-        bool valid;
-        (valid, innerSelector) = PaymasterCalldataLib.parseExecuteCall(callData, registry);
-        if (!valid) revert PaymasterHubErrors.InvalidOnboardingRequest();
-        // Must call registerAccount(string) = 0xbff6de20 OR setProfileMetadata(bytes32) = 0xde6808b6
-        if (innerSelector != bytes4(0xbff6de20) && innerSelector != bytes4(0xde6808b6)) {
-            revert PaymasterHubErrors.InvalidOnboardingRequest();
-        }
-    }
-
-    /**
-     * @notice Validate free org deployment eligibility
-     * @dev Checks deploy config, per-account lifetime limit, and daily rate limits
-     * @param userOp The user operation being validated
-     * @param maxCost Maximum gas cost for the operation
-     * @return subjectKey The subject key for tracking
-     */
-    function _validateOrgDeployEligibility(PackedUserOperation calldata userOp, uint256 maxCost)
-        private
-        returns (bytes32 subjectKey)
-    {
-        address account = userOp.sender;
-        OrgDeployConfig storage deployConfig = _getOrgDeployStorage();
-
-        // Check feature is enabled
-        if (!deployConfig.enabled) revert PaymasterHubErrors.OrgDeployDisabled();
-
-        // No initCode for org deployment (account must already exist)
-        if (userOp.initCode.length != 0) revert PaymasterHubErrors.InvalidOrgDeployRequest();
-
-        // Validate calldata: must be execute(orgDeployerAddress, 0, ...)
-        _validateOrgDeployCallData(userOp.callData, deployConfig.orgDeployer);
-
-        // Org deploy is paid from solidarity fund, so block when distribution is paused
-        SolidarityFund storage solidarity = _getSolidarityStorage();
-        if (solidarity.distributionPaused) revert PaymasterHubErrors.SolidarityDistributionIsPaused();
-
-        // Check gas cost limit
-        if (maxCost > deployConfig.maxGasPerDeploy) revert PaymasterHubErrors.GasTooHigh();
-
-        // Check per-account lifetime limit (optimistic increment for bundle safety)
-        mapping(address => uint8) storage counts = _getOrgDeployCountsStorage();
-        if (counts[account] >= deployConfig.maxDeploysPerAccount) revert PaymasterHubErrors.OrgDeployLimitExceeded();
-        counts[account]++;
-
-        // Check daily rate limit (same pattern as onboarding)
-        uint32 today = uint32(block.timestamp / 1 days);
-        if (today != deployConfig.currentDay) {
-            deployConfig.currentDay = today;
-            deployConfig.attemptsToday = 0;
-        }
-        if (deployConfig.attemptsToday >= deployConfig.dailyDeployLimit) {
-            revert PaymasterHubErrors.OrgDeployDailyLimitExceeded();
-        }
-        deployConfig.attemptsToday++;
-
-        // Check solidarity fund has sufficient balance
-        if (solidarity.balance < maxCost) revert PaymasterHubErrors.InsufficientFunds();
-
-        // Subject key based on account address
-        subjectKey = keccak256(abi.encodePacked(SUBJECT_TYPE_ORG_DEPLOY, bytes20(account)));
-    }
-
-    /// @dev Validates that org deploy callData is execute(orgDeployerAddress, 0, ...).
-    ///      Does NOT parse inner deployFullOrg params because the struct is complex and may change.
-    function _validateOrgDeployCallData(bytes calldata callData, address orgDeployer) private pure {
-        if (orgDeployer == address(0)) revert PaymasterHubErrors.InvalidOrgDeployRequest();
-        (bool valid,) = PaymasterCalldataLib.parseExecuteCall(callData, orgDeployer);
-        if (!valid) revert PaymasterHubErrors.InvalidOrgDeployRequest();
-    }
-
     function _validateRules(PackedUserOperation calldata userOp, uint32 ruleId, bytes32 orgId) private view {
         bytes calldata callData = userOp.callData;
         if (callData.length < 4) revert PaymasterHubErrors.InvalidPaymasterData();
@@ -1739,67 +1615,19 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
 
         // Reserve maxCost for bundle safety — ensures a second UserOp for the same
         // subject in the same bundle sees the updated usedInEpoch. Adjusted to actual
-        // cost in _updateUsage during postOp.
+        // cost in PaymasterFinanceLib.updateUsageAndFinancials during postOp.
         budget.usedInEpoch += uint128(maxCost);
 
         currentEpochStart = budget.epochStart;
     }
 
-    // NOTE (M-05): the per-subject budget usage adjustment moved into
-    // PaymasterFinanceLib.updateUsageAndFinancials (delegatecall) alongside the org financial split.
-
-    /**
-     * @notice Update onboarding usage and deduct from solidarity fund
-     * @dev Called in postOp for POA onboarding operations
-     * @param actualGasCost Actual gas cost to deduct
-     * @param countAsCreation Whether to emit creation event (true when op succeeded)
-     */
-    function _updateOnboardingUsage(uint256 actualGasCost, bool countAsCreation) private {
-        SolidarityFund storage solidarity = _getSolidarityStorage();
-
-        if (countAsCreation) {
-            emit PaymasterHubErrors.OnboardingAccountCreated(address(0), actualGasCost);
-        } else {
-            // Refund the daily counter slot for failed operations (incremented during validation for bundle safety)
-            OnboardingConfig storage onboarding = _getOnboardingStorage();
-            if (onboarding.attemptsToday > 0) {
-                onboarding.attemptsToday--;
-            }
-        }
-
-        // Deduct from solidarity fund (validated during _validateOnboardingEligibility)
-        if (solidarity.balance < actualGasCost) revert PaymasterHubErrors.InsufficientFunds();
-        solidarity.balance -= uint128(actualGasCost);
-    }
-
-    /**
-     * @notice Update org deploy usage and deduct from solidarity fund
-     * @dev Called in postOp for free org deployment operations
-     * @param sender The account that deployed the org
-     * @param actualGasCost Actual gas cost to deduct
-     * @param countAsDeployment Whether to count as successful deployment (true when op succeeded)
-     */
-    function _updateOrgDeployUsage(address sender, uint256 actualGasCost, bool countAsDeployment) private {
-        SolidarityFund storage solidarity = _getSolidarityStorage();
-
-        if (countAsDeployment) {
-            // Per-account counter already incremented during validation (bundle safety).
-            // Just emit the event.
-            emit PaymasterHubErrors.OrgDeploymentSponsored(sender, actualGasCost);
-        } else {
-            // Refund both counters for failed operations (incremented during validation for bundle safety)
-            mapping(address => uint8) storage counts = _getOrgDeployCountsStorage();
-            if (counts[sender] > 0) {
-                counts[sender]--;
-            }
-            OrgDeployConfig storage deployConfig = _getOrgDeployStorage();
-            if (deployConfig.attemptsToday > 0) {
-                deployConfig.attemptsToday--;
-            }
-        }
-
-        // Deduct from solidarity fund (validated during _validateOrgDeployEligibility)
-        if (solidarity.balance < actualGasCost) revert PaymasterHubErrors.InsufficientFunds();
-        solidarity.balance -= uint128(actualGasCost);
-    }
+    // NOTE (M-05 / zk-email merge): all three postOp accounting helpers moved into delegatecall
+    // libraries for EIP-170 headroom, and the merged postOp dispatches to them directly:
+    //   - regular org op (and SUBJECT_TYPE_CLAIM 0x05) -> PaymasterFinanceLib.updateUsageAndFinancials
+    //     (per-subject budget adjust + org financial split + M-05 solidarity unreservation)
+    //   - POA onboarding  -> PaymasterSponsorshipLib.updateOnboardingUsage
+    //   - free org deploy -> PaymasterSponsorshipLib.updateOrgDeployUsage
+    // The former hub-local _updateUsage / _updateOnboardingUsage / _updateOrgDeployUsage now live in
+    // those libraries; keeping hub copies would be dead code (and re-adding a second accounting call
+    // on any path would double-count spend).
 }

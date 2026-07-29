@@ -1,0 +1,17 @@
+{
+  "name": "pop-zkemail-circuits",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PopRoleClaim ZK Email circuit for ZkEmailInvites (client-side DKIM role-claim proofs)",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "gen-inputs": "node scripts/gen-inputs.mjs"
+  },
+  "dependencies": {
+    "@zk-email/circuits": "6.3.4",
+    "@zk-email/helpers": "6.4.2",
+    "circomlib": "2.0.5",
+    "nodemailer": "^9.0.0",
+    "snarkjs": "^0.7.5"
+  }
+}

@@ -1,0 +1,18 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=poptest.example;
+ q=dns/txt; s=test; bh=BnYG5TTn7jnTmgg36WEAcwgxgel/G5V0tptGYwdX/4I=;
+ h=from:subject:date:message-id:to:mime-version:content-type:content-transfer-encoding;
+ b=gTBeh7RXoDzFZxFd1kbJep8XMji58uc6XaXQcZ+Uq4WCN65i49MaciEHwh4w56ybFeHyDLA27
+ Sa3YXnNb2a0UmDqVWFBupIPODuZhjHtUwawkguzeWG/AnvGsYkfb/1qUrMFr9v2IbfMmt9F8MMH
+ qxE6WHP3T61aOzw+w5337trtwadN+it0o58Dn3hYMGGrMQpsHb8w52UlrlUVHB3Kas5WtSp3OJ/
+ B8qKz4zEgBHt1V652lx7Z6mENJCtjX2ZmMkQZT1DXhDju6+bUu31YjYLliv8eiWDUjuW7hAOb6p
+ nMJzc79J2HcMKwYHRWJKxSCpWE4BY57adZl61XWJawDQ==
+From: claimer@poptest.example
+To: invites@poptest.example
+Subject: Claim POP role for 0xA6F4D9f44Dd980b7168D829d5f74c2b00a46b2c9
+Message-ID: <pop-claim-test@poptest.example>
+Date: Mon, 01 Jan 2024 00:00:00 +0000
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+POP role claim

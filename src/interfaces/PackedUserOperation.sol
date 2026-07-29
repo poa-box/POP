@@ -22,6 +22,11 @@ struct PackedUserOperation {
 ///      encode/decode pair only against its own inverse; the tests carry hardcoded canonical
 ///      reference vectors so a re-introduced swap cannot round-trip its way to green.
 library UserOpLib {
+    /// @dev ERC-4337 v0.7 packing (EntryPoint UserOperationLib): the HIGH 128 bits carry
+    ///      verificationGasLimit, the LOW 128 bits carry callGasLimit. NOTE: an earlier version of this
+    ///      library had BOTH unpack/pack pairs reversed — internally consistent (tests round-tripped),
+    ///      but misread real UserOps from the canonical EntryPoint, so rule gas hints and fee caps
+    ///      silently constrained the WRONG fields (the deployed-hub accountGasLimits-swap bug).
     function unpackAccountGasLimits(bytes32 accountGasLimits)
         internal
         pure
@@ -35,13 +40,13 @@ library UserOpLib {
         return bytes32((uint256(verificationGasLimit) << 128) | uint256(callGasLimit));
     }
 
-    /// @notice Unpack gasFees into maxPriorityFeePerGas (high 128) and maxFeePerGas (low 128)
+    /// @notice Unpack gasFees into maxPriorityFeePerGas (HIGH 128 bits) and maxFeePerGas (LOW 128 bits)
     function unpackGasFees(bytes32 gasFees) internal pure returns (uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) {
         maxPriorityFeePerGas = uint128(uint256(gasFees >> 128));
         maxFeePerGas = uint128(uint256(gasFees));
     }
 
-    /// @notice Pack maxPriorityFeePerGas (high 128) and maxFeePerGas (low 128) into gasFees
+    /// @notice Pack maxPriorityFeePerGas (HIGH 128 bits) and maxFeePerGas (LOW 128 bits) into gasFees
     function packGasFees(uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) internal pure returns (bytes32) {
         return bytes32((uint256(maxPriorityFeePerGas) << 128) | uint256(maxFeePerGas));
     }
