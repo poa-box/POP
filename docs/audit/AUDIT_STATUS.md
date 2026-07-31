@@ -19,15 +19,16 @@
 | ParticipationToken | v5 | `0x634e7905f0B3c6a8e412FE183e26064418374bce` |
 | TaskManager | v6-era (untouched by audit) | `0x7833c4670C42dbCe1a7aB1BAB7e7Baf0A982ff57` |
 | EducationHub | v2 | `0xfc19aDBc358e1A2B7f619584eCA7d50ae97048d0` |
-| HybridVoting | v11 | `0x51A786160118961bdcEf033BaA7246Fb3512A780` |
-| DirectDemocracyVoting | v11 | `0xc2346158449138B8474f09692af4aCb88c2383F9` |
+| HybridVoting | v12 (deploy-time quorum, 2026-07-30) | `0x04477E365F6474D10FF2A526903cc9390c688c92` |
+| DirectDemocracyVoting | v12 (deploy-time quorum, 2026-07-30) | `0x7D9009fC91d3F57FFceD58079Ea51fF90f56267c` |
 | EligibilityModule | v6 | `0xB138504a06d1eD636EA2C485a7F055Ce79f9D37E` |
 | ToggleModule | v2 | `0x808c9F60415CF6C4740F876362B3393A7917Fd50` |
 | PaymentManager | v4 | `0x5126A721d043fa3Cd86008137ee2CCD20d3cedfb` |
 | PaymasterHub (BeaconProxy, NOT UUPS) | v19 | `0xE398A26c044dbcfb12B4D1714c66029e7C84ADe7` |
 | PasskeyAccount | v2 | `0xC16FCdFD434e333A6C53d7212531c5Bd55E5aD52` |
 | PasskeyAccountFactory | v2 | `0xf281151f969265A01754F136813160856408037D` |
-| OrgDeployer | v16 (incl. zk-email wiring) | `0xBE6b2500204C8fa769E530F7B2869E5f9bC6Cb63` |
+| OrgDeployer | v17 (deploy-time gov config; zk-email wiring) | `0xab8124C986Cf056dA23184913FA73352c8695615` |
+| GovernanceFactory / AccessFactory | v17 (canVote class filter / token identity) | `0x7D1Acf8B90569ba5F2B17FA676bF63bEa4c4FB5D` / `0xCA52D4899d6eF0BFce48777fCeaAffc8F2a790b2` |
 | ZkEmailInvites | latest | Gnosis `0x3b9329Da59BA13bE96685d36c5C56e2e78af5C1E` / Arbitrum `0xA6fbccec1a9425f924d3476bddCAcEF6903455D8` |
 
 Hub proxies: Gnosis `0xdEf1038C297493c0b5f82F0CDB49e929B53B4108`, Arbitrum `0xD6659bCaFAdCB9CC2F57B7aE923c7F1Ca4438a11`.
