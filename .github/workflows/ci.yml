@@ -36,15 +36,9 @@ jobs:
       run-coverage: true
       coverage-source-filter: ' src/'
 
-      # ── Deploy: TESTNET ONLY, on same-repo PRs. etherform has no mainnet path —
-      #    production/mainnet deploys stay manual via forge script. Targets the
-      #    `testnets` in .github/deploy-networks.json (hoodi). Set a DEPLOY_ENV_VARS
-      #    repo secret to `FOUNDRY_PROFILE=production` if the testnet deploy should use
-      #    production-profile bytecode (optimizer on / cancun) matching mainnet. ──
-      deploy-on-pr: true
-      deploy-script: 'script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure'
-      network-config-path: '.github/deploy-networks.json'
-      indexing-wait: 90
+      # NOTE: deploy-on-pr is intentionally OFF (default). Testnet deploys run on merge
+      # to main via the deploy-testnet job below — deploying every PR was noisy, burned
+      # testnet funds, and failed on unoptimized bytecode (see DEPLOY_ENV_VARS note there).
 
       # NOTE: upgrade-safety auto-runs only when .github/upgrades.json exists (new
       # etherform diffs each listed contract against main). Intentionally not added
@@ -53,3 +47,28 @@ jobs:
     secrets:
       PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
       RPC_URL: ${{ secrets.HOODI_RPC_URL }}
+
+  # Testnet deploy on MERGE TO MAIN only. The pinned etherform wrapper only supports
+  # PR-triggered deploys (deploy-on-pr), so this calls its reusable leaf workflow
+  # directly — the leaf's own docs anticipate merge-triggered use via `environment`.
+  # Targets the `testnets` in .github/deploy-networks.json (hoodi).
+  #
+  # DEPLOY_ENV_VARS (repo secret) MUST be set to `FOUNDRY_PROFILE=production`:
+  # the default profile has the optimizer OFF (vm.roll test-safety, see foundry.toml),
+  # which produces >24,576-byte bytecode for TaskManager/EligibilityModule/OrgDeployer/
+  # PaymasterHub/PasskeyAccount. forge script then errors on the EIP-170 size limit and
+  # dies on its confirm prompt in the TTY-less runner ("IO error: not a terminal").
+  # Production-profile bytecode (optimizer on / cancun) fits and matches mainnet.
+  deploy-testnet:
+    name: Deploy Testnet (main)
+    needs: [cicd]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: BreadchainCoop/etherform/.github/workflows/_deploy-testnet.yml@180aa91926a02ce2045f9a7e3ed08be9395ecfab
+    with:
+      deploy-script: 'script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure'
+      network-config-path: '.github/deploy-networks.json'
+      indexing-wait: 90
+    secrets:
+      PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      RPC_URL: ${{ secrets.HOODI_RPC_URL }}
+      DEPLOY_ENV_VARS: ${{ secrets.DEPLOY_ENV_VARS }}
