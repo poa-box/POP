@@ -25,3 +25,5 @@ script/config/satellite-state-*.json
 script/logs/deploy-*.log
 # Stray local dir (was an orphan submodule gitlink with no .gitmodules URL — broke recursive checkout)
 _frontend/
+cache-zkr/
+out-zkr/
