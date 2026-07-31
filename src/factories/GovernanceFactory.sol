@@ -87,6 +87,8 @@ contract GovernanceFactory {
         uint256 ddCreatorRolesBitmap; // Bit N set = Role N can create polls
         address[] ddInitialTargets; // Allowed execution targets for DirectDemocracyVoting
         RoleConfigStructs.RoleConfig[] roles; // Complete role configuration
+        uint32 hybridQuorum; // Min voter count for HybridVoting proposals (0 = disabled)
+        uint32 ddQuorum; // Min voter count for DirectDemocracyVoting polls (0 = disabled)
     }
 
     /*──────────────────── Governance Deployment Result ────────────────────*/
@@ -246,9 +248,14 @@ contract GovernanceFactory {
                 OrgRegistry(params.orgRegistry), params.orgId, params.hybridProposalCreatorRolesBitmap
             );
 
-            // Update voting classes with token addresses and role hat IDs
-            IHybridVotingInit.ClassConfig[] memory finalClasses =
-                _updateClassesWithTokenAndHats(params.hybridClasses, params.participationToken, roleHatIds);
+            // Update voting classes with token addresses and role hat IDs. Classes with
+            // empty hatIds are backfilled with the hats of canVote=true roles ONLY, so
+            // RoleConfig.canVote decides hybrid-voting membership at deploy time (roles
+            // like bots/agents with canVote=false are excluded without needing a
+            // post-deploy setClasses proposal).
+            IHybridVotingInit.ClassConfig[] memory finalClasses = _updateClassesWithTokenAndHats(
+                params.hybridClasses, params.participationToken, _filterCanVoteHats(params.roles, roleHatIds)
+            );
 
             hybridBeacon = BeaconDeploymentLib.createBeacon(
                 ModuleTypes.HYBRID_VOTING_ID, params.poaManager, executor, params.autoUpgrade, address(0)
@@ -265,7 +272,13 @@ contract GovernanceFactory {
             });
 
             hybridVoting = ModuleDeploymentLib.deployHybridVoting(
-                config, executor, creatorHats, params.hybridThresholdPct, finalClasses, hybridBeacon
+                config,
+                executor,
+                creatorHats,
+                params.hybridThresholdPct,
+                params.hybridQuorum,
+                finalClasses,
+                hybridBeacon
             );
         }
 
@@ -295,7 +308,14 @@ contract GovernanceFactory {
             });
 
             directDemocracyVoting = ModuleDeploymentLib.deployDirectDemocracyVoting(
-                config, executor, votingHats, creatorHats, params.ddInitialTargets, params.ddThresholdPct, ddBeacon
+                config,
+                executor,
+                votingHats,
+                creatorHats,
+                params.ddInitialTargets,
+                params.ddThresholdPct,
+                params.ddQuorum,
+                ddBeacon
             );
         }
 
@@ -338,6 +358,39 @@ contract GovernanceFactory {
      *      │ token is likewise non-transferable.                                        │
      *      └────────────────────────────────────────────────────────────────────────────┘
      */
+    /**
+     * @notice Returns the subset of `roleHatIds` whose role has `canVote == true`.
+     * @dev Restores the pre-N-class semantic where deploy config decides hybrid-voting
+     *      membership. Falls back to ALL role hats when no role has canVote set (a
+     *      degenerate config — matches the historical backfill rather than bricking
+     *      the org with an unvotable governance module). `roles` and `roleHatIds` are
+     *      index-aligned (both come from the same HatsTreeSetup pass).
+     */
+    function _filterCanVoteHats(RoleConfigStructs.RoleConfig[] memory roles, uint256[] memory roleHatIds)
+        internal
+        pure
+        returns (uint256[] memory)
+    {
+        if (roles.length != roleHatIds.length) {
+            return roleHatIds; // defensive: only filter when index-aligned
+        }
+        uint256 count;
+        for (uint256 i = 0; i < roles.length; i++) {
+            if (roles[i].canVote) count++;
+        }
+        if (count == 0 || count == roleHatIds.length) {
+            return roleHatIds;
+        }
+        uint256[] memory voterHats = new uint256[](count);
+        uint256 j;
+        for (uint256 i = 0; i < roles.length; i++) {
+            if (roles[i].canVote) {
+                voterHats[j++] = roleHatIds[i];
+            }
+        }
+        return voterHats;
+    }
+
     function _updateClassesWithTokenAndHats(
         IHybridVotingInit.ClassConfig[] memory classes,
         address token,

@@ -146,7 +146,8 @@ contract DirectDemocracyVoting is Initializable {
         uint256[] calldata initialHats,
         uint256[] calldata initialCreatorHats,
         address[] calldata initialTargets,
-        uint8 thresholdPct_
+        uint8 thresholdPct_,
+        uint32 quorum_
     ) external initializer {
         if (hats_ == address(0) || executor_ == address(0)) {
             revert VotingErrors.ZeroAddress();
@@ -160,6 +161,11 @@ contract DirectDemocracyVoting is Initializable {
         l._paused = false; // Initialize paused state
         l._lock = 0; // Initialize reentrancy guard state
         emit ThresholdPctSet(thresholdPct_);
+
+        // Deploy-time voter-count quorum (0 = disabled). Mirrors setConfig(QUORUM) — the
+        // event is emitted here too so the subgraph indexes the genesis value from logs.
+        l.quorum = quorum_;
+        emit QuorumSet(quorum_);
 
         uint256 len = initialHats.length;
         for (uint256 i; i < len;) {

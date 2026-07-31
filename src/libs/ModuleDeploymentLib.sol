@@ -37,6 +37,7 @@ interface IHybridVotingInit {
         uint256[] calldata initialCreatorHats,
         address[] calldata targets,
         uint8 thresholdPct,
+        uint32 quorum_,
         ClassConfig[] calldata initialClasses
     ) external;
 }
@@ -251,6 +252,7 @@ library ModuleDeploymentLib {
         address executorAddr,
         uint256[] memory creatorHats,
         uint8 thresholdPct,
+        uint32 quorum,
         IHybridVotingInit.ClassConfig[] memory classes,
         address beacon
     ) internal returns (address hvProxy) {
@@ -265,6 +267,7 @@ library ModuleDeploymentLib {
             creatorHats,
             targets,
             thresholdPct,
+            quorum,
             classes
         );
         hvProxy = deployCore(config, ModuleTypes.HYBRID_VOTING_ID, init, beacon);
@@ -285,16 +288,18 @@ library ModuleDeploymentLib {
         uint256[] memory creatorHats,
         address[] memory initialTargets,
         uint8 thresholdPct,
+        uint32 quorum,
         address beacon
     ) internal returns (address ddProxy) {
         bytes memory init = abi.encodeWithSignature(
-            "initialize(address,address,uint256[],uint256[],address[],uint8)",
+            "initialize(address,address,uint256[],uint256[],address[],uint8,uint32)",
             config.hats,
             executorAddr,
             votingHats,
             creatorHats,
             initialTargets,
-            thresholdPct
+            thresholdPct,
+            quorum
         );
         ddProxy = deployCore(config, ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, init, beacon);
     }

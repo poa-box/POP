@@ -61,6 +61,8 @@ contract AccessFactory {
         bool autoUpgrade;
         RoleAssignments roleAssignments;
         PasskeyConfig passkeyConfig; // Passkey infrastructure configuration
+        string tokenName; // ParticipationToken name (empty = "<orgName> Token")
+        string tokenSymbol; // ParticipationToken symbol (empty = "PT")
     }
 
     /*──────────────────── Access Deployment Result ────────────────────*/
@@ -115,8 +117,10 @@ contract AccessFactory {
 
         /* 2. Deploy Participation Token (without registration) */
         {
-            string memory tName = string(abi.encodePacked(params.orgName, " Token"));
-            string memory tSymbol = "PT";
+            string memory tName = bytes(params.tokenName).length > 0
+                ? params.tokenName
+                : string(abi.encodePacked(params.orgName, " Token"));
+            string memory tSymbol = bytes(params.tokenSymbol).length > 0 ? params.tokenSymbol : "PT";
 
             // Get the role hat IDs for member and approver permissions
             uint256[] memory memberHats = RoleResolver.resolveRoleBitmap(

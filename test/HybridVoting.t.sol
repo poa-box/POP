@@ -157,6 +157,7 @@ contract MockERC20 is IERC20 {
                     creatorHats, // allowed creator hats
                     targets, // allowed target(s)
                     uint8(50), // threshold %
+                    uint32(0), // quorum (disabled)
                     classes // class configurations
                 )
             );

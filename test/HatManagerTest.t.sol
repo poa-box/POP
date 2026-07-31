@@ -52,7 +52,7 @@ contract HatManagerTest is Test {
 
         bytes memory data = abi.encodeCall(
             DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), initialHats, initialCreatorHats, new address[](0), 50)
+            (address(hats), address(exec), initialHats, initialCreatorHats, new address[](0), 50, 0)
         );
 
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
@@ -242,7 +242,7 @@ contract HatManagerTest is Test {
         DirectDemocracyVoting impl = new DirectDemocracyVoting();
         bytes memory data = abi.encodeCall(
             DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), new uint256[](0), new uint256[](0), new address[](0), 50)
+            (address(hats), address(exec), new uint256[](0), new uint256[](0), new address[](0), 50, 0)
         );
 
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);

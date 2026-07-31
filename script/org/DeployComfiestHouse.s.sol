@@ -7,6 +7,7 @@ import "forge-std/console.sol";
 import {OrgDeployer, ITaskManagerBootstrap} from "../../src/OrgDeployer.sol";
 import {TaskManager} from "../../src/TaskManager.sol";
 import {HybridVoting} from "../../src/HybridVoting.sol";
+import {DirectDemocracyVoting} from "../../src/DirectDemocracyVoting.sol";
 import {ParticipationToken} from "../../src/ParticipationToken.sol";
 import {EligibilityModule} from "../../src/EligibilityModule.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
@@ -15,11 +16,17 @@ import {IExecutor} from "../../src/Executor.sol";
 import {IHybridVotingInit} from "../../src/libs/ModuleDeploymentLib.sol";
 import {RoleConfigStructs} from "../../src/libs/RoleConfigStructs.sol";
 import {ModulesFactory} from "../../src/factories/ModulesFactory.sol";
-import {ModuleTypes} from "../../src/libs/ModuleTypes.sol";
+import {GovernanceFactory} from "../../src/factories/GovernanceFactory.sol";
+import {AccessFactory} from "../../src/factories/AccessFactory.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 
 interface IZkInvitesView {
     function merkleRoot() external view returns (bytes32);
+}
+
+interface ISatelliteV17 {
+    function upgradeBeaconDirect(string calldata typeName, address newImpl, string calldata version) external;
+    function adminCall(address target, bytes calldata data) external returns (bytes memory);
 }
 
 /**
@@ -33,25 +40,27 @@ interface IZkInvitesView {
  *     MEMBER:  creates + claims tasks (no review, no project creation), creates proposals, votes.
  *     AGENT:   creates tasks, projects, and proposals; cannot vote, review, or claim tasks.
  *   Voting: HybridVoting 80% membership (DIRECT) / 20% participation (PT), 50% threshold.
- *           Quorum of 2 voters + PT rename to "comfiest.house shares"/"COMFY" + class
- *           restriction (exclude AGENT hat) are applied by the genesis proposal (Step2),
- *           because hat IDs don't exist until deploy and quorum/name are executor-gated.
+ *           Quorum of 2 voters, AGENT exclusion (canVote=false roles are filtered out of
+ *           the voting classes), and the "comfiest.house shares"/"COMFY" token identity
+ *           are all set AT DEPLOY via the v17 deploy-time governance config — no genesis
+ *           proposal needed.
  *   Paymaster: auto-whitelist all org contracts, generous caps (6M callGas for big
  *              announceWinner batches), 1 xDAI/day budget per role hat, funded with 5 xDAI.
  *   ZK email: module deployed dormant (no allowlist root); a steward activates rules later
  *             via governance `setActiveAllowlist(root, cid)`.
  *
  * Run order (all under FOUNDRY_PROFILE=production):
- *   1. SimComfiestHouse       --fork-url gnosis          (must PASS before any broadcast)
- *   2. Step1_DeployOrg        --broadcast                (~14M gas — fits Gnosis's 17M block
- *                                                         limit; funds paymaster 5 xDAI)
- *   3. Step2_GenesisProposal  --broadcast                (creates genesis proposal + votes YES;
- *                                                         id resolved on-chain, printed in logs)
- *   4. wait 30 min, then run the printed:
- *      cast send <hybridVoting> 'announceWinner(uint256)' <id> --gas-limit 3000000 ...
+ *   0. PREREQUISITE: the deploy-time-governance-config rollout must be LIVE on Gnosis
+ *      (script/upgrades/UpgradeDeployTimeGovConfig.s.sol — HybridVoting v12, DDV v12,
+ *      OrgDeployer v17, new Governance/Access factories). The sim applies it on the
+ *      fork automatically; the broadcast requires it on-chain first.
+ *   1. SimComfiestHouse  --fork-url gnosis   (must PASS before any broadcast)
+ *   2. Step1_DeployOrg   --broadcast         (~14M gas — fits Gnosis's 17M block limit;
+ *                                             funds paymaster 5 xDAI; nothing else to run)
  */
 abstract contract ComfiestHouseConfig is Script {
     // ── Gnosis protocol addresses ──
+    address constant SATELLITE = 0x4Ad70029a9247D369a5bEA92f90840B9ee58eD06; // owner = Hudson
     address constant ORG_DEPLOYER = 0x1Ad59E785E3aec1c53069f78bEcC24EcFE6a5d1c;
     address constant PAYMASTER = 0xdEf1038C297493c0b5f82F0CDB49e929B53B4108;
     address constant HATS = 0x3bc1A0Ad72417f2d411118085256fC53CBdDd137;
@@ -65,7 +74,7 @@ abstract contract ComfiestHouseConfig is Script {
     string constant PT_SYMBOL = "COMFY";
     uint256 constant PAYMASTER_FUNDING = 5 ether; // 5 xDAI initial gas sponsorship pool
     uint8 constant THRESHOLD_PCT = 50; // simple majority (hybrid + DD)
-    uint32 constant QUORUM_VOTERS = 2; // min voters per proposal (set via genesis proposal)
+    uint32 constant QUORUM_VOTERS = 2; // min voters per proposal (set at deploy, v17)
     uint32 constant PROPOSAL_MINUTES = 30;
 
     uint256 constant IDX_STEWARD = 0;
@@ -119,9 +128,9 @@ abstract contract ComfiestHouseConfig is Script {
 
     function _buildClasses() internal pure returns (IHybridVotingInit.ClassConfig[] memory classes) {
         classes = new IHybridVotingInit.ClassConfig[](2);
-        // hatIds left empty → factory backfills ALL role hats (incl. AGENT); the genesis
-        // proposal (Step2) immediately restricts both classes to STEWARD+MEMBER. Until it
-        // executes, only the deployer wears any hat, so no agent can vote in the gap.
+        // hatIds left empty → the factory backfills them with canVote=true role hats only
+        // (v17 deploy-time filter), so STEWARD + MEMBER are in and AGENT is excluded from
+        // genesis with no post-deploy proposal needed.
         classes[0] = IHybridVotingInit.ClassConfig({
             strategy: IHybridVotingInit.ClassStrategy.DIRECT,
             slicePct: 80,
@@ -194,56 +203,16 @@ abstract contract ComfiestHouseConfig is Script {
                 tasks: new ITaskManagerBootstrap.BootstrapTaskConfig[](0)
             }),
             paymasterConfig: _buildPaymasterConfig(),
-            taskManagerPerms: _buildTaskPerms()
+            taskManagerPerms: _buildTaskPerms(),
+            hybridQuorum: QUORUM_VOTERS, // set at deploy (v17) — no genesis proposal needed
+            ddQuorum: QUORUM_VOTERS,
+            tokenName: PT_NAME,
+            tokenSymbol: PT_SYMBOL
         });
     }
 
     function _zkConfig() internal pure returns (ModulesFactory.ZkEmailConfig memory) {
         return ModulesFactory.ZkEmailConfig({enabled: true, initialRoot: bytes32(0), initialCid: bytes32(0)});
-    }
-
-    /// @dev Genesis proposal batch: restrict voting classes to STEWARD+MEMBER, set quorum,
-    ///      rename PT. All four calls are executor-gated, so they ride one YES batch.
-    function _genesisBatch(address hv, address pt, uint256 stewardHat, uint256 memberHat)
-        internal
-        pure
-        returns (IExecutor.Call[][] memory batches)
-    {
-        uint256[] memory voterHats = new uint256[](2);
-        voterHats[0] = stewardHat;
-        voterHats[1] = memberHat;
-
-        HybridVoting.ClassConfig[] memory classes = new HybridVoting.ClassConfig[](2);
-        classes[0] = HybridVoting.ClassConfig({
-            strategy: HybridVoting.ClassStrategy.DIRECT,
-            slicePct: 80,
-            quadratic: false,
-            minBalance: 0,
-            asset: address(0),
-            hatIds: voterHats
-        });
-        classes[1] = HybridVoting.ClassConfig({
-            strategy: HybridVoting.ClassStrategy.ERC20_BAL,
-            slicePct: 20,
-            quadratic: false,
-            minBalance: 0,
-            asset: pt,
-            hatIds: voterHats
-        });
-
-        IExecutor.Call[] memory yes = new IExecutor.Call[](4);
-        yes[0] = IExecutor.Call({target: hv, value: 0, data: abi.encodeCall(HybridVoting.setClasses, (classes))});
-        yes[1] = IExecutor.Call({
-            target: hv,
-            value: 0,
-            data: abi.encodeCall(HybridVoting.setConfig, (HybridVoting.ConfigKey.QUORUM, abi.encode(QUORUM_VOTERS)))
-        });
-        yes[2] = IExecutor.Call({target: pt, value: 0, data: abi.encodeCall(ParticipationToken.setName, (PT_NAME))});
-        yes[3] = IExecutor.Call({target: pt, value: 0, data: abi.encodeCall(ParticipationToken.setSymbol, (PT_SYMBOL))});
-
-        batches = new IExecutor.Call[][](2);
-        batches[0] = yes;
-        batches[1] = new IExecutor.Call[](0); // NO = do nothing
     }
 
     function _emptyProject(bytes memory title) internal pure returns (TaskManager.BootstrapProjectConfig memory) {
@@ -267,6 +236,29 @@ abstract contract ComfiestHouseConfig is Script {
 contract SimComfiestHouse is ComfiestHouseConfig {
     IHats constant hats = IHats(HATS);
 
+    /// @dev FORK-ONLY pre-step: applies the v17 deploy-time-governance-config rollout
+    ///      (HybridVoting v12, DDV v12, OrgDeployer v17, fresh Governance/Access factories)
+    ///      so this sim exercises the exact post-rollout deploy path. The real rollout
+    ///      broadcast is script/upgrades/UpgradeDeployTimeGovConfig.s.sol and MUST be live
+    ///      on Gnosis before Step1_DeployOrg is broadcast.
+    function _applyV17OnFork() internal {
+        address newHV = address(new HybridVoting());
+        address newDDV = address(new DirectDemocracyVoting());
+        address newOD = address(new OrgDeployer());
+        address newGF = address(new GovernanceFactory());
+        address newAF = address(new AccessFactory());
+
+        vm.startPrank(HUDSON);
+        ISatelliteV17(SATELLITE).upgradeBeaconDirect("HybridVoting", newHV, "v12");
+        ISatelliteV17(SATELLITE).upgradeBeaconDirect("DirectDemocracyVoting", newDDV, "v12");
+        ISatelliteV17(SATELLITE).upgradeBeaconDirect("OrgDeployer", newOD, "v17");
+        ISatelliteV17(SATELLITE)
+            .adminCall(ORG_DEPLOYER, abi.encodeWithSignature("setGovernanceFactory(address)", newGF));
+        ISatelliteV17(SATELLITE).adminCall(ORG_DEPLOYER, abi.encodeWithSignature("setAccessFactory(address)", newAF));
+        vm.stopPrank();
+        console.log("fork pre-step: v17 governance-config rollout applied");
+    }
+
     function run() external {
         address member = makeAddr("comfy-member");
         address agent = makeAddr("comfy-agent");
@@ -274,6 +266,7 @@ contract SimComfiestHouse is ComfiestHouseConfig {
         address stranger = makeAddr("comfy-stranger");
 
         vm.deal(HUDSON, 100 ether);
+        _applyV17OnFork();
 
         /* ── 1. Deploy ── */
         uint256 gasBefore = gasleft();
@@ -323,34 +316,18 @@ contract SimComfiestHouse is ComfiestHouseConfig {
         EligibilityModule elig = EligibilityModule(payable(r.eligibilityModule));
         TaskManager tm = TaskManager(r.taskManager);
 
-        /* ── 3. Genesis proposal: classes restriction + quorum + PT rename ── */
+        /* ── 3. Deploy-time governance config (v17): quorum, voter classes, token identity ── */
         {
-            vm.startPrank(HUDSON);
-            hv.createProposal(
-                bytes("genesis: quorum 2, voter classes, COMFY rename"),
-                bytes32(0),
-                PROPOSAL_MINUTES,
-                2,
-                _genesisBatch(r.hybridVoting, r.participationToken, stewardHat, memberHat),
-                new uint256[](0)
-            );
-            uint8[] memory idx = new uint8[](1);
-            uint8[] memory w = new uint8[](1);
-            idx[0] = 0;
-            w[0] = 100;
-            hv.vote(0, idx, w);
-            vm.stopPrank();
-
-            vm.warp(vm.getBlockTimestamp() + (PROPOSAL_MINUTES + 1) * 60);
-            (uint256 winner, bool valid) = hv.announceWinner(0);
-            require(winner == 0 && valid, "genesis proposal failed");
-            require(hv.quorum() == QUORUM_VOTERS, "quorum not set");
-            require(keccak256(bytes(pt.name())) == keccak256(bytes(PT_NAME)), "PT name not set");
-            require(keccak256(bytes(pt.symbol())) == keccak256(bytes(PT_SYMBOL)), "PT symbol not set");
+            require(hv.quorum() == QUORUM_VOTERS, "quorum not set at deploy");
+            require(keccak256(bytes(pt.name())) == keccak256(bytes(PT_NAME)), "PT name not set at deploy");
+            require(keccak256(bytes(pt.symbol())) == keccak256(bytes(PT_SYMBOL)), "PT symbol not set at deploy");
             HybridVoting.ClassConfig[] memory cls = hv.getClasses();
-            require(cls.length == 2 && cls[0].hatIds.length == 2 && cls[1].hatIds.length == 2, "classes not restricted");
+            require(cls.length == 2, "class count wrong");
+            // AGENT has canVote=false, so the deploy-time filter excludes its hat from both classes
+            require(cls[0].hatIds.length == 2 && cls[1].hatIds.length == 2, "classes should hold steward+member only");
+            require(cls[0].hatIds[0] == stewardHat && cls[0].hatIds[1] == memberHat, "class 0 hats wrong");
             require(cls[1].asset == r.participationToken, "class 1 asset should be PT");
-            console.log("genesis proposal executed: quorum=2, classes restricted, PT renamed");
+            console.log("deploy-time config verified: quorum=2, classes exclude AGENT, PT = COMFY");
         }
 
         /* ── 4. Vouch flows: 1 steward vouch gates every role ── */
@@ -399,28 +376,28 @@ contract SimComfiestHouse is ComfiestHouseConfig {
             noop[0] = new IExecutor.Call[](0);
             noop[1] = new IExecutor.Call[](0);
 
-            // member CAN create proposals (proposal #1); only Hudson votes -> quorum unmet
+            // member CAN create proposals (proposal #0); only Hudson votes -> quorum unmet
             vm.prank(member);
             hv.createProposal(bytes("quorum test: 1 voter"), bytes32(0), PROPOSAL_MINUTES, 2, noop, new uint256[](0));
             vm.prank(HUDSON);
-            hv.vote(1, yesIdx, yesW);
+            hv.vote(0, yesIdx, yesW);
             vm.warp(vm.getBlockTimestamp() + (PROPOSAL_MINUTES + 1) * 60);
-            (, bool valid1) = hv.announceWinner(1);
+            (, bool valid1) = hv.announceWinner(0);
             require(!valid1, "1 voter should NOT meet quorum of 2");
 
-            // agent CAN create proposals (proposal #2) but CANNOT vote
+            // agent CAN create proposals (proposal #1) but CANNOT vote
             vm.prank(agent);
             hv.createProposal(bytes("agent proposal"), bytes32(0), PROPOSAL_MINUTES, 2, noop, new uint256[](0));
             vm.prank(agent);
             vm.expectRevert();
-            hv.vote(2, yesIdx, yesW);
+            hv.vote(1, yesIdx, yesW);
 
             vm.prank(HUDSON);
-            hv.vote(2, yesIdx, yesW);
+            hv.vote(1, yesIdx, yesW);
             vm.prank(member);
-            hv.vote(2, yesIdx, yesW);
+            hv.vote(1, yesIdx, yesW);
             vm.warp(vm.getBlockTimestamp() + (PROPOSAL_MINUTES + 1) * 60);
-            (uint256 win2, bool valid2) = hv.announceWinner(2);
+            (uint256 win2, bool valid2) = hv.announceWinner(1);
             require(win2 == 0 && valid2, "2 voters should meet quorum");
             console.log("governance verified: quorum=2 enforced, agent proposes but cannot vote");
         }
@@ -509,50 +486,6 @@ contract Step1_DeployOrg is ComfiestHouseConfig {
         console.log("eligibilityModule:   ", r.eligibilityModule);
         console.log("zkEmailInvites:      ", r.zkEmailInvites);
         console.log("");
-        console.log("NEXT: run Step2_GenesisProposal, wait 30 min, then announceWinner(0)");
-    }
-}
-
-/*═══════════════════ BROADCAST STEP 2: genesis proposal + vote ═══════════════════*/
-
-contract Step2_GenesisProposal is ComfiestHouseConfig {
-    function run() external {
-        bytes32 orgId = _orgId();
-        OrgRegistry reg = OrgRegistry(ORG_REGISTRY);
-        address hv = reg.getOrgContract(orgId, ModuleTypes.HYBRID_VOTING_ID);
-        address pt = reg.getOrgContract(orgId, ModuleTypes.PARTICIPATION_TOKEN_ID);
-        uint256 stewardHat = reg.getRoleHat(orgId, IDX_STEWARD);
-        uint256 memberHat = reg.getRoleHat(orgId, IDX_MEMBER);
-        require(hv != address(0) && pt != address(0) && stewardHat != 0 && memberHat != 0, "org not deployed?");
-
-        uint8[] memory idx = new uint8[](1);
-        uint8[] memory w = new uint8[](1);
-        idx[0] = 0;
-        w[0] = 100;
-
-        // Resolve the id this proposal WILL get (ids are sequential = proposalsCount).
-        // Hardcoding 0 would silently vote on the wrong proposal if anything created one
-        // via the frontend between Step1 and Step2.
-        uint256 proposalId = HybridVoting(payable(hv)).proposalsCount();
-
-        vm.startBroadcast();
-        HybridVoting(payable(hv))
-            .createProposal(
-                bytes("genesis: quorum 2, voter classes, COMFY rename"),
-                bytes32(0),
-                PROPOSAL_MINUTES,
-                2,
-                _genesisBatch(hv, pt, stewardHat, memberHat),
-                new uint256[](0)
-            );
-        HybridVoting(payable(hv)).vote(proposalId, idx, w);
-        vm.stopBroadcast();
-
-        console.log("=== genesis proposal created + YES vote cast; proposal id:", proposalId);
-        console.log("hybridVoting:", hv);
-        console.log("After 30 minutes, finalize with an explicit gas limit (do NOT rely on estimation):");
-        console.log("  cast send", hv);
-        console.log("    'announceWinner(uint256)'", proposalId);
-        console.log("    --rpc-url gnosis --gas-limit 3000000 --private-key $DEPLOYER_PRIVATE_KEY");
+        console.log("Done - quorum, voter classes, and COMFY identity were all set at deploy.");
     }
 }

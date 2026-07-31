@@ -187,7 +187,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -450,7 +454,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -512,7 +520,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -890,7 +902,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1024,7 +1040,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _buildBootstrapWithTasks(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1117,7 +1137,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _buildBootstrapWithTasks(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks}),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
     }
 
@@ -1302,7 +1326,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks}),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.expectRevert(TaskManager.ArrayLengthMismatch.selector);
@@ -1351,7 +1379,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks})
+            taskManagerPerms: OrgDeployer.TaskManagerPermConfig({roleIndices: roleIndices, masks: masks}),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         // The whole deploy reverts atomically — no partial state.
@@ -1461,7 +1493,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         deployer.deployFullOrg(params);
@@ -1506,7 +1542,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1594,7 +1634,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -1875,7 +1919,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2152,7 +2200,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2397,7 +2449,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -2538,7 +2594,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.expectRevert(OrgDeployer.InvalidRoleConfiguration.selector);
@@ -2818,7 +2878,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -3079,7 +3143,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -3166,7 +3234,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         deployer.deployFullOrg(params);
@@ -3222,7 +3294,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -3397,7 +3473,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4390,7 +4470,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         // Record logs to verify HatCreatedWithEligibility events were emitted
@@ -4730,7 +4814,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4796,7 +4884,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -4875,7 +4967,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -5318,7 +5414,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.prank(deployerSigner);
@@ -5365,7 +5465,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.prank(orgOwner);
@@ -5423,7 +5527,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.prank(deployerSigner);
@@ -5477,7 +5585,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         deployer.deployFullOrg(params);
@@ -5529,7 +5641,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         deployer.deployFullOrg(params);
@@ -5585,7 +5701,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         deployer.deployFullOrg(params);
@@ -5635,7 +5755,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         deployer.deployFullOrg(params); // Should NOT revert
@@ -5687,7 +5811,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5754,7 +5882,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -5916,7 +6048,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.prank(orgOwner);
@@ -5971,7 +6107,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.prank(orgOwner);
@@ -6042,7 +6182,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.prank(orgOwner);
@@ -6110,7 +6254,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.prank(orgOwner);
@@ -6187,7 +6335,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -6404,7 +6556,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -6480,7 +6636,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -6550,7 +6710,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.prank(orgOwner);
@@ -6619,7 +6783,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         // No ETH sent — budgets are the only config
@@ -6823,7 +6991,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: pmConfig,
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         vm.deal(orgOwner, 1 ether);
@@ -7082,7 +7254,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -7307,7 +7483,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
@@ -7463,7 +7643,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             educationHubConfig: ModulesFactory.EducationHubConfig({enabled: true}),
             bootstrap: _emptyBootstrap(),
             paymasterConfig: _defaultPaymasterConfig(),
-            taskManagerPerms: _emptyTaskManagerPerms()
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: 0,
+            ddQuorum: 0,
+            tokenName: "",
+            tokenSymbol: ""
         });
 
         // The batchConfigureVouching step (OrgDeployer) hits the reverse-direction M-03 guard because
@@ -7473,5 +7657,98 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         vm.expectRevert(bytes("batchConfigureVouching failed"));
         deployer.deployFullOrg(params);
         vm.stopPrank();
+    }
+
+    /*───────────────── Deploy-time governance config (v17) ─────────────────*/
+
+    function _buildV17Params(bytes32 orgId, uint32 hq, uint32 dq, string memory tn, string memory ts, bool botVotes)
+        internal
+        view
+        returns (OrgDeployer.DeploymentParams memory)
+    {
+        string[] memory names = new string[](3);
+        names[0] = "MEMBER";
+        names[1] = "EXECUTIVE";
+        names[2] = "BOT";
+        string[] memory images = new string[](3);
+        images[0] = "ipfs://m";
+        images[1] = "ipfs://e";
+        images[2] = "ipfs://b";
+        bool[] memory voting = new bool[](3);
+        voting[0] = true;
+        voting[1] = true;
+        voting[2] = botVotes;
+
+        return OrgDeployer.DeploymentParams({
+            orgId: orgId,
+            orgName: "V17 DAO",
+            metadataHash: bytes32(0),
+            registryAddr: accountRegProxy,
+            deployerAddress: orgOwner,
+            deployerUsername: "",
+            regDeadline: 0,
+            regNonce: 0,
+            regSignature: "",
+            autoUpgrade: true,
+            hybridThresholdPct: 50,
+            ddThresholdPct: 50,
+            hybridClasses: _buildLegacyClasses(50, 50, false, 4 ether),
+            ddInitialTargets: new address[](0),
+            roles: _buildSimpleRoleConfigs(names, images, voting),
+            roleAssignments: _buildDefaultRoleAssignments(),
+            metadataAdminRoleIndex: type(uint256).max,
+            passkeyEnabled: false,
+            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: false}),
+            bootstrap: _emptyBootstrap(),
+            paymasterConfig: _defaultPaymasterConfig(),
+            taskManagerPerms: _emptyTaskManagerPerms(),
+            hybridQuorum: hq,
+            ddQuorum: dq,
+            tokenName: tn,
+            tokenSymbol: ts
+        });
+    }
+
+    /// @notice v17: quorum, canVote-filtered voting classes, and token identity are deploy-time config
+    function testDeployTimeGovernanceConfig() public {
+        bytes32 orgId = keccak256("v17-config-org");
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory result =
+            deployer.deployFullOrg(_buildV17Params(orgId, 2, 3, "V17 Shares", "V17S", false));
+
+        assertEq(HybridVoting(payable(result.hybridVoting)).quorum(), 2, "hybrid quorum not set at deploy");
+        assertEq(DirectDemocracyVoting(result.directDemocracyVoting).quorum(), 3, "dd quorum not set at deploy");
+        assertEq(ParticipationToken(result.participationToken).name(), "V17 Shares", "token name not set");
+        assertEq(ParticipationToken(result.participationToken).symbol(), "V17S", "token symbol not set");
+
+        // classes with empty hatIds are backfilled with canVote=true role hats ONLY (BOT excluded)
+        uint256 botHat = orgRegistry.getRoleHat(orgId, 2);
+        assertTrue(botHat != 0, "bot hat missing");
+        HybridVoting.ClassConfig[] memory cls = HybridVoting(payable(result.hybridVoting)).getClasses();
+        assertTrue(cls.length > 0, "no classes");
+        for (uint256 i = 0; i < cls.length; i++) {
+            assertEq(cls[i].hatIds.length, 2, "class should hold only the 2 canVote role hats");
+            for (uint256 j = 0; j < cls[i].hatIds.length; j++) {
+                assertTrue(cls[i].hatIds[j] != botHat, "canVote=false hat leaked into voting class");
+            }
+        }
+    }
+
+    /// @notice v17 defaults: zero quorums + empty token strings preserve legacy behavior exactly
+    function testDeployTimeGovernanceConfigDefaults() public {
+        bytes32 orgId = keccak256("v17-defaults-org");
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(_buildV17Params(orgId, 0, 0, "", "", true));
+
+        assertEq(HybridVoting(payable(result.hybridVoting)).quorum(), 0, "quorum should default to disabled");
+        assertEq(DirectDemocracyVoting(result.directDemocracyVoting).quorum(), 0, "dd quorum should default 0");
+        assertEq(ParticipationToken(result.participationToken).name(), "V17 DAO Token", "default name wrong");
+        assertEq(ParticipationToken(result.participationToken).symbol(), "PT", "default symbol wrong");
+
+        // all three roles vote -> classes hold all 3 hats (legacy backfill)
+        HybridVoting.ClassConfig[] memory cls = HybridVoting(payable(result.hybridVoting)).getClasses();
+        for (uint256 i = 0; i < cls.length; i++) {
+            assertEq(cls[i].hatIds.length, 3, "all-canVote org should backfill every role hat");
+        }
     }
 }

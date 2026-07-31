@@ -103,7 +103,7 @@ contract HybridVotingSafeConfigTest is Test {
             hatIds: votingHats
         });
         bytes memory initData = abi.encodeCall(
-            HybridVoting.initialize, (address(hats), address(exec), creatorHats, targets, uint8(50), classes)
+            HybridVoting.initialize, (address(hats), address(exec), creatorHats, targets, uint8(50), uint32(0), classes)
         );
         UpgradeableBeacon hvBeacon = new UpgradeableBeacon(address(new HybridVoting()), owner);
         return HybridVoting(payable(address(new BeaconProxy(address(hvBeacon), initData))));

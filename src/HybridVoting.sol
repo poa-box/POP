@@ -135,6 +135,7 @@ contract HybridVoting is Initializable {
         uint256[] calldata initialCreatorHats,
         address[] calldata initialTargets,
         uint8 thresholdPct_,
+        uint32 quorum_,
         ClassConfig[] calldata initialClasses
     ) external initializer {
         if (hats_ == address(0) || executor_ == address(0)) {
@@ -151,6 +152,11 @@ contract HybridVoting is Initializable {
 
         l.thresholdPct = thresholdPct_;
         emit ThresholdPctSet(thresholdPct_);
+
+        // Deploy-time voter-count quorum (0 = disabled). Mirrors setConfig(QUORUM) — the
+        // event is emitted here too so the subgraph indexes the genesis value from logs.
+        l.quorum = quorum_;
+        emit QuorumSet(quorum_);
 
         _initializeCreatorHats(initialCreatorHats);
         // initialTargets parameter kept for ABI compatibility but not used;

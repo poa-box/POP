@@ -53,7 +53,7 @@ contract DDVotingTest is Test {
         initialCreatorHats[0] = CREATOR_HAT_ID;
         bytes memory data = abi.encodeCall(
             DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), initialHats, initialCreatorHats, new address[](0), 50)
+            (address(hats), address(exec), initialHats, initialCreatorHats, new address[](0), 50, 0)
         );
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
         dd = DirectDemocracyVoting(address(proxy));
@@ -81,8 +81,9 @@ contract DDVotingTest is Test {
         h[0] = HAT_ID;
         uint256[] memory ch = new uint256[](1);
         ch[0] = CREATOR_HAT_ID;
-        bytes memory data =
-            abi.encodeCall(DirectDemocracyVoting.initialize, (address(0), address(exec), h, ch, new address[](0), 50));
+        bytes memory data = abi.encodeCall(
+            DirectDemocracyVoting.initialize, (address(0), address(exec), h, ch, new address[](0), 50, 0)
+        );
         vm.expectRevert(VotingErrors.ZeroAddress.selector);
         new ERC1967Proxy(address(impl), data);
     }
@@ -91,7 +92,7 @@ contract DDVotingTest is Test {
         DirectDemocracyVoting impl = new DirectDemocracyVoting();
         bytes memory data = abi.encodeCall(
             DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), new uint256[](0), new uint256[](0), new address[](0), 0)
+            (address(hats), address(exec), new uint256[](0), new uint256[](0), new address[](0), 0, 0)
         );
         vm.expectRevert(VotingMath.InvalidThreshold.selector);
         new ERC1967Proxy(address(impl), data);

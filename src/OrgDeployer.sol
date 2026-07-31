@@ -354,6 +354,10 @@ contract OrgDeployer is Initializable {
         BootstrapConfig bootstrap; // Optional: initial projects and tasks to create
         PaymasterConfig paymasterConfig; // Optional: paymaster configuration (funding via msg.value)
         TaskManagerPermConfig taskManagerPerms; // Optional: org-wide TaskManager ROLE_PERM grants
+        uint32 hybridQuorum; // Min voter count for HybridVoting proposals (0 = disabled)
+        uint32 ddQuorum; // Min voter count for DirectDemocracyVoting polls (0 = disabled)
+        string tokenName; // ParticipationToken name (empty = "<orgName> Token")
+        string tokenSymbol; // ParticipationToken symbol (empty = "PT")
     }
 
     /*════════════════  VALIDATION  ════════════════*/
@@ -513,7 +517,9 @@ contract OrgDeployer is Initializable {
                 roleHatIds: gov.roleHatIds,
                 autoUpgrade: params.autoUpgrade,
                 roleAssignments: accessRoles,
-                passkeyConfig: passkeyConfig
+                passkeyConfig: passkeyConfig,
+                tokenName: params.tokenName,
+                tokenSymbol: params.tokenSymbol
             });
 
             access = l.accessFactory.deployAccess(accessParams);
@@ -810,6 +816,8 @@ contract OrgDeployer is Initializable {
         votingParams.ddCreatorRolesBitmap = params.roleAssignments.ddCreatorRolesBitmap;
         votingParams.ddInitialTargets = params.ddInitialTargets;
         votingParams.roles = params.roles;
+        votingParams.hybridQuorum = params.hybridQuorum;
+        votingParams.ddQuorum = params.ddQuorum;
 
         return l.governanceFactory.deployVoting(votingParams, executor, roleHatIds);
     }
