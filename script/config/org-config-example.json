@@ -10,17 +10,47 @@
     {
       "name": "MEMBER",
       "image": "ipfs://QmWorkerMemberBadge",
-      "canVote": true
+      "canVote": true,
+      "vouching": {
+        "enabled": false,
+        "quorum": 0,
+        "voucherRoleIndex": 0,
+        "combineWithHierarchy": false
+      },
+      "defaults": {
+        "eligible": true,
+        "standing": true
+      }
     },
     {
       "name": "EXECUTIVE",
       "image": "ipfs://QmExecutiveBadge",
-      "canVote": true
+      "canVote": true,
+      "vouching": {
+        "enabled": true,
+        "quorum": 2,
+        "voucherRoleIndex": 1,
+        "combineWithHierarchy": false
+      },
+      "defaults": {
+        "eligible": false,
+        "standing": true
+      }
     },
     {
       "name": "CONTRIBUTOR",
       "image": "ipfs://QmContributorBadge",
-      "canVote": false
+      "canVote": false,
+      "vouching": {
+        "enabled": false,
+        "quorum": 0,
+        "voucherRoleIndex": 0,
+        "combineWithHierarchy": false
+      },
+      "defaults": {
+        "eligible": true,
+        "standing": true
+      }
     }
   ],
   "votingClasses": [

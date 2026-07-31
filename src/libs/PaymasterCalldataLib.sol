@@ -13,12 +13,15 @@ library PaymasterCalldataLib {
 
     /// @notice Parse and validate an execute(address,uint256,bytes) calldata envelope
     /// @dev Checks: callData >= 4 bytes, outer selector = EXECUTE_SELECTOR, callData >= 0x64 bytes,
-    ///      target matches expectedTarget, and value == 0. If all pass, extracts the inner selector
-    ///      from the nested bytes parameter (if available).
+    ///      target matches expectedTarget, and value == 0. The inner bytes parameter's ABI offset
+    ///      MUST be the canonical 0x60 (L-33/L-34): a non-standard offset can point the "inner data"
+    ///      at arbitrary calldata, so it is rejected as invalid rather than silently parsed as a
+    ///      selector-0 call. When the inner payload has fewer than 4 bytes, innerSelector is left as
+    ///      bytes4(0) (an empty-data / raw-value inner call), which is a real, distinguishable case.
     /// @param callData The full callData from the UserOperation
     /// @param expectedTarget The required target address in the execute call
-    /// @return valid True if all structural checks pass (selector, length, target, value)
-    /// @return innerSelector First 4 bytes of the inner data payload (bytes4(0) if unavailable)
+    /// @return valid True if all structural checks pass (selector, length, target, value, offset)
+    /// @return innerSelector First 4 bytes of the inner data payload (bytes4(0) if inner data < 4 bytes)
     function parseExecuteCall(bytes calldata callData, address expectedTarget)
         internal
         pure
@@ -35,22 +38,38 @@ library PaymasterCalldataLib {
 
         address target;
         uint256 value;
+        uint256 dataOffset;
         assembly {
             target := calldataload(add(callData.offset, 0x04))
             value := calldataload(add(callData.offset, 0x24))
-            // Read inner bytes data (offset at 0x44, must be standard 0x60)
-            let dataOffset := calldataload(add(callData.offset, 0x44))
-            if eq(dataOffset, 0x60) {
-                let dataStart := add(add(0x04, dataOffset), 0x20)
-                if lt(dataStart, callData.length) {
-                    innerSelector := calldataload(add(callData.offset, dataStart))
-                }
-            }
+            // Inner bytes ABI offset (relative to the start of the args at 0x04).
+            dataOffset := calldataload(add(callData.offset, 0x44))
         }
-        innerSelector = bytes4(innerSelector);
 
-        // Target must match and value must be zero
+        // Target must match and value must be zero.
         if (target != expectedTarget || value != 0) return (false, bytes4(0));
+
+        // Reject any non-canonical ABI offset — the only valid layout for the 3rd dynamic
+        // param is 0x60. Anything else is a crafted envelope trying to misdirect the parse.
+        if (dataOffset != 0x60) return (false, bytes4(0));
+
+        // The inner data length word sits at 0x04 + 0x60 = 0x64; its bytes start at 0x84.
+        // Require the length word itself to be in bounds (callData >= 0x84).
+        if (callData.length < 0x84) return (false, bytes4(0));
+
+        uint256 innerLen;
+        assembly {
+            innerLen := calldataload(add(callData.offset, 0x64))
+        }
+        // Extract the inner selector only when the declared inner data actually holds 4 bytes
+        // that are present in calldata. Otherwise it is an empty/short inner call (selector 0).
+        if (innerLen >= 4 && callData.length >= 0x84 + 4) {
+            bytes4 sel;
+            assembly {
+                sel := calldataload(add(callData.offset, 0x84))
+            }
+            innerSelector = sel;
+        }
 
         valid = true;
     }

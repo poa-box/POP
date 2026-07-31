@@ -14,6 +14,13 @@ struct PackedUserOperation {
     bytes signature;
 }
 
+/// @dev ERC-4337 v0.7 canonical packing (mirrors eth-infinitism UserOperationLib): the HIGH
+///      128 bits hold verificationGasLimit / maxPriorityFeePerGas, the LOW 128 bits hold
+///      callGasLimit / maxFeePerGas. This MUST match what the real EntryPoint (and viem/Pimlico/
+///      every bundler) puts on the wire — an earlier revision had all four helpers reversed, which
+///      made org rule gas hints and fee caps compare against the wrong field. Never validate this
+///      encode/decode pair only against its own inverse; the tests carry hardcoded canonical
+///      reference vectors so a re-introduced swap cannot round-trip its way to green.
 library UserOpLib {
     /// @dev ERC-4337 v0.7 packing (EntryPoint UserOperationLib): the HIGH 128 bits carry
     ///      verificationGasLimit, the LOW 128 bits carry callGasLimit. NOTE: an earlier version of this
@@ -39,7 +46,7 @@ library UserOpLib {
         maxFeePerGas = uint128(uint256(gasFees));
     }
 
-    /// @notice Pack maxPriorityFeePerGas and maxFeePerGas into gasFees (v0.7 layout)
+    /// @notice Pack maxPriorityFeePerGas (HIGH 128 bits) and maxFeePerGas (LOW 128 bits) into gasFees
     function packGasFees(uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) internal pure returns (bytes32) {
         return bytes32((uint256(maxPriorityFeePerGas) << 128) | uint256(maxFeePerGas));
     }

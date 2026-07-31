@@ -9,6 +9,13 @@ import "../OrgRegistry.sol";
  * @dev Saves approximately 3.5KB of bytecode by deduplicating 7 similar loop patterns
  */
 library RoleResolver {
+    /// @notice Thrown when a role index resolves to hat 0 (unregistered role).
+    /// @dev M-09 fix: `OrgRegistry.getRoleHat` returns 0 for out-of-range / unregistered
+    ///      indices instead of reverting. Storing hat 0 as an "authorized" hat would
+    ///      silently grant nobody (or, worse, wearers of an unintended hat 0) so we
+    ///      reject it explicitly at resolution time.
+    error UnregisteredRole(uint256 roleIdx);
+
     /**
      * @notice Resolves an array of role indices to their corresponding Hat IDs
      * @param orgRegistry The OrgRegistry contract address
@@ -25,7 +32,9 @@ library RoleResolver {
         hatIds = new uint256[](length);
 
         for (uint256 i = 0; i < length; i++) {
-            hatIds[i] = orgRegistry.getRoleHat(orgId, roleIndices[i]);
+            uint256 hatId = orgRegistry.getRoleHat(orgId, roleIndices[i]);
+            if (hatId == 0) revert UnregisteredRole(roleIndices[i]);
+            hatIds[i] = hatId;
         }
     }
 
@@ -54,7 +63,9 @@ library RoleResolver {
         uint256 index = 0;
         for (uint256 roleIdx = 0; roleIdx < 256; roleIdx++) {
             if ((rolesBitmap & (1 << roleIdx)) != 0) {
-                hatIds[index] = orgRegistry.getRoleHat(orgId, roleIdx);
+                uint256 hatId = orgRegistry.getRoleHat(orgId, roleIdx);
+                if (hatId == 0) revert UnregisteredRole(roleIdx); // M-09 fix
+                hatIds[index] = hatId;
                 index++;
 
                 // Early exit when all roles found

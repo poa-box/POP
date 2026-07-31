@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Test, Vm, console2} from "forge-std/Test.sol";
 import {PaymasterHub} from "../src/PaymasterHub.sol";
 import {PaymasterHubErrors} from "../src/libs/PaymasterHubErrors.sol";
+import {PaymasterFinanceLib} from "../src/libs/PaymasterFinanceLib.sol";
 import {PaymasterHubLens} from "../src/PaymasterHubLens.sol";
 import {IPaymaster} from "../src/interfaces/IPaymaster.sol";
 import {IEntryPoint} from "../src/interfaces/IEntryPoint.sol";
@@ -2394,8 +2395,10 @@ contract PaymasterHubHarness is PaymasterHub {
         return _checkOrgBalance(orgId, maxCost);
     }
 
-    function exposed_checkSolidarityAccess(bytes32 orgId, uint256 maxCost) external view {
-        _checkSolidarityAccess(orgId, maxCost);
+    /// @dev M-05: the access check now reserves per-org solidarity and returns the reserved amount.
+    ///      Delegatecalls PaymasterFinanceLib (same code path the hub uses in validation).
+    function exposed_checkSolidarityAccess(bytes32 orgId, uint256 maxCost) external returns (uint256 reserved) {
+        return PaymasterFinanceLib.checkSolidarityAccessAndReserve(orgId, maxCost);
     }
 }
 
@@ -2543,8 +2546,9 @@ contract PaymasterHubBalanceCheckTest is Test {
 
     /*──────────── _checkSolidarityAccess: comprehensive tests ────────────*/
 
-    function testCheckSolidarityAccess_InGrace_ZeroDeposit_Passes() public view {
-        // Grace period with zero deposit — only spending limit matters
+    function testCheckSolidarityAccess_InGrace_ZeroDeposit_Passes() public {
+        // Grace period with zero deposit — only spending limit matters.
+        // M-05: the access check now reserves solidarity (mutating), so this is no longer view.
         hub.exposed_checkSolidarityAccess(ORG_A, 0.001 ether);
     }
 

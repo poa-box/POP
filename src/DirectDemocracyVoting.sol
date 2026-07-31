@@ -17,6 +17,11 @@ contract DirectDemocracyVoting is Initializable {
     bytes4 public constant MODULE_ID = 0x6464766f; /* "ddvo"  */
     uint8 public constant MAX_OPTIONS = 50;
     uint8 public constant MAX_CALLS = 20;
+    // M-14: cap the number of poll-specific hats a proposal can carry. The vote() path scans
+    // p.pollHatIds linearly (and _initProposal writes them), so an unbounded array is a
+    // gas-griefing vector — a proposal could be created with thousands of hats, making every
+    // restricted vote() call unaffordable. Bounds the existing scan; vote() ABI is unchanged.
+    uint16 public constant MAX_POLL_HATS = 100;
     uint32 public constant MAX_DURATION_MIN = 43_200; /* 30 days */
     uint32 public constant MIN_DURATION_MIN = 1; /* 1 min for testing */
 
@@ -141,7 +146,8 @@ contract DirectDemocracyVoting is Initializable {
         uint256[] calldata initialHats,
         uint256[] calldata initialCreatorHats,
         address[] calldata initialTargets,
-        uint8 thresholdPct_
+        uint8 thresholdPct_,
+        uint32 quorum_
     ) external initializer {
         if (hats_ == address(0) || executor_ == address(0)) {
             revert VotingErrors.ZeroAddress();
@@ -155,6 +161,11 @@ contract DirectDemocracyVoting is Initializable {
         l._paused = false; // Initialize paused state
         l._lock = 0; // Initialize reentrancy guard state
         emit ThresholdPctSet(thresholdPct_);
+
+        // Deploy-time voter-count quorum (0 = disabled). Mirrors setConfig(QUORUM) — the
+        // event is emitted here too so the subgraph indexes the genesis value from logs.
+        l.quorum = quorum_;
+        emit QuorumSet(quorum_);
 
         uint256 len = initialHats.length;
         for (uint256 i; i < len;) {
@@ -261,6 +272,9 @@ contract DirectDemocracyVoting is Initializable {
         uint256 batchLen = batch.length;
         if (batchLen > MAX_CALLS) revert VotingErrors.TooManyCalls();
         for (uint256 j; j < batchLen;) {
+            // No self-target guard: changing DDV's own onlyExecutor config via a proposal is the
+            // intended governance path. Self-targeting still requires the org to explicitly
+            // allow-list address(this) below, so it stays an opt-in, deliberate action.
             if (!l.allowedTarget[batch[j].target]) revert VotingErrors.TargetNotAllowed();
             unchecked {
                 ++j;
@@ -329,6 +343,7 @@ contract DirectDemocracyVoting is Initializable {
 
         if (hatIds.length > 0) {
             uint256 hatLen = hatIds.length;
+            if (hatLen > MAX_POLL_HATS) revert VotingErrors.TooManyPollHats(); // M-14
             for (uint256 i; i < hatLen;) {
                 p.pollHatIds.push(hatIds[i]);
                 p.pollHatAllowed[hatIds[i]] = true;
@@ -422,23 +437,36 @@ contract DirectDemocracyVoting is Initializable {
         Layout storage l = _layout();
         Proposal storage prop = l._proposals[id];
         if (prop.executed) revert VotingErrors.AlreadyExecuted();
-        prop.executed = true;
 
         (winner, valid) = _calcWinner(id);
         IExecutor.Call[] storage batch = prop.batches[winner];
 
+        // H-05 (issue #140): only mark the proposal executed once there is nothing left to run
+        // OR the winning batch has actually executed. Setting `executed` up-front (the old
+        // behaviour) meant a transiently-reverting batch permanently bricked the proposal — the
+        // AlreadyExecuted guard blocked every retry even though nothing ran. Now a reverting
+        // execution leaves `executed == false` so the finalize can be re-attempted once the
+        // revert cause is fixed. The `nonReentrant` modifier (not `executed`) guards reentrancy.
         if (valid && batch.length > 0) {
             uint256 len = batch.length;
             for (uint256 i; i < len;) {
+                // No self-target guard (see _validateTargets) — self-amendment is intended and
+                // still gated by the allowedTarget allow-list below.
                 if (!l.allowedTarget[batch[i].target]) revert VotingErrors.TargetNotAllowed();
                 unchecked {
                     ++i;
                 }
             }
-            try l.executor.execute(id, batch) {}
-            catch (bytes memory reason) {
+            try l.executor.execute(id, batch) {
+                prop.executed = true;
+            } catch (bytes memory reason) {
+                // Leave prop.executed == false so the finalize stays retryable (H-05).
                 emit ProposalExecutionFailed(id, winner, reason);
             }
+        } else {
+            // Nothing to execute (informational poll, no winner, or empty batch): finalization
+            // is terminal, so mark executed to prevent duplicate Winner emissions.
+            prop.executed = true;
         }
         emit Winner(id, winner, valid);
     }
@@ -515,6 +543,13 @@ contract DirectDemocracyVoting is Initializable {
 
     function pollRestricted(uint256 id) external view exists(id) returns (bool) {
         return _layout()._proposals[id].restricted;
+    }
+
+    /// @notice Unix timestamp at which voting on proposal `id` closes.
+    /// @dev L-05 parity with HybridVoting: exposes the proposal end timestamp so the lens can
+    ///      implement a real `isProposalActive` instead of a tautology.
+    function proposalEndTimestamp(uint256 id) external view exists(id) returns (uint64) {
+        return _layout()._proposals[id].endTimestamp;
     }
 
     function pollHatAllowed(uint256 id, uint256 hat) external view exists(id) returns (bool) {

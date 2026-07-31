@@ -28,6 +28,10 @@ contract MockPT is Test, IParticipationToken {
         edu = eh;
     }
 
+    function educationHub() external view override returns (address) {
+        return edu;
+    }
+
     /* Unused IERC20 functions */
     function transfer(address, uint256) external pure returns (bool) {
         return false;
@@ -113,6 +117,57 @@ contract MockPT is Test, IParticipationToken {
         function testSetExecutorUnauthorized() public {
             vm.expectRevert(EducationHub.NotExecutor.selector);
             hub.setExecutor(address(0xAB));
+        }
+
+        /*////////////////////////////////////////////////////////////
+                        L-16: setToken MINTER-WIRING CHECK
+        ////////////////////////////////////////////////////////////*/
+        function testSetTokenZeroAddressReverts() public {
+            vm.prank(executor);
+            vm.expectRevert(EducationHub.ZeroAddress.selector);
+            hub.setToken(address(0));
+        }
+
+        function testSetTokenUnauthorized() public {
+            MockPT newToken = new MockPT();
+            newToken.setEducationHub(address(hub));
+            vm.expectRevert(EducationHub.NotExecutor.selector);
+            hub.setToken(address(newToken));
+        }
+
+        function testSetTokenRevertsWhenNotWired() public {
+            // A token that does NOT authorize this hub as its minter must be rejected,
+            // otherwise completeModule would silently brick (mint reverts).
+            MockPT unwired = new MockPT();
+            // unwired.educationHub() == address(0), != address(hub)
+            vm.prank(executor);
+            vm.expectRevert(EducationHub.TokenNotWired.selector);
+            hub.setToken(address(unwired));
+        }
+
+        function testSetTokenRevertsWhenWiredToWrongHub() public {
+            MockPT wrong = new MockPT();
+            wrong.setEducationHub(address(0xDEAD)); // points at a different hub
+            vm.prank(executor);
+            vm.expectRevert(EducationHub.TokenNotWired.selector);
+            hub.setToken(address(wrong));
+        }
+
+        function testSetTokenSucceedsWhenWired() public {
+            MockPT newToken = new MockPT();
+            newToken.setEducationHub(address(hub)); // reverse wiring in place
+            vm.prank(executor);
+            vm.expectEmit(true, false, false, false, address(hub));
+            emit EducationHub.TokenSet(address(newToken));
+            hub.setToken(address(newToken));
+            assertEq(address(hub.token()), address(newToken));
+
+            // And completing a module against the newly-wired token still mints.
+            vm.prank(creator);
+            hub.createModule(bytes("data"), bytes32(0), 7, 2);
+            vm.prank(learner);
+            hub.completeModule(0, 2);
+            assertEq(newToken.balanceOf(learner), 7);
         }
 
         function testSetCreatorHatAllowed() public {

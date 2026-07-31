@@ -90,13 +90,13 @@
       "image": "ipfs://QmAdminRole",
       "canVote": true,
       "vouching": {
-        "enabled": false,
-        "quorum": 0,
-        "voucherRoleIndex": 0,
+        "enabled": true,
+        "quorum": 2,
+        "voucherRoleIndex": 3,
         "combineWithHierarchy": false
       },
       "defaults": {
-        "eligible": true,
+        "eligible": false,
         "standing": true
       },
       "hierarchy": {

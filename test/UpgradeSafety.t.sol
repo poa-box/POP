@@ -98,7 +98,7 @@ contract UpgradeSafetyTest is Test {
         address[] memory targets = new address[](0);
         HybridVoting.ClassConfig[] memory classes = new HybridVoting.ClassConfig[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(HATS, OWNER, hats, targets, 51, classes);
+        impl.initialize(HATS, OWNER, hats, targets, 51, 0, classes);
     }
 
     function testDirectDemocracyVotingImplCannotBeInitialized() public {
@@ -106,7 +106,7 @@ contract UpgradeSafetyTest is Test {
         uint256[] memory hats = new uint256[](0);
         address[] memory targets = new address[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(HATS, OWNER, hats, hats, targets, 51);
+        impl.initialize(HATS, OWNER, hats, hats, targets, 51, 0);
     }
 
     function testOrgRegistryImplCannotBeInitialized() public {
@@ -138,7 +138,7 @@ contract UpgradeSafetyTest is Test {
     function testPasskeyAccountImplCannotBeInitialized() public {
         PasskeyAccount impl = new PasskeyAccount();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), OWNER, 1 days);
+        impl.initialize(OWNER, bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)));
     }
 
     function testPasskeyAccountFactoryImplCannotBeInitialized() public {

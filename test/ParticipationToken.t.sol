@@ -49,7 +49,10 @@ contract ParticipationTokenTest is Test {
         assertEq(token.approverHatIds()[0], APPROVER_HAT_ID);
     }
 
-    function testSetTaskManagerOnceAndByExecutor() public {
+    // C-01 fix: setTaskManager is executor-only, even for the very first set
+    // (previously the first set — while the slot was address(0) — was open to any caller).
+    function testSetTaskManagerByExecutor() public {
+        vm.prank(executor);
         token.setTaskManager(taskManager);
         assertEq(token.taskManager(), taskManager);
         vm.prank(executor);
@@ -57,7 +60,9 @@ contract ParticipationTokenTest is Test {
         assertEq(token.taskManager(), address(0x5));
     }
 
-    function testSetEducationHubOnceAndByExecutor() public {
+    // C-01 fix: setEducationHub is executor-only, even for the very first set.
+    function testSetEducationHubByExecutor() public {
+        vm.prank(executor);
         token.setEducationHub(educationHub);
         assertEq(token.educationHub(), educationHub);
         vm.prank(executor);
@@ -65,7 +70,61 @@ contract ParticipationTokenTest is Test {
         assertEq(token.educationHub(), address(0x6));
     }
 
+    /*══════════════════════════════════════════════════════
+     * C-01: executor-only task/education-hub minter wiring
+     *══════════════════════════════════════════════════════*/
+
+    // The exact C-01 attack: a non-executor tries to install a malicious minter
+    // while taskManager is still UNSET. Must revert (was open before the fix).
+    function testSetTaskManagerRevertsForNonExecutorWhileUnset() public {
+        assertEq(token.taskManager(), address(0), "precondition: taskManager unset");
+        address attacker = address(0xbad);
+        vm.prank(attacker);
+        vm.expectRevert(ParticipationToken.Unauthorized.selector);
+        token.setTaskManager(attacker);
+        assertEq(token.taskManager(), address(0), "taskManager must remain unset");
+    }
+
+    // Same attack against the EducationHub slot while it is UNSET.
+    function testSetEducationHubRevertsForNonExecutorWhileUnset() public {
+        assertEq(token.educationHub(), address(0), "precondition: educationHub unset");
+        address attacker = address(0xbad);
+        vm.prank(attacker);
+        vm.expectRevert(ParticipationToken.Unauthorized.selector);
+        token.setEducationHub(attacker);
+        assertEq(token.educationHub(), address(0), "educationHub must remain unset");
+    }
+
+    // The executor CAN set both minters.
+    function testExecutorCanSetBothMinters() public {
+        vm.startPrank(executor);
+        token.setTaskManager(taskManager);
+        token.setEducationHub(educationHub);
+        vm.stopPrank();
+        assertEq(token.taskManager(), taskManager);
+        assertEq(token.educationHub(), educationHub);
+    }
+
+    // The executor can clear a previously-set EducationHub back to address(0).
+    function testExecutorCanClearEducationHub() public {
+        vm.prank(executor);
+        token.setEducationHub(educationHub);
+        assertEq(token.educationHub(), educationHub);
+
+        vm.prank(executor);
+        token.setEducationHub(address(0));
+        assertEq(token.educationHub(), address(0), "executor should be able to clear the hub");
+    }
+
+    // setTaskManager(address(0)) reverts InvalidAddress — the task minter is required.
+    function testSetTaskManagerZeroReverts() public {
+        vm.prank(executor);
+        vm.expectRevert(ParticipationToken.InvalidAddress.selector);
+        token.setTaskManager(address(0));
+    }
+
     function testMintOnlyAuthorized() public {
+        vm.prank(executor);
         token.setTaskManager(taskManager);
         vm.prank(taskManager);
         token.mint(member, 1 ether);
@@ -341,6 +400,7 @@ contract ParticipationTokenTest is Test {
     ///         not the adjacent _balances / _allowances / _totalSupply.
     function testSetName_DoesNotCorruptBalances() public {
         // Set up taskManager + mint to member
+        vm.prank(executor);
         token.setTaskManager(taskManager);
         vm.prank(taskManager);
         token.mint(member, 100 ether);

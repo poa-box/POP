@@ -18,7 +18,6 @@ library VotingErrors {
     error InvalidWeight();
     error DuplicateIndex();
     error TargetNotAllowed();
-    error TargetSelf();
     error EmptyBatch();
     error InvalidThreshold();
     error InvalidQuorum();
@@ -28,4 +27,5 @@ library VotingErrors {
     error InvalidSliceSum();
     error TooManyClasses();
     error AlreadyExecuted();
+    error TooManyPollHats(); // M-14: poll-specific hat count exceeds MAX_POLL_HATS
 }

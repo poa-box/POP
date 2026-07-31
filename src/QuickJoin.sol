@@ -53,9 +53,21 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     error NoUsername();
     error Unauthorized();
     error PasskeyFactoryNotSet();
+    /// @dev H-03: a hat that is OPEN-TO-EVERYONE (default-eligible for an arbitrary address) must not
+    ///      be mintable via the caller-specified claim paths — that is the H-03 self-mint escalation.
+    error HatOpenlyClaimable(uint256 hatId);
 
     /* ───────── Constants ────── */
     bytes4 public constant MODULE_ID = bytes4(keccak256("QuickJoin"));
+
+    /// @dev H-03: fixed probe address used to detect whether a hat is open-to-everyone. It is derived
+    ///      from a domain-separated hash so it can never be a legitimate wearer/vouched address. If the
+    ///      org's eligibility module reports THIS address as eligible for a hat, the hat is default-open
+    ///      and self-mintable by anyone — so it is rejected on the claim paths. Gated hats (Delegate/
+    ///      Agent) report this address as NOT eligible, so they pass the gate and are then subject to
+    ///      the per-user eligibility check inside Hats.mintHat (reverts NotEligible if the caller isn't
+    ///      actually vouched).
+    address private constant _CLAIM_PROBE = address(uint160(uint256(keccak256("poa.quickjoin.claim.probe"))));
 
     /* ───────── ERC-7201 Storage ──────── */
     /// @custom:storage-location erc7201:poa.quickjoin.storage
@@ -197,6 +209,41 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     }
 
     /* ───────── Internal helper ─────── */
+
+    /// @dev H-03: reject any caller-specified claim hat that is OPEN-TO-EVERYONE (default-eligible for
+    ///      an arbitrary address). Such a hat is self-mintable by anyone via this path — exactly the
+    ///      H-03 escalation (e.g. the org's ELIGIBILITY_ADMIN hat, which is open by default). A GATED
+    ///      hat (Delegate/Agent, defaults.eligible=false + vouching) is NOT rejected here: it is then
+    ///      subject to the per-user check inside Hats.mintHat, which reverts NotEligible unless the
+    ///      caller was actually vouched. Open base roles (Neighbor) are auto-minted via the normal join
+    ///      path (memberHatIds), never claimed, so blocking them from the claim path breaks nothing.
+    ///
+    ///      Openness is detected by probing eligibility for `_CLAIM_PROBE`, a domain-separated sentinel
+    ///      that can never be a legitimate wearer. If the probe reports eligible, the hat is open →
+    ///      revert. FAIL CLOSED: if the eligibility probe reverts (module missing / non-conforming), the
+    ///      hat's openness cannot be established, so it is rejected as well.
+    ///
+    ///      An EMPTY `claimHatIds` input is a no-op here (returns false); callers skip the mint,
+    ///      preserving the pre-upgrade register-only behavior of the register+claim paths.
+    /// @return hasHats True if at least one hat was requested (all passed the open-hat gate) and should
+    ///         be minted.
+    function _rejectOpenClaimHats(uint256[] calldata claimHatIds) private view returns (bool hasHats) {
+        uint256 length = claimHatIds.length;
+        if (length == 0) return false;
+        IHats hatsContract = _layout().hats;
+        for (uint256 i = 0; i < length; i++) {
+            uint256 hatId = claimHatIds[i];
+            // FAIL CLOSED: a reverting probe (module missing / non-conforming) is treated as
+            // "cannot prove gated" → reject. A returned `true` means the hat is open → reject.
+            try hatsContract.isEligible(_CLAIM_PROBE, hatId) returns (bool probeEligible) {
+                if (probeEligible) revert HatOpenlyClaimable(hatId);
+            } catch {
+                revert HatOpenlyClaimable(hatId);
+            }
+        }
+        return true;
+    }
+
     function _quickJoin(address user) private nonReentrant {
         if (user == address(0)) revert ZeroUser();
 
@@ -339,7 +386,10 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         string memory existing = l.accountRegistry.getUsername(_msgSender());
         if (bytes(existing).length == 0) revert NoUsername();
 
-        if (claimHatIds.length > 0) {
+        // H-03: reject any open-to-everyone (default-eligible) hat — those are self-mint escalations.
+        // Gated hats pass here and are then gated per-user by Hats.mintHat (reverts NotEligible if the
+        // caller wasn't vouched). An empty claimHatIds input is a no-op mint (backward-compatible).
+        if (_rejectOpenClaimHats(claimHatIds)) {
             IExecutorHatMinter(l.executor).mintHatsForUser(_msgSender(), claimHatIds);
         }
 
@@ -363,13 +413,18 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     ) external nonReentrant {
         if (user == address(0)) revert ZeroUser();
 
+        // H-03: reject any open-to-everyone (default-eligible) hat — those are self-mint escalations.
+        // Gated hats pass here and are then gated per-user by Hats.mintHat. An empty claimHatIds input
+        // registers the username without minting (this path historically doubled as register-only).
+        bool hasHats = _rejectOpenClaimHats(claimHatIds);
+
         Layout storage l = _layout();
 
         // 1. Register username
         l.accountRegistry.registerAccountBySig(user, username, deadline, nonce, signature);
 
-        // 2. Mint claimed hats
-        if (claimHatIds.length > 0) {
+        // 2. Mint claimed hats (skipped for an empty request)
+        if (hasHats) {
             IExecutorHatMinter(l.executor).mintHatsForUser(user, claimHatIds);
         }
 
@@ -395,6 +450,11 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         Layout storage l = _layout();
         if (address(l.universalFactory) == address(0)) revert PasskeyFactoryNotSet();
 
+        // H-03: reject any open-to-everyone (default-eligible) hat — those are self-mint escalations.
+        // Gated hats pass here and are then gated per-user by Hats.mintHat. An empty claimHatIds input
+        // creates the account + registers the username without minting.
+        bool hasHats = _rejectOpenClaimHats(claimHatIds);
+
         // 1. Register username via passkey sig
         l.accountRegistry
             .registerAccountByPasskeySig(
@@ -412,8 +472,8 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
 
-        // 3. Mint claimed hats
-        if (claimHatIds.length > 0) {
+        // 3. Mint claimed hats (skipped for an empty request)
+        if (hasHats) {
             IExecutorHatMinter(l.executor).mintHatsForUser(account, claimHatIds);
         }
 

@@ -49,6 +49,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     error ApplicationAlreadyExists();
     error NoActiveApplication();
     error InvalidApplicationHash();
+    error DefaultEligibilityConflictsWithVouch();
     error NotAuthorizedEmailVerifier();
 
     /*═════════════════════════════════════════ STRUCTS ═════════════════════════════════════════*/
@@ -263,6 +264,12 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         whenNotPaused
     {
         Layout storage l = _layout();
+        // M-03: a default-eligible hat silently satisfies eligibility for every wearer, bypassing
+        // the vouch quorum entirely when vouching combines with the hierarchy path (getWearerStatus
+        // ORs the two). Reject enabling default-eligibility on a hat whose vouching is enabled AND
+        // set to combineWithHierarchy — governance must clear the vouch config (or drop combine)
+        // before flipping default eligibility on.
+        _requireNoDefaultVouchConflictOnDefault(hatId, _eligible);
         l.defaultRules[hatId] = WearerRules(_packWearerFlags(_eligible, _standing));
         emit DefaultEligibilityUpdated(hatId, _eligible, _standing, msg.sender);
     }
@@ -355,6 +362,34 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         emit WearerEligibilityUpdated(wearer, hatId, _eligible, _standing, msg.sender);
     }
 
+    /*═══════════════════════════════════ M-03 CONFLICT GUARD ═══════════════════════════════════════*/
+
+    /// @dev M-03: reverts if writing default-eligibility=true on `hatId` would create the silent
+    ///      vouch-quorum bypass — i.e. the hat's vouching is enabled AND combineWithHierarchy, so
+    ///      getWearerStatus ORs the hierarchy path in and any wearer clears the hat regardless of
+    ///      vouches. A no-op when `eligible` is false (turning default-eligibility OFF is always safe).
+    ///      Mirrors the guard in setDefaultEligibility; used by every default-eligibility writer.
+    function _requireNoDefaultVouchConflictOnDefault(uint256 hatId, bool eligible) internal view {
+        if (!eligible) return;
+        uint8 vouchFlags = _layout().vouchConfigs[hatId].flags;
+        if (_isVouchingEnabled(vouchFlags) && _shouldCombineWithHierarchy(vouchFlags)) {
+            revert DefaultEligibilityConflictsWithVouch();
+        }
+    }
+
+    /// @dev M-03 (reverse direction): reverts if enabling vouch+combine on `hatId` would make the
+    ///      quorum a no-op because the hat is already default-eligible. A no-op unless BOTH vouching
+    ///      would be enabled AND combineWithHierarchy is set. Mirrors the guard in configureVouching;
+    ///      used by every vouch-config writer.
+    function _requireNoDefaultVouchConflictOnVouch(uint256 hatId, bool enabled, bool combineWithHierarchy)
+        internal
+        view
+    {
+        if (!enabled || !combineWithHierarchy) return;
+        (bool defaultEligible,) = _unpackWearerFlags(_layout().defaultRules[hatId].flags);
+        if (defaultEligible) revert DefaultEligibilityConflictsWithVouch();
+    }
+
     /*═══════════════════════════════════ BATCH OPERATIONS ═══════════════════════════════════════*/
 
     function batchSetWearerEligibility(
@@ -434,6 +469,8 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         unchecked {
             for (uint256 i; i < length; ++i) {
                 uint256 hatId = hatIds[i];
+                // M-03: reject silently bypassing the vouch quorum via default-eligibility.
+                _requireNoDefaultVouchConflictOnDefault(hatId, eligibles[i]);
                 l.defaultRules[hatId] = WearerRules(_packWearerFlags(eligibles[i], standings[i]));
                 emit DefaultEligibilityUpdated(hatId, eligibles[i], standings[i], msg.sender);
             }
@@ -484,6 +521,8 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         unchecked {
             for (uint256 i; i < length; ++i) {
                 uint256 hatId = hatIds[i];
+                // M-03: reject silently bypassing the vouch quorum via default-eligibility.
+                _requireNoDefaultVouchConflictOnDefault(hatId, defaultEligibles[i]);
                 l.defaultRules[hatId] = WearerRules(_packWearerFlags(defaultEligibles[i], defaultStandings[i]));
                 emit DefaultEligibilityUpdated(hatId, defaultEligibles[i], defaultStandings[i], msg.sender);
                 emit HatCreatedWithEligibility(
@@ -524,6 +563,8 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         unchecked {
             for (uint256 i; i < length; ++i) {
                 uint256 hatId = hatIds[i];
+                // M-03: reject silently bypassing the vouch quorum via default-eligibility.
+                _requireNoDefaultVouchConflictOnDefault(hatId, defaultEligibles[i]);
                 l.defaultRules[hatId] = WearerRules(_packWearerFlags(defaultEligibles[i], defaultStandings[i]));
                 emit DefaultEligibilityUpdated(hatId, defaultEligibles[i], defaultStandings[i], msg.sender);
                 emit HatCreatedWithEligibility(
@@ -555,6 +596,11 @@ contract EligibilityModule is Initializable, IHatsEligibility {
                 params._mutable,
                 params.imageURI
             );
+
+        // M-03: reject silently bypassing the vouch quorum via default-eligibility. A freshly
+        // created hat has no prior vouch config, but a hatId can be reused across create calls
+        // if a prior hat was cleared — guard defensively so the invariant holds for every writer.
+        _requireNoDefaultVouchConflictOnDefault(newHatId, params.defaultEligible);
 
         // Set default eligibility rules
         l.defaultRules[newHatId] = WearerRules(_packWearerFlags(params.defaultEligible, params.defaultStanding));
@@ -588,6 +634,8 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         onlySuperAdmin
     {
         Layout storage l = _layout();
+        // M-03: reject silently bypassing the vouch quorum via default-eligibility.
+        _requireNoDefaultVouchConflictOnDefault(hatId, defaultEligible);
         l.defaultRules[hatId] = WearerRules(_packWearerFlags(defaultEligible, defaultStanding));
         emit DefaultEligibilityUpdated(hatId, defaultEligible, defaultStanding, msg.sender);
         emit HatCreatedWithEligibility(msg.sender, parentHatId, hatId, defaultEligible, defaultStanding, 0);
@@ -737,6 +785,11 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     {
         Layout storage l = _layout();
         bool enabled = quorum > 0;
+        // M-03 (reverse direction): if this hat is already default-eligible, enabling vouching with
+        // combineWithHierarchy would make the quorum a no-op (getWearerStatus ORs hierarchy eligibility
+        // in), so any wearer clears the hat regardless of vouches. Reject it — governance must clear the
+        // default-eligible flag first (setDefaultEligibility(hatId, false, ...)).
+        _requireNoDefaultVouchConflictOnVouch(hatId, enabled, combineWithHierarchy);
         l.vouchConfigs[hatId] = VouchConfig({
             quorum: quorum, membershipHatId: membershipHatId, flags: _packVouchFlags(enabled, combineWithHierarchy)
         });
@@ -773,6 +826,9 @@ contract EligibilityModule is Initializable, IHatsEligibility {
             for (uint256 i; i < length; ++i) {
                 uint256 hatId = hatIds[i];
                 bool enabled = quorums[i] > 0;
+                // M-03 (reverse direction): reject enabling vouch+combine on an already
+                // default-eligible hat — the quorum would be a silent no-op.
+                _requireNoDefaultVouchConflictOnVouch(hatId, enabled, combineWithHierarchyFlags[i]);
                 l.vouchConfigs[hatId] = VouchConfig({
                     quorum: quorums[i],
                     membershipHatId: membershipHatIds[i],

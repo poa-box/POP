@@ -14,14 +14,6 @@ contract GraceLibWrapper {
         return PaymasterGraceLib.isInGracePeriod(registeredAt, initialGraceDays);
     }
 
-    function solidarityFee(uint256 actualGasCost, uint16 feePercentageBps, uint40 registeredAt, uint32 initialGraceDays)
-        external
-        view
-        returns (uint256)
-    {
-        return PaymasterGraceLib.solidarityFee(actualGasCost, feePercentageBps, registeredAt, initialGraceDays);
-    }
-
     function calculateMatchAllowance(uint256 deposited, uint256 minDeposit) external pure returns (uint256) {
         return PaymasterGraceLib.calculateMatchAllowance(deposited, minDeposit);
     }
@@ -118,53 +110,8 @@ contract PaymasterGraceLibTest is Test {
         assertEq(result, block.timestamp < graceEnd);
     }
 
-    // -------- solidarityFee --------
-
-    function testSolidarityFee_DuringGraceIsZero() public view {
-        uint40 registeredAt = uint40(block.timestamp);
-        uint256 fee = lib.solidarityFee(1 ether, 100, registeredAt, 90);
-        assertEq(fee, 0);
-    }
-
-    function testSolidarityFee_AfterGraceCalculatesFee() public view {
-        uint40 registeredAt = uint40(block.timestamp - 91 days);
-        // 1 ether * 100 bps / 10000 = 0.01 ether
-        uint256 fee = lib.solidarityFee(1 ether, 100, registeredAt, 90);
-        assertEq(fee, 0.01 ether);
-    }
-
-    function testSolidarityFee_ZeroBpsIsZero() public view {
-        uint40 registeredAt = uint40(block.timestamp - 91 days);
-        uint256 fee = lib.solidarityFee(1 ether, 0, registeredAt, 90);
-        assertEq(fee, 0);
-    }
-
-    function testSolidarityFee_ZeroCostIsZero() public view {
-        uint40 registeredAt = uint40(block.timestamp - 91 days);
-        uint256 fee = lib.solidarityFee(0, 100, registeredAt, 90);
-        assertEq(fee, 0);
-    }
-
-    function testSolidarityFee_MaxBps() public view {
-        uint40 registeredAt = uint40(block.timestamp - 91 days);
-        // 10000 bps = 100%
-        uint256 fee = lib.solidarityFee(1 ether, 10000, registeredAt, 90);
-        assertEq(fee, 1 ether);
-    }
-
-    function testSolidarityFee_PrecisionLoss() public view {
-        uint40 registeredAt = uint40(block.timestamp - 91 days);
-        // 1 wei * 1 bps / 10000 = 0 (rounds down)
-        uint256 fee = lib.solidarityFee(1, 1, registeredAt, 90);
-        assertEq(fee, 0);
-    }
-
-    function testFuzz_SolidarityFee_AfterGrace(uint128 gasCost, uint16 bps) public view {
-        vm.assume(bps <= 10000);
-        uint40 registeredAt = uint40(block.timestamp - 91 days);
-        uint256 fee = lib.solidarityFee(gasCost, bps, registeredAt, 90);
-        assertEq(fee, (uint256(gasCost) * uint256(bps)) / 10000);
-    }
+    // NOTE (L-31): PaymasterGraceLib.solidarityFee was dead code (only referenced by these tests,
+    // never by src) and has been removed; the hub inlines its fee calc where it is actually needed.
 
     // -------- calculateMatchAllowance --------
 
@@ -417,6 +364,42 @@ contract PaymasterCalldataLibTest is Test {
         (bool valid, bytes4 innerSelector) = lib.parseExecuteCall(callData, TARGET);
         assertTrue(valid);
         assertEq(innerSelector, registerAccount);
+    }
+
+    /// @dev L-33/L-34: a crafted non-canonical inner-bytes offset (not 0x60) must be REJECTED,
+    ///      not silently parsed as a selector-0 call pointing at attacker-chosen calldata.
+    function testParseExecute_NonStandardOffsetRejected() public view {
+        // Hand-build execute(TARGET, 0, <offset=0x80>) then a length + payload. Offset 0x80 != 0x60.
+        bytes memory callData = abi.encodePacked(
+            EXECUTE_SELECTOR,
+            bytes32(uint256(uint160(TARGET))), // target
+            bytes32(uint256(0)), // value
+            bytes32(uint256(0x80)), // non-standard bytes offset (should be 0x60)
+            bytes32(uint256(0)), // filler word where the standard length would sit
+            bytes32(uint256(4)), // inner length
+            bytes4(0xdeadbeef), // inner selector the attacker hoped to smuggle
+            bytes28(0)
+        );
+        (bool valid, bytes4 innerSelector) = lib.parseExecuteCall(callData, TARGET);
+        assertFalse(valid, "non-standard offset must be rejected");
+        assertEq(innerSelector, bytes4(0));
+    }
+
+    /// @dev L-33: a standard 0x60 offset with a declared inner length < 4 yields selector 0 but
+    ///      still validates structurally (empty/short inner data is a legitimate case).
+    function testParseExecute_ShortInnerDataYieldsZeroSelector() public view {
+        bytes memory callData = abi.encodePacked(
+            EXECUTE_SELECTOR,
+            bytes32(uint256(uint160(TARGET))),
+            bytes32(uint256(0)),
+            bytes32(uint256(0x60)), // canonical offset
+            bytes32(uint256(2)), // inner length = 2 (< 4)
+            bytes2(0xaabb),
+            bytes30(0)
+        );
+        (bool valid, bytes4 innerSelector) = lib.parseExecuteCall(callData, TARGET);
+        assertTrue(valid, "short-inner-data envelope is structurally valid");
+        assertEq(innerSelector, bytes4(0));
     }
 
     function testFuzz_ParseExecute_CorrectTarget(address target) public view {

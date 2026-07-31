@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IPaymaster} from "./interfaces/IPaymaster.sol";
 import {IEntryPoint} from "./interfaces/IEntryPoint.sol";
-import {PackedUserOperation} from "./interfaces/PackedUserOperation.sol";
+import {PackedUserOperation, UserOpLib} from "./interfaces/PackedUserOperation.sol";
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {IERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol";
 import {PaymasterHubErrors} from "./libs/PaymasterHubErrors.sol";
@@ -69,6 +69,16 @@ struct OrgDeployConfig {
     address orgDeployer;
 }
 
+struct OnboardingConfig {
+    uint128 maxGasPerCreation;
+    uint128 dailyCreationLimit;
+    uint128 attemptsToday;
+    uint32 currentDay;
+    bool enabled;
+    address accountRegistry;
+    uint8 maxOnboardingsPerAccount;
+}
+
 // Interface for PaymasterHub Storage Getters — matches org-scoped signatures
 interface IPaymasterHubStorage {
     function getOrgConfig(bytes32 orgId) external view returns (OrgConfig memory);
@@ -79,6 +89,7 @@ interface IPaymasterHubStorage {
     function getSolidarityFund() external view returns (SolidarityFund memory);
     function getGracePeriodConfig() external view returns (GracePeriodConfig memory);
     function getOrgDeployConfig() external view returns (OrgDeployConfig memory);
+    function getOnboardingConfig() external view returns (OnboardingConfig memory);
     function getOrgDeployCount(address account) external view returns (uint8);
     function ENTRY_POINT() external view returns (address);
     function HATS() external view returns (address);
@@ -117,9 +128,9 @@ contract PaymasterHubLens {
     function budgetOf(bytes32 orgId, bytes32 subjectKey) external view returns (Budget memory) {
         Budget memory budget = hub.getBudget(orgId, subjectKey);
 
-        // Calculate current epoch if needed
+        // Calculate current epoch if needed (L-37: widen to uint256 to avoid uint32 overflow)
         uint256 currentTime = block.timestamp;
-        if (budget.epochLen > 0 && currentTime >= budget.epochStart + budget.epochLen) {
+        if (budget.epochLen > 0 && currentTime >= uint256(budget.epochStart) + uint256(budget.epochLen)) {
             uint32 epochsPassed = uint32((currentTime - budget.epochStart) / budget.epochLen);
             return Budget({
                 capPerEpoch: budget.capPerEpoch,
@@ -135,8 +146,8 @@ contract PaymasterHubLens {
     function remaining(bytes32 orgId, bytes32 subjectKey) external view returns (uint256) {
         Budget memory budget = hub.getBudget(orgId, subjectKey);
 
-        // Check if epoch needs rolling
-        if (budget.epochLen > 0 && block.timestamp >= budget.epochStart + budget.epochLen) {
+        // Check if epoch needs rolling (L-37: widen to uint256 to avoid uint32 overflow)
+        if (budget.epochLen > 0 && block.timestamp >= uint256(budget.epochStart) + uint256(budget.epochLen)) {
             return budget.capPerEpoch; // Full budget available after epoch roll
         }
 
@@ -215,33 +226,49 @@ contract PaymasterHubLens {
         view
         returns (bool valid, string memory reason)
     {
-        // Check org registration
-        OrgConfig memory cfg = hub.getOrgConfig(orgId);
-        if (cfg.adminHatId == 0) return (false, "OrgNotRegistered");
-        if (cfg.paused) return (false, "Paused");
-
-        // Decode paymasterAndData
+        // Decode paymasterAndData FIRST and branch on subjectType, mirroring the hub's ordering
+        // (M-11/#181): the hub validates onboarding / org-deploy BEFORE any org lookup, and both
+        // require the decoded orgId == bytes32(0) (org 0 is never registered). The old lens ran
+        // the OrgNotRegistered / OrgIdMismatch checks first, making both sponsorship branches
+        // unreachable. Decoding up front makes the predictor agree with the hub.
         (uint8 version, bytes32 decodedOrgId, uint8 subjectType, bytes32 subjectId, uint32 ruleId) =
             _decodePaymasterData(userOp.paymasterAndData);
 
         if (version != PAYMASTER_DATA_VERSION) return (false, "InvalidVersion");
-        if (decodedOrgId != orgId) return (false, "OrgIdMismatch");
 
-        // Handle onboarding separately — validate constraints match PaymasterHub
+        // Onboarding sponsorship (global-only, no org registration required).
         if (subjectType == SUBJECT_TYPE_POA_ONBOARDING) {
             if (decodedOrgId != bytes32(0) || subjectId != bytes32(0) || ruleId != RULE_ID_GENERIC) {
                 return (false, "InvalidOnboardingRequest");
             }
+            OnboardingConfig memory onb = hub.getOnboardingConfig();
+            if (!onb.enabled) return (false, "OnboardingDisabled");
+            SolidarityFund memory sol = hub.getSolidarityFund();
+            if (sol.distributionPaused) return (false, "SolidarityDistributionIsPaused");
+            if (maxCost > onb.maxGasPerCreation) return (false, "GasTooHigh");
+            if (sol.balance < maxCost) return (false, "InsufficientFunds");
             return (true, "Onboarding");
         }
 
-        // Handle org deploy sponsorship separately
+        // Org-deploy sponsorship (global-only).
         if (subjectType == SUBJECT_TYPE_ORG_DEPLOY) {
             if (decodedOrgId != bytes32(0) || subjectId != bytes32(0) || ruleId != RULE_ID_GENERIC) {
                 return (false, "InvalidOrgDeployRequest");
             }
+            OrgDeployConfig memory dep = hub.getOrgDeployConfig();
+            if (!dep.enabled) return (false, "OrgDeployDisabled");
+            SolidarityFund memory sol = hub.getSolidarityFund();
+            if (sol.distributionPaused) return (false, "SolidarityDistributionIsPaused");
+            if (maxCost > dep.maxGasPerDeploy) return (false, "GasTooHigh");
+            if (sol.balance < maxCost) return (false, "InsufficientFunds");
             return (true, "OrgDeploy");
         }
+
+        // Org-scoped path: now enforce org registration and the orgId match.
+        if (decodedOrgId != orgId) return (false, "OrgIdMismatch");
+        OrgConfig memory cfg = hub.getOrgConfig(orgId);
+        if (cfg.adminHatId == 0) return (false, "OrgNotRegistered");
+        if (cfg.paused) return (false, "Paused");
 
         // Check subject eligibility
         bytes32 subjectKey;
@@ -272,24 +299,84 @@ contract PaymasterHubLens {
             return (false, "InvalidSubjectType");
         }
 
-        // Check rules
-        (address target, bytes4 selector) = _extractTargetSelector(userOp, ruleId);
-        if (!hub.getRule(orgId, target, selector).allowed) {
-            return (false, "RuleDenied");
-        }
+        // Check fee/gas caps (L-36: the hub enforces these in validation; predict them too).
+        if (!_feeCapsOk(orgId, userOp)) return (false, "FeeOrGasTooHigh");
 
-        // Check budget
+        // Check rules. For RULE_ID_GENERIC executeBatch, validate EVERY inner call against org
+        // rules (L-35) instead of one synthetic (sender, batchSelector) pair.
+        if (!_rulesOk(orgId, userOp, ruleId)) return (false, "RuleDenied");
+
+        // Check budget. Widen the epoch-end comparison to uint256 (L-37): epochStart + epochLen
+        // are uint32 and can overflow in uint32 arithmetic near the year-2106 boundary, which
+        // would wrongly report the epoch as still open.
         Budget memory budget = hub.getBudget(orgId, subjectKey);
-        uint256 currentTime = block.timestamp;
         uint128 available = budget.capPerEpoch;
-
-        if (currentTime < budget.epochStart + budget.epochLen) {
+        if (block.timestamp < uint256(budget.epochStart) + uint256(budget.epochLen)) {
             available = budget.capPerEpoch > budget.usedInEpoch ? budget.capPerEpoch - budget.usedInEpoch : 0;
         }
-
         if (maxCost > available) return (false, "BudgetExceeded");
 
         return (true, "Valid");
+    }
+
+    /// @dev Predict the hub's fee/gas cap check (L-36).
+    function _feeCapsOk(bytes32 orgId, PackedUserOperation calldata userOp) private view returns (bool) {
+        FeeCaps memory caps = hub.getFeeCaps(orgId);
+        (uint128 maxPriorityFeePerGas, uint128 maxFeePerGas) = UserOpLib.unpackGasFees(userOp.gasFees);
+        if (caps.maxFeePerGas > 0 && maxFeePerGas > caps.maxFeePerGas) return false;
+        if (caps.maxPriorityFeePerGas > 0 && maxPriorityFeePerGas > caps.maxPriorityFeePerGas) return false;
+        (uint128 verificationGasLimit, uint128 callGasLimit) = UserOpLib.unpackAccountGasLimits(userOp.accountGasLimits);
+        if (caps.maxCallGas > 0 && callGasLimit > caps.maxCallGas) return false;
+        if (caps.maxVerificationGas > 0 && verificationGasLimit > caps.maxVerificationGas) return false;
+        if (caps.maxPreVerificationGas > 0 && userOp.preVerificationGas > caps.maxPreVerificationGas) return false;
+        return true;
+    }
+
+    /// @dev Predict the hub's rule check, including per-inner-call executeBatch validation (L-35).
+    function _rulesOk(bytes32 orgId, PackedUserOperation calldata userOp, uint32 ruleId) private view returns (bool) {
+        bytes calldata callData = userOp.callData;
+        if (callData.length < 4) return false;
+
+        if (ruleId == RULE_ID_GENERIC) {
+            bytes4 outerSelector = bytes4(callData[0:4]);
+            // executeBatch(address[],uint256[],bytes[]) or executeBatch(address[],bytes[])
+            if (outerSelector == bytes4(0x47e1da2a) || outerSelector == bytes4(0x18dfb3c7)) {
+                address[] memory targets;
+                bytes[] memory datas;
+                if (outerSelector == bytes4(0x47e1da2a)) {
+                    (targets,, datas) = abi.decode(callData[4:], (address[], uint256[], bytes[]));
+                } else {
+                    (targets, datas) = abi.decode(callData[4:], (address[], bytes[]));
+                }
+                if (targets.length != datas.length) return false;
+                for (uint256 i = 0; i < targets.length;) {
+                    bytes4 innerSelector;
+                    if (datas[i].length >= 4) {
+                        bytes memory d = datas[i];
+                        assembly {
+                            innerSelector := mload(add(d, 0x20))
+                        }
+                    }
+                    if (!hub.getRule(orgId, targets[i], innerSelector).allowed) return false;
+                    unchecked {
+                        ++i;
+                    }
+                }
+                return true;
+            }
+        }
+
+        (address target, bytes4 selector) = _extractTargetSelector(userOp, ruleId);
+        Rule memory rule = hub.getRule(orgId, target, selector);
+        if (!rule.allowed) return false;
+        // Parity with PaymasterHub._validateRules single-call path: a set maxCallGasHint
+        // rejects ops whose callGasLimit exceeds it (GasTooHigh). The batch path above
+        // intentionally skips per-call gas hints, matching the hub.
+        if (rule.maxCallGasHint > 0) {
+            (, uint128 callGasLimit) = UserOpLib.unpackAccountGasLimits(userOp.accountGasLimits);
+            if (callGasLimit > rule.maxCallGasHint) return false;
+        }
+        return true;
     }
 
     function supportsInterface(bytes4 interfaceId) public pure returns (bool) {

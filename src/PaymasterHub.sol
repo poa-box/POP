@@ -15,6 +15,8 @@ import {PaymasterHubErrors} from "./libs/PaymasterHubErrors.sol";
 import {PaymasterGraceLib} from "./libs/PaymasterGraceLib.sol";
 import {PaymasterPostOpLib} from "./libs/PaymasterPostOpLib.sol";
 import {PaymasterCalldataLib} from "./libs/PaymasterCalldataLib.sol";
+import {PaymasterAdminLib} from "./libs/PaymasterAdminLib.sol";
+import {PaymasterFinanceLib} from "./libs/PaymasterFinanceLib.sol";
 import {PaymasterSponsorshipLib} from "./libs/PaymasterSponsorshipLib.sol";
 
 /**
@@ -244,9 +246,16 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         emit PaymasterHubErrors.PaymasterInitialized(_entryPoint, _hats, _poaManager);
     }
 
-    /// @notice Set protocol admin (one-time v2 reinitializer).
-    function reinitializeProtocolAdmin(address _admin) external reinitializer(2) {
-        _getMainStorage().protocolAdmin = _admin;
+    /// @notice Set the protocol-level admin, gated to the PoaManager (M-10).
+    /// @dev Replaces the unauthenticated `reinitializeProtocolAdmin(address)` reinitializer,
+    ///      which any address could front-run once a new impl was live but the reinit was
+    ///      unconsumed, permanently seizing `protocolAdmin`. This is an ordinary
+    ///      poaManager-gated setter (no reinitializer) delegated to PaymasterAdminLib to keep
+    ///      the hub under the EIP-170 limit. `protocolAdmin` bypasses the poaManager gate in
+    ///      `adminBatchAddRules`/`setSolidarityFee`, so it must stay poaManager-controlled.
+    /// @param newAdmin The new protocolAdmin (may be zero to disable the protocol-admin path).
+    function setProtocolAdmin(address newAdmin) external {
+        PaymasterAdminLib.setProtocolAdmin(newAdmin);
     }
 
     // ============ Deploy Config Struct ============
@@ -430,72 +439,9 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
 
     // ============ Solidarity Fund Functions ============
 
-    /**
-     * @notice Check if org can access solidarity fund based on grace period and deposit requirements
-     * @dev Implements "maintain minimum" model - checks current balance (deposited)
-     *
-     * Grace period model:
-     * - First 90 days: Free solidarity access with transaction limit (3000 tx on L2)
-     * - After 90 days: Must maintain minimum deposit (~$10) to access solidarity
-     *
-     * Gas overhead:
-     * - Funded orgs (deposited >= minDepositRequired): ~100 gas
-     * - Unfunded orgs in initial grace: ~220 gas
-     * - Unfunded orgs after grace without sufficient balance: Reverts immediately
-     *
-     * @param orgId The organization identifier
-     * @param maxCost Maximum cost of the operation (for solidarity limit check)
-     */
-    function _checkSolidarityAccess(bytes32 orgId, uint256 maxCost) internal view {
-        SolidarityFund storage solidarity = _getSolidarityStorage();
-
-        // If distribution is paused, skip solidarity checks entirely
-        // Orgs pay 100% from deposits when distribution is paused
-        if (solidarity.distributionPaused) return;
-
-        mapping(bytes32 => OrgConfig) storage orgs = _getOrgsStorage();
-        mapping(bytes32 => OrgFinancials) storage financials = _getFinancialsStorage();
-        GracePeriodConfig storage grace = _getGracePeriodStorage();
-
-        OrgConfig storage config = orgs[orgId];
-        OrgFinancials storage org = financials[orgId];
-        uint256 depositAvailable = org.deposited > org.spent ? org.deposited - org.spent : 0;
-
-        // Check if org is banned from solidarity
-        if (config.bannedFromSolidarity) revert PaymasterHubErrors.OrgIsBanned();
-
-        // Check grace period
-        bool inInitialGrace = PaymasterGraceLib.isInGracePeriod(config.registeredAt, grace.initialGraceDays);
-
-        if (inInitialGrace && depositAvailable < grace.minDepositRequired) {
-            // Grace subsidy: unfunded orgs can use solidarity up to maxSpendDuringGrace.
-            // Only applies during the initial grace period when org hasn't deposited
-            // the minimum. Once they deposit enough, they use the tier system below.
-            if (org.solidarityUsedThisPeriod + maxCost > grace.maxSpendDuringGrace) {
-                revert PaymasterHubErrors.GracePeriodSpendLimitReached();
-            }
-            if (solidarity.balance < maxCost) revert PaymasterHubErrors.InsufficientFunds();
-        } else {
-            // Tier-based matching: applies to funded grace orgs AND all post-grace orgs.
-            // Funded orgs use deposits first; solidarity provides tier-based matching.
-            // Self-funded orgs (tier 4, deposit >= 5x min) need zero solidarity.
-            if (depositAvailable < grace.minDepositRequired) {
-                revert PaymasterHubErrors.InsufficientDepositForSolidarity();
-            }
-
-            uint256 matchAllowance =
-                PaymasterGraceLib.calculateMatchAllowance(depositAvailable, grace.minDepositRequired);
-            uint256 solidarityRemaining =
-                matchAllowance > org.solidarityUsedThisPeriod ? matchAllowance - org.solidarityUsedThisPeriod : 0;
-
-            // Minimum solidarity needed after using available deposits.
-            uint256 requiredSolidarity = maxCost > depositAvailable ? maxCost - depositAvailable : 0;
-            if (requiredSolidarity > solidarityRemaining) {
-                revert PaymasterHubErrors.SolidarityLimitExceeded();
-            }
-            if (solidarity.balance < requiredSolidarity) revert PaymasterHubErrors.InsufficientFunds();
-        }
-    }
+    // NOTE (M-05): the solidarity access check + per-org reservation moved to
+    // PaymasterFinanceLib.checkSolidarityAccessAndReserve (delegatecall) to keep the hub under
+    // the EIP-170 size limit and to add validation-time reservation of solidarityUsedThisPeriod.
 
     /**
      * @notice Deposit funds for a specific org (permissionless)
@@ -536,7 +482,14 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         }
 
         // Trigger 2: Crossing minimum threshold (based on available balance, not lifetime deposits,
-        // to stay consistent with _checkSolidarityAccess and PaymasterSponsorshipLib.updateOrgFinancials)
+        // to stay consistent with PaymasterFinanceLib.checkSolidarityAccessAndReserve and its
+        // _applyFinancials postOp split — both key the solidarity tier off deposited - spent)
+        // KNOWN LIMITATION (audit WS-C follow-up): withdrawOrgDeposit (M-04) lets an org admin
+        // drop available below minDepositRequired and re-deposit across it to zero
+        // solidarityUsedThisPeriod without burning real spend, cheapening the per-period
+        // solidarity throttle (bannedFromSolidarity remains the backstop). A proper fix
+        // (time-gate this reset or suppress it after a same-period withdrawal) needs a Layout
+        // append + accounting change and is tracked separately, not folded into this pass.
         uint256 availableBefore = org.deposited > org.spent ? org.deposited - org.spent : 0;
         uint256 availableAfter = availableBefore + amount;
         bool wasBelowMinimum = availableBefore < grace.minDepositRequired;
@@ -619,6 +572,7 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         uint32 currentEpochStart;
         bytes32 contextOrgId = orgId;
         uint256 reservedOrgBalance;
+        uint256 reservedSolidarity;
 
         uint8 sponsorshipType = SPONSORSHIP_NONE;
 
@@ -678,20 +632,31 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
             // Check per-subject budget (existing functionality)
             currentEpochStart = _checkBudget(orgId, subjectKey, maxCost);
 
-            // Check solidarity fund access BEFORE reserving org balance.
-            // _checkSolidarityAccess reads depositAvailable for tier calculation and
-            // minDepositRequired checks — the reservation would deflate depositAvailable.
-            _checkSolidarityAccess(orgId, maxCost);
+            // Check solidarity fund access AND reserve the solidarity this op would draw (M-05),
+            // BEFORE reserving org balance. The reservation reads depositAvailable for tier
+            // calculation and minDepositRequired checks — the org-balance reservation would
+            // deflate depositAvailable, so it must run after. Reserving into the per-org
+            // solidarityUsedThisPeriod makes a second same-org op in the bundle see the updated
+            // counter and be bounded by the grace/tier allowance.
+            reservedSolidarity = PaymasterFinanceLib.checkSolidarityAccessAndReserve(orgId, maxCost);
 
             // Reserve maxCost from org deposits (after solidarity check)
             reservedOrgBalance = _checkOrgBalance(orgId, maxCost);
         }
 
         // Prepare context for postOp
-        // maxCost = budget reservation (always reserved), reservedOrgBalance = org deposit reservation (0 during grace)
+        // maxCost = budget reservation (always reserved), reservedOrgBalance = org deposit reservation (0 during grace),
+        // reservedSolidarity = per-org solidarity reservation (M-05, unreserved in postOp).
         // sender is needed for org deploy path to increment per-account counter in postOp
         context = abi.encode(
-            sponsorshipType, contextOrgId, subjectKey, currentEpochStart, maxCost, reservedOrgBalance, userOp.sender
+            sponsorshipType,
+            contextOrgId,
+            subjectKey,
+            currentEpochStart,
+            maxCost,
+            reservedOrgBalance,
+            userOp.sender,
+            reservedSolidarity
         );
 
         // Return 0 for no signature failure and no time restrictions
@@ -766,8 +731,9 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
             uint32 epochStart,
             uint256 reservedBudget,
             uint256 reservedOrgBalance,
-            address sender
-        ) = abi.decode(context, (uint8, bytes32, bytes32, uint32, uint256, uint256, address));
+            address sender,
+            uint256 reservedSolidarity
+        ) = abi.decode(context, (uint8, bytes32, bytes32, uint32, uint256, uint256, address, uint256));
 
         // Solidarity-funded sponsorship paths
         if (sponsorshipType == SPONSORSHIP_ONBOARDING) {
@@ -786,89 +752,28 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
             );
         } else {
             // If the first postOp call reverted, EntryPoint calls again with postOpReverted.
-            // Use a fallback that cannot revert: charge 100% from deposits, skip solidarity.
+            // Use a fallback that cannot revert: charge from deposits first, absorb the rest
+            // from solidarity. Unreserves the budget/deposit/solidarity reservations (M-05).
             if (mode == IPaymaster.PostOpMode.postOpReverted) {
-                _postOpFallback(orgId, subjectKey, epochStart, actualGasCost, reservedBudget, reservedOrgBalance);
+                PaymasterFinanceLib.postOpFallback(
+                    orgId, subjectKey, epochStart, actualGasCost, reservedBudget, reservedOrgBalance, reservedSolidarity
+                );
                 return;
             }
 
-            // Regular org operation
-            // Update per-subject budget usage
-            _updateUsage(orgId, subjectKey, epochStart, actualGasCost, reservedBudget);
-
-            // Update per-org financial tracking and collect solidarity fee
-            PaymasterSponsorshipLib.updateOrgFinancials(orgId, actualGasCost, reservedOrgBalance);
+            // Regular org operation (also covers SUBJECT_TYPE_CLAIM 0x05, which shares this
+            // org-billed path): adjust budget, unreserve deposit + solidarity, apply the actual
+            // funding split and collect the solidarity fee. This single call subsumes the budget
+            // adjust (_updateUsage) AND the org-financials split (updateOrgFinancials) AND the M-05
+            // solidarity unreservation — so those must NOT also run here or spend double-counts.
+            PaymasterFinanceLib.updateUsageAndFinancials(
+                orgId, subjectKey, epochStart, actualGasCost, reservedBudget, reservedOrgBalance, reservedSolidarity
+            );
         }
     }
 
-    /**
-     * @notice Fallback accounting when the first postOp call reverts
-     * @dev Called with PostOpMode.postOpReverted. Must not revert — if this reverts too,
-     *      the paymaster is charged by EntryPoint with no accounting update.
-     *      Charges 100% from org deposits (skips solidarity to avoid the revert path).
-     */
-    function _postOpFallback(
-        bytes32 orgId,
-        bytes32 subjectKey,
-        uint32 epochStart,
-        uint256 actualGasCost,
-        uint256 reservedBudget,
-        uint256 reservedOrgBalance
-    ) private {
-        // Adjust budget: replace reservation with actual cost
-        mapping(bytes32 => Budget) storage budgets = _getBudgetsStorage()[orgId];
-        Budget storage budget = budgets[subjectKey];
-        if (budget.epochStart == epochStart) {
-            budget.usedInEpoch = PaymasterPostOpLib.adjustBudget(budget.usedInEpoch, reservedBudget, actualGasCost);
-            emit PaymasterHubErrors.UsageIncreased(orgId, subjectKey, actualGasCost, budget.usedInEpoch, epochStart);
-        }
-
-        // Unreserve org balance reserved during validation
-        mapping(bytes32 => OrgFinancials) storage financials = _getFinancialsStorage();
-        OrgFinancials storage org = financials[orgId];
-        org.spent -= uint128(reservedOrgBalance);
-
-        SolidarityFund storage solidarity = _getSolidarityStorage();
-        GracePeriodConfig storage grace = _getGracePeriodStorage();
-        OrgConfig storage config = _getOrgsStorage()[orgId];
-        bool inGrace = PaymasterGraceLib.isInGracePeriod(config.registeredAt, grace.initialGraceDays);
-
-        // No fee during grace (would be circular — solidarity pays itself)
-        uint256 solidarityFee = inGrace ? 0 : (actualGasCost * uint256(solidarity.feePercentageBps)) / 10000;
-
-        uint256 depositAvailable = org.deposited > org.spent ? org.deposited - org.spent : 0;
-
-        uint256 fallbackFromDeposits;
-        uint256 fallbackFromSolidarity;
-
-        if (depositAvailable >= actualGasCost + solidarityFee) {
-            // Fully funded: charge actualGasCost + fee from deposits, credit fee to solidarity.
-            org.spent += uint128(actualGasCost + solidarityFee);
-            solidarity.balance += uint128(solidarityFee);
-            fallbackFromDeposits = actualGasCost;
-            fallbackFromSolidarity = 0;
-        } else if (depositAvailable > 0) {
-            // Partially funded: deposits cover what they can, solidarity absorbs the rest.
-            fallbackFromDeposits = depositAvailable < actualGasCost ? depositAvailable : actualGasCost;
-            fallbackFromSolidarity = actualGasCost - fallbackFromDeposits;
-            org.spent += uint128(fallbackFromDeposits);
-            (solidarity.balance,) = PaymasterPostOpLib.clampedDeduction(solidarity.balance, fallbackFromSolidarity);
-            org.solidarityUsedThisPeriod += uint128(fallbackFromSolidarity);
-            solidarityFee = 0;
-        } else {
-            // Unfunded: 100% solidarity.
-            (solidarity.balance,) = PaymasterPostOpLib.clampedDeduction(solidarity.balance, actualGasCost);
-            org.solidarityUsedThisPeriod += uint128(actualGasCost);
-            fallbackFromDeposits = 0;
-            fallbackFromSolidarity = actualGasCost;
-        }
-
-        if (solidarityFee > 0) {
-            emit PaymasterHubErrors.SolidarityFeeCollected(orgId, solidarityFee);
-        }
-
-        emit PaymasterHubErrors.OrgSpendingRecorded(orgId, fallbackFromDeposits, fallbackFromSolidarity, solidarityFee);
-    }
+    // NOTE (M-05/L-28/L-30/L-32): the regular-org postOp fallback moved to
+    // PaymasterFinanceLib.postOpFallback (delegatecall) — see the postOp dispatch above.
 
     /**
      * @notice Fallback accounting for solidarity-funded sponsorship when postOp reverts
@@ -939,12 +844,19 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
     }
 
     /// @notice Batch-add rules across orgs. Skips unregistered orgs.
+    /// @dev L-29: enforce equal array lengths (mismatched inputs would silently pair the wrong
+    ///      (target, selector) with an org or panic on OOB) and reject a zero target (which would
+    ///      register a sponsorship rule for address(0)). protocolAdmin==0 (the appended-field
+    ///      default on orgs that never set it) can never authorize because msg.sender is nonzero.
     function adminBatchAddRules(bytes32[] calldata orgIds, address[] calldata targets, bytes4[] calldata selectors)
         external
     {
         MainStorage storage m = _getMainStorage();
         if (msg.sender != m.poaManager && msg.sender != m.protocolAdmin) revert PaymasterHubErrors.NotOperator();
-        for (uint256 i; i < orgIds.length;) {
+        uint256 len = orgIds.length;
+        if (len != targets.length || len != selectors.length) revert PaymasterHubErrors.ArrayLengthMismatch();
+        for (uint256 i; i < len;) {
+            if (targets[i] == address(0)) revert PaymasterHubErrors.ZeroAddress();
             if (_getOrgsStorage()[orgIds[i]].adminHatId != 0) {
                 _getRulesStorage()[orgIds[i]][targets[i]][selectors[i]] = Rule({allowed: true, maxCallGasHint: 0});
             }
@@ -1076,15 +988,42 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
     }
 
     /**
-     * @notice Deposit funds to EntryPoint for gas reimbursement (shared pool)
-     * @dev Any org operator can deposit to shared pool
+     * @notice Deposit funds to the EntryPoint and credit the org's tracked balance (M-12)
+     * @dev Previously this forwarded to `EntryPoint.depositTo` without ever crediting the org,
+     *      so the ETH silently joined the shared pool and could not be withdrawn or matched to
+     *      the org that funded it. It now routes through `_depositForOrg`, so the deposit is
+     *      tracked under `orgId` (increments `deposited`, runs the period-reset logic) and is
+     *      recoverable via `withdrawOrgDeposit`. Any org operator can top up their own org.
      */
     function depositToEntryPoint(bytes32 orgId) external payable onlyOrgOperator(orgId) {
-        address entryPoint = _getMainStorage().entryPoint;
-        IEntryPoint(entryPoint).depositTo{value: msg.value}(address(this));
+        if (msg.value == 0) revert PaymasterHubErrors.ZeroAmount();
+        _depositForOrg(orgId, msg.value);
+    }
 
-        uint256 newDeposit = IEntryPoint(entryPoint).balanceOf(address(this));
-        emit PaymasterHubErrors.DepositIncrease(msg.value, newDeposit);
+    /**
+     * @notice Withdraw an org's unspent deposit back out of the EntryPoint (M-04)
+     * @dev Org-admin gated, bounded by `deposited - spent`, reentrancy-guarded. Delegates to
+     *      PaymasterAdminLib to keep the hub under the EIP-170 size limit. The library updates
+     *      `deposited` before calling `EntryPoint.withdrawTo`, so state is settled before the
+     *      external transfer.
+     * @param orgId The organization whose deposit is being withdrawn
+     * @param to Recipient of the withdrawn ETH
+     * @param amount Amount to withdraw (must not exceed `deposited - spent`)
+     */
+    function withdrawOrgDeposit(bytes32 orgId, address payable to, uint256 amount) external nonReentrant {
+        PaymasterAdminLib.withdrawOrgDeposit(orgId, to, amount);
+    }
+
+    /**
+     * @notice Emergency/solidarity withdraw from the EntryPoint deposit (M-04)
+     * @dev PoaManager-gated, bounded by the solidarity fund balance so it can never touch an
+     *      org's tracked deposit. Reentrancy-guarded. Delegates to PaymasterAdminLib. A future
+     *      governance upgrade can re-gate this to the DAO.
+     * @param to Recipient of the withdrawn ETH
+     * @param amount Amount to withdraw (must not exceed the solidarity balance)
+     */
+    function withdrawSolidarity(address payable to, uint256 amount) external nonReentrant {
+        PaymasterAdminLib.withdrawSolidarity(to, amount);
     }
 
     /**
@@ -1676,28 +1615,19 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
 
         // Reserve maxCost for bundle safety — ensures a second UserOp for the same
         // subject in the same bundle sees the updated usedInEpoch. Adjusted to actual
-        // cost in _updateUsage during postOp.
+        // cost in PaymasterFinanceLib.updateUsageAndFinancials during postOp.
         budget.usedInEpoch += uint128(maxCost);
 
         currentEpochStart = budget.epochStart;
     }
 
-    function _updateUsage(
-        bytes32 orgId,
-        bytes32 subjectKey,
-        uint32 epochStart,
-        uint256 actualGasCost,
-        uint256 reservedMaxCost
-    ) private {
-        mapping(bytes32 => Budget) storage budgets = _getBudgetsStorage()[orgId];
-        Budget storage budget = budgets[subjectKey];
-
-        // Only update if we're still in the same epoch
-        if (budget.epochStart == epochStart) {
-            // Replace reservation (maxCost) with actual cost (actualGasCost <= maxCost)
-            budget.usedInEpoch = PaymasterPostOpLib.adjustBudget(budget.usedInEpoch, reservedMaxCost, actualGasCost);
-            emit PaymasterHubErrors.UsageIncreased(orgId, subjectKey, actualGasCost, budget.usedInEpoch, epochStart);
-        }
-        // If epoch rolled since validation, reservation was already cleared by epoch reset
-    }
+    // NOTE (M-05 / zk-email merge): all three postOp accounting helpers moved into delegatecall
+    // libraries for EIP-170 headroom, and the merged postOp dispatches to them directly:
+    //   - regular org op (and SUBJECT_TYPE_CLAIM 0x05) -> PaymasterFinanceLib.updateUsageAndFinancials
+    //     (per-subject budget adjust + org financial split + M-05 solidarity unreservation)
+    //   - POA onboarding  -> PaymasterSponsorshipLib.updateOnboardingUsage
+    //   - free org deploy -> PaymasterSponsorshipLib.updateOrgDeployUsage
+    // The former hub-local _updateUsage / _updateOnboardingUsage / _updateOrgDeployUsage now live in
+    // those libraries; keeping hub copies would be dead code (and re-adding a second accounting call
+    // on any path would double-count spend).
 }

@@ -3,20 +3,23 @@ pragma solidity ^0.8.30;
 
 import {HybridVoting} from "../HybridVoting.sol";
 
+/// @title HybridVotingLens
+/// @notice Read-only aggregation helpers over a HybridVoting instance for off-chain callers.
 contract HybridVotingLens {
+    /// @notice Number of creator hats configured on the voting contract.
     function getCreatorHatCount(HybridVoting voting) external view returns (uint256) {
         uint256[] memory hats = voting.creatorHats();
         return hats.length;
     }
 
+    /// @notice Unix timestamp at which voting on proposal `id` closes.
+    /// @dev L-05: now backed by HybridVoting.proposalEndTimestamp (was a dead getter returning 0).
+    ///      Reverts (via the exists modifier on the underlying getter) for out-of-range ids.
     function getProposalEndTimestamp(HybridVoting voting, uint256 id) external view returns (uint64) {
-        HybridVoting.ClassConfig[] memory classes = voting.getProposalClasses(id);
-        if (classes.length == 0) revert("Invalid proposal");
-        // Note: End timestamp would need to be exposed via a new getter in HybridVoting
-        // For now, this demonstrates the pattern
-        return 0;
+        return voting.proposalEndTimestamp(id);
     }
 
+    /// @notice For each hat in `hatIds`, whether it is allowed to vote on proposal `proposalId`.
     function getAllProposalHatIds(HybridVoting voting, uint256 proposalId, uint256[] calldata hatIds)
         external
         view
@@ -29,9 +32,10 @@ contract HybridVotingLens {
         return allowed;
     }
 
+    /// @notice True while proposal `id` is still open for voting (now < endTimestamp).
+    /// @dev L-05: real active check against the proposal end timestamp (was a tautology that
+    ///      always returned true). Reverts for out-of-range ids via the underlying getter.
     function isProposalActive(HybridVoting voting, uint256 id) external view returns (bool) {
-        // Would need endTimestamp exposed from HybridVoting
-        // This is a placeholder showing the lens pattern
-        return voting.pollRestricted(id) || !voting.pollRestricted(id);
+        return block.timestamp < voting.proposalEndTimestamp(id);
     }
 }

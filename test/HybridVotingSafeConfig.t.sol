@@ -56,7 +56,9 @@ contract HybridVotingSafeConfigTest is Test {
         hats.mintHat(CREATOR_HAT, alice);
 
         // Deploy the real (soulbound) ParticipationToken; narrow mint authority to `taskManager`.
+        // C-01 fix: setTaskManager is executor-only — the token's executor is `exec`.
         pt = _deployPT();
+        vm.prank(address(exec));
         pt.setTaskManager(taskManager);
         vm.startPrank(taskManager);
         pt.mint(alice, 200 ether);
@@ -101,7 +103,7 @@ contract HybridVotingSafeConfigTest is Test {
             hatIds: votingHats
         });
         bytes memory initData = abi.encodeCall(
-            HybridVoting.initialize, (address(hats), address(exec), creatorHats, targets, uint8(50), classes)
+            HybridVoting.initialize, (address(hats), address(exec), creatorHats, targets, uint8(50), uint32(0), classes)
         );
         UpgradeableBeacon hvBeacon = new UpgradeableBeacon(address(new HybridVoting()), owner);
         return HybridVoting(payable(address(new BeaconProxy(address(hvBeacon), initData))));

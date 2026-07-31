@@ -592,10 +592,13 @@ contract PaymasterGracePeriodTest is Test {
 
         // Funded org: deposits should be charged (spent increases from pre-validation baseline)
         assertGt(finAfter.spent, finStart.spent, "Deposits should be charged in fallback");
-        // Solidarity should NOT be counted (funded org, solidarity didn't pay)
+        // Solidarity should NOT be counted (funded org, solidarity didn't pay the gas)
         assertEq(finAfter.solidarityUsedThisPeriod, 0, "solidarityUsedThisPeriod should stay 0 for funded org");
-        // Solidarity balance unchanged (no solidarity used)
-        assertEq(solidarityAfter, solidarityBefore, "Solidarity balance unchanged for funded fallback");
+        // L-28: a FUNDED grace org self-funds, so the 1% solidarity fee is not circular and MUST
+        // be collected in the fallback path too (only genuinely unfunded grace orgs skip the fee).
+        // Solidarity balance therefore increases by exactly the fee on the actual gas cost.
+        uint256 expectedFee = (0.002 ether * uint256(_getSolidarity().feePercentageBps)) / 10000;
+        assertEq(solidarityAfter, solidarityBefore + expectedFee, "funded fallback should credit the 1% fee (L-28)");
     }
 
     function testPostOpFallback_UnfundedGraceOrg_NoPhantomDebt() public {

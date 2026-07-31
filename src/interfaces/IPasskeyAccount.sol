@@ -53,12 +53,26 @@ interface IPasskeyAccount {
     event CredentialStatusChanged(bytes32 indexed credentialId, bool active);
 
     /// @notice Emitted when guardian is updated
+    /// @dev Retained for the legacy single-guardian field (now inert). New multi-guardian
+    ///      changes emit GuardianAdded / GuardianRemoved instead.
     event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
+
+    /// @notice Emitted when a guardian is added to the M-of-N guardian set
+    event GuardianAdded(address indexed guardian);
+
+    /// @notice Emitted when a guardian is removed from the M-of-N guardian set
+    event GuardianRemoved(address indexed guardian);
+
+    /// @notice Emitted when the recovery threshold (M in M-of-N) is updated
+    event RecoveryThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
+
+    /// @notice Emitted when a guardian approves a pending recovery proposal
+    event RecoveryApproved(bytes32 indexed proposalId, address indexed guardian, uint256 approvals);
 
     /// @notice Emitted when recovery delay is updated
     event RecoveryDelayUpdated(uint48 oldDelay, uint48 newDelay);
 
-    /// @notice Emitted when recovery is initiated
+    /// @notice Emitted when recovery is initiated (quorum reached, request staged)
     event RecoveryInitiated(
         bytes32 indexed recoveryId, bytes32 credentialId, address indexed initiator, uint48 executeAfter
     );
@@ -88,6 +102,27 @@ interface IPasskeyAccount {
 
     /// @notice Thrown when caller is not the guardian or account
     error OnlyGuardianOrSelf();
+
+    /// @notice Thrown when the caller is not a registered recovery guardian
+    error NotAGuardian();
+
+    /// @notice Thrown when the guardian address is already registered
+    error GuardianAlreadyExists();
+
+    /// @notice Thrown when the guardian address is not registered
+    error GuardianDoesNotExist();
+
+    /// @notice Thrown when a guardian tries to approve the same recovery twice
+    error AlreadyApproved();
+
+    /// @notice Thrown when the requested recovery threshold exceeds the guardian count
+    error ThresholdExceedsGuardianCount();
+
+    /// @notice Thrown when recovery is attempted while it is disabled (no guardians / threshold 0)
+    error RecoveryDisabled();
+
+    /// @notice Thrown when the recovery public key is not a valid on-curve P-256 point
+    error InvalidPublicKey();
 
     /// @notice Thrown when credential already exists
     error CredentialExists();
@@ -141,10 +176,45 @@ interface IPasskeyAccount {
     function getCredentialIds() external view returns (bytes32[] memory credentialIds);
 
     /**
-     * @notice Get the guardian address
-     * @return guardian The guardian address
+     * @notice Get the legacy single-guardian address (inert; retained for storage compatibility)
+     * @return guardian The legacy guardian address
+     * @dev This address no longer grants any recovery power. Use the M-of-N guardian set instead.
      */
     function guardian() external view returns (address guardian);
+
+    /**
+     * @notice Get the M-of-N recovery guardian set
+     * @return guardians The list of registered recovery guardians
+     */
+    function getGuardians() external view returns (address[] memory guardians);
+
+    /**
+     * @notice Check whether an address is a registered recovery guardian
+     * @param account The address to check
+     * @return True if the address is a guardian
+     */
+    function isGuardian(address account) external view returns (bool);
+
+    /**
+     * @notice Get the current recovery threshold (M in M-of-N)
+     * @return threshold Number of distinct guardian approvals required to stage a recovery
+     */
+    function recoveryThreshold() external view returns (uint256 threshold);
+
+    /**
+     * @notice Get the number of approvals a recovery proposal currently has
+     * @param proposalId keccak256(credentialId, pubKeyX, pubKeyY)
+     * @return count Number of distinct guardian approvals collected so far
+     */
+    function recoveryApprovalCount(bytes32 proposalId) external view returns (uint256 count);
+
+    /**
+     * @notice Check whether a specific guardian has approved a recovery proposal
+     * @param proposalId keccak256(credentialId, pubKeyX, pubKeyY)
+     * @param guardianAddr The guardian address
+     * @return True if that guardian has already approved the proposal
+     */
+    function hasApprovedRecovery(bytes32 proposalId, address guardianAddr) external view returns (bool);
 
     /**
      * @notice Get the recovery delay
@@ -193,11 +263,27 @@ interface IPasskeyAccount {
     /*──────────────────────────── Guardian Management ─────────────────*/
 
     /**
-     * @notice Update the guardian address
-     * @param newGuardian The new guardian address
-     * @dev Only callable via UserOp
+     * @notice Add a recovery guardian to the M-of-N guardian set
+     * @param newGuardian The guardian address to add
+     * @dev Only callable via UserOp (owner self-call). Reverts on zero/duplicate.
      */
-    function setGuardian(address newGuardian) external;
+    function addGuardian(address newGuardian) external;
+
+    /**
+     * @notice Remove a recovery guardian from the M-of-N guardian set
+     * @param oldGuardian The guardian address to remove
+     * @dev Only callable via UserOp. If the removal drops the guardian count below the
+     *      current threshold, the threshold is lowered to the new guardian count.
+     */
+    function removeGuardian(address oldGuardian) external;
+
+    /**
+     * @notice Set the recovery threshold (M in M-of-N)
+     * @param newThreshold Number of distinct guardian approvals required to stage a recovery
+     * @dev Only callable via UserOp. Must satisfy newThreshold <= guardian count.
+     *      A threshold of 0 disables recovery entirely.
+     */
+    function setRecoveryThreshold(uint256 newThreshold) external;
 
     /**
      * @notice Update the recovery delay
@@ -209,13 +295,28 @@ interface IPasskeyAccount {
     /*──────────────────────────── Recovery Functions ──────────────────*/
 
     /**
-     * @notice Initiate account recovery with a new credential
+     * @notice Approve (and, on reaching quorum, stage) an account recovery with a new credential
      * @param credentialId ID for the new credential
      * @param pubKeyX New credential public key X
      * @param pubKeyY New credential public key Y
-     * @dev Only callable by guardian, starts recovery delay timer
+     * @dev Only callable by a registered guardian. Each distinct guardian approval counts once.
+     *      The recovery is only staged (delay timer started) once `recoveryThreshold` distinct
+     *      guardians have approved the same (credentialId, pubKeyX, pubKeyY) proposal. The new
+     *      public key must be a valid on-curve P-256 point.
      */
-    function initiateRecovery(bytes32 credentialId, bytes32 pubKeyX, bytes32 pubKeyY) external;
+    function approveRecovery(bytes32 credentialId, bytes32 pubKeyX, bytes32 pubKeyY) external;
+
+    /**
+     * @notice Compute the proposal id used to accumulate guardian approvals
+     * @param credentialId ID for the new credential
+     * @param pubKeyX New credential public key X
+     * @param pubKeyY New credential public key Y
+     * @return proposalId keccak256(credentialId, pubKeyX, pubKeyY)
+     */
+    function computeRecoveryProposalId(bytes32 credentialId, bytes32 pubKeyX, bytes32 pubKeyY)
+        external
+        pure
+        returns (bytes32 proposalId);
 
     /**
      * @notice Complete a pending recovery

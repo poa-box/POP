@@ -170,6 +170,7 @@ Useful root entities: `Organization`, `TaskManager`, `Project`, `Task`, `User`, 
 
 ## References
 
+- `docs/audit/AUDIT_STATUS.md` — 2026-07 security audit: per-finding remediation status (fixed/accepted/rejected/deferred/open) + deployed versions. **Read this before re-auditing, re-checking a finding, or verifying deployments** — and always compare bytecode against the `production` profile build, never the default profile (optimizer OFF → ~2× size → false "stale deploy" alarms).
 - `docs/POP_OVERVIEW.md` — full protocol architecture and use cases
 - `docs/HYBRID_VOTING.md` — multi-class voting system
 - `docs/TASK_MANAGER.md` — project/task/application lifecycle

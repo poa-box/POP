@@ -13,15 +13,11 @@ import {ModulesFactory} from "./factories/ModulesFactory.sol";
 import {RoleConfigStructs} from "./libs/RoleConfigStructs.sol";
 
 /*────────────────────── Module‑specific hooks ──────────────────────────*/
-interface IParticipationToken {
-    function setTaskManager(address) external;
-    function setEducationHub(address) external;
-}
-
 interface IExecutorAdmin {
     function setCaller(address) external;
     function setHatMinterAuthorization(address minter, bool authorized) external;
     function acceptBeaconOwnership(address beacon) external;
+    function configureParticipationToken(address token, address taskManager, address educationHub) external;
     function configureVouching(
         address eligibilityModule,
         uint256 hatId,
@@ -358,6 +354,10 @@ contract OrgDeployer is Initializable {
         BootstrapConfig bootstrap; // Optional: initial projects and tasks to create
         PaymasterConfig paymasterConfig; // Optional: paymaster configuration (funding via msg.value)
         TaskManagerPermConfig taskManagerPerms; // Optional: org-wide TaskManager ROLE_PERM grants
+        uint32 hybridQuorum; // Min voter count for HybridVoting proposals (0 = disabled)
+        uint32 ddQuorum; // Min voter count for DirectDemocracyVoting polls (0 = disabled)
+        string tokenName; // ParticipationToken name (empty = "<orgName> Token")
+        string tokenSymbol; // ParticipationToken symbol (empty = "PT")
     }
 
     /*════════════════  VALIDATION  ════════════════*/
@@ -517,7 +517,9 @@ contract OrgDeployer is Initializable {
                 roleHatIds: gov.roleHatIds,
                 autoUpgrade: params.autoUpgrade,
                 roleAssignments: accessRoles,
-                passkeyConfig: passkeyConfig
+                passkeyConfig: passkeyConfig,
+                tokenName: params.tokenName,
+                tokenSymbol: params.tokenSymbol
             });
 
             access = l.accessFactory.deployAccess(accessParams);
@@ -569,11 +571,18 @@ contract OrgDeployer is Initializable {
         /* 7b. Register and configure org with PaymasterHub (after all modules deployed) */
         _configurePaymaster(l, params, result, gov.topHatId, gov.roleHatIds);
 
-        /* 8. Wire up cross-module connections */
-        IParticipationToken(result.participationToken).setTaskManager(result.taskManager);
-        if (params.educationHubConfig.enabled) {
-            IParticipationToken(result.participationToken).setEducationHub(result.educationHub);
-        }
+        /* 8. Wire up cross-module connections.
+              C-01 fix: the token's setTaskManager/setEducationHub are now executor-only.
+              Route the wiring through the Executor (whose owner is still this OrgDeployer at
+              this point — ownership is renounced in step 11) so msg.sender to the token is the
+              executor and the new gate passes. educationHub == 0 when disabled → skipped inside
+              configureParticipationToken. */
+        IExecutorAdmin(result.executor)
+            .configureParticipationToken(
+                result.participationToken,
+                result.taskManager,
+                params.educationHubConfig.enabled ? result.educationHub : address(0)
+            );
 
         /* 8.5a. Bootstrap org-wide TaskManager ROLE_PERM grants (EDIT_META/EDIT_FULL/BUDGET/etc).
                  Runs BEFORE project bootstrap so per-project hat masks can override the global
@@ -807,6 +816,8 @@ contract OrgDeployer is Initializable {
         votingParams.ddCreatorRolesBitmap = params.roleAssignments.ddCreatorRolesBitmap;
         votingParams.ddInitialTargets = params.ddInitialTargets;
         votingParams.roles = params.roles;
+        votingParams.hybridQuorum = params.hybridQuorum;
+        votingParams.ddQuorum = params.ddQuorum;
 
         return l.governanceFactory.deployVoting(votingParams, executor, roleHatIds);
     }
@@ -946,7 +957,9 @@ contract OrgDeployer is Initializable {
         if (hasConfig) {
             // Build rules for auto-whitelisting deployed contracts
             (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints) = pmCfg.autoWhitelistContracts
-                ? _buildDefaultPaymasterRules(result, params.educationHubConfig.enabled, params.registryAddr)
+                ? _buildDefaultPaymasterRules(
+                    result, params.educationHubConfig.enabled, params.registryAddr, address(l.orgRegistry)
+                )
                 : (new address[](0), new bytes4[](0), new bool[](0), new uint32[](0));
 
             // Build per-role-hat budgets if configured (+ the zk-email CLAIM budget when the module deploys)
@@ -984,7 +997,17 @@ contract OrgDeployer is Initializable {
      * @dev Whitelists common user-facing functions on QuickJoin, TaskManager, Voting, etc.
      *      Split into per-contract helpers to stay under stack-depth limits with via_ir.
      */
-    function _buildDefaultPaymasterRules(DeploymentResult memory result, bool educationEnabled, address registryAddr)
+    /// @dev `registryAddr` is the UniversalAccountRegistry (holds `setProfileMetadata`),
+    ///      `orgRegistryAddr` is the OrgRegistry (holds `updateOrgMetaAsAdmin`). These are
+    ///      two distinct contracts — L-53 fix: `updateOrgMetaAsAdmin` was previously
+    ///      registered against `registryAddr`, so gasless org-metadata edits never worked
+    ///      (the paymaster rule pointed at a contract that doesn't implement the selector).
+    function _buildDefaultPaymasterRules(
+        DeploymentResult memory result,
+        bool educationEnabled,
+        address registryAddr,
+        address orgRegistryAddr
+    )
         internal
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
@@ -1008,10 +1031,12 @@ contract OrgDeployer is Initializable {
         i = _appendEligibilityRules(targets, selectors, result.eligibilityModule, i);
         i = _appendParticipationTokenRules(targets, selectors, result.participationToken, i);
 
+        // setProfileMetadata lives on UniversalAccountRegistry (registryAddr).
         targets[i] = registryAddr;
         selectors[i] = bytes4(keccak256("setProfileMetadata(bytes32)"));
         i++;
-        targets[i] = registryAddr;
+        // updateOrgMetaAsAdmin lives on OrgRegistry (orgRegistryAddr), NOT the account registry.
+        targets[i] = orgRegistryAddr;
         selectors[i] = bytes4(keccak256("updateOrgMetaAsAdmin(bytes32,bytes,bytes32)"));
         i++;
 

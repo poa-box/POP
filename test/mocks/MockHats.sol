@@ -202,7 +202,16 @@ contract MockHats is IHats {
         }
     }
 
+    bool public revertOnEligible;
+
+    /// @dev Simulate a missing / non-conforming eligibility module so callers can exercise
+    ///      their fail-closed handling of a reverting `isEligible` probe.
+    function setRevertOnEligible(bool _v) external {
+        revertOnEligible = _v;
+    }
+
     function isEligible(address _wearer, uint256 _hatId) external view returns (bool eligible) {
+        if (revertOnEligible) revert("MockHats: eligibility probe reverted");
         return wearers[_wearer][_hatId] || eligibles[_wearer][_hatId];
     }
 
