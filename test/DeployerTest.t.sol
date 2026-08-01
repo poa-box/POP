@@ -5917,6 +5917,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("claimTask(uint256)")));
         assertTrue(rule.allowed, "TaskManager claimTask should be whitelisted");
 
+        // Check TaskManager unclaimTask(uint256) is whitelisted (v7 claim release)
+        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("unclaimTask(uint256)")));
+        assertTrue(rule.allowed, "TaskManager unclaimTask should be whitelisted");
+
         // Check TaskManager setFolders is whitelisted (v4 bootstrap)
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)")));
         assertTrue(rule.allowed, "TaskManager setFolders should be whitelisted (v4 bootstrap)");
@@ -6273,6 +6277,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("claimTask(uint256)")));
         assertTrue(rule.allowed, "TaskManager should be whitelisted");
 
+        // v7 claim release — asserted on this branch too: educationEnabled=false is a
+        // distinct rule-array sizing path from the education-enabled test above.
+        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("unclaimTask(uint256)")));
+        assertTrue(rule.allowed, "TaskManager unclaimTask should be whitelisted without education");
+
         rule = paymasterHub.getRule(orgId, result.hybridVoting, bytes4(keccak256("vote(uint256,uint8[],uint8[])")));
         assertTrue(rule.allowed, "HybridVoting should be whitelisted");
 
@@ -6394,7 +6403,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "registerAndQuickJoinWithPasskey selector mismatch"
         );
 
-        // ── TaskManager (12) ──
+        // ── TaskManager (13) ──
         assertEq(
             bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)")),
             TaskManager.createTask.selector,
@@ -6406,6 +6415,9 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             "createTasksBatch selector mismatch"
         );
         assertEq(bytes4(keccak256("claimTask(uint256)")), TaskManager.claimTask.selector, "claimTask selector mismatch");
+        assertEq(
+            bytes4(keccak256("unclaimTask(uint256)")), TaskManager.unclaimTask.selector, "unclaimTask selector mismatch"
+        );
         assertEq(
             bytes4(keccak256("submitTask(uint256,bytes32)")),
             TaskManager.submitTask.selector,

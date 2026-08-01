@@ -1012,8 +1012,8 @@ contract OrgDeployer is Initializable {
         pure
         returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
     {
-        // Count: QuickJoin(6) + TaskManager(16) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 4)
-        uint256 count = 43;
+        // Count: QuickJoin(6) + TaskManager(17) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 4)
+        uint256 count = 44;
         if (educationEnabled) count += 4;
         bool zkEmailEnabled = result.zkEmailInvites != address(0);
         if (zkEmailEnabled) count += 4;
@@ -1156,6 +1156,10 @@ contract OrgDeployer is Initializable {
         i++;
         targets[i] = tm;
         selectors[i] = bytes4(keccak256("claimTask(uint256)"));
+        i++;
+        // TaskManager v7: voluntary claim release (and ASSIGN release of an expired claim).
+        targets[i] = tm;
+        selectors[i] = bytes4(keccak256("unclaimTask(uint256)"));
         i++;
         targets[i] = tm;
         selectors[i] = bytes4(keccak256("submitTask(uint256,bytes32)"));

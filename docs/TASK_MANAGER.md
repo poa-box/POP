@@ -185,6 +185,9 @@ struct Task {
 
 ```
 UNCLAIMED → CLAIMED → SUBMITTED → COMPLETED
+    ↑         │  ↑         │
+    └─────────┘  └─────────┘
+     unclaimTask   rejectTask
     │
     └──→ CANCELLED
 ```
@@ -403,16 +406,16 @@ setConfig(ConfigKey.PROJECT_MANAGER, abi.encode(projectId, oldManager, false)); 
      └──────────────┴──────────────┘                              │
                     │                                             │
                     ▼                                             │
-            ┌───────────────┐                                     │
-            │    CLAIMED    │                                     │
-            └───────┬───────┘                                     │
-                    │                                             │
-                    ▼                                             │
-               submitTask                                         │
-                    │                                             │
-                    ▼                                             │
-            ┌───────────────┐                                     │
-            │   SUBMITTED   │                                     │
+            ┌───────────────┐   unclaimTask                       │
+            │    CLAIMED    │──────────────► back to UNCLAIMED    │
+            └───────┬───────┘   (claimer, or ASSIGN once expired) │
+                    │              ▲                              │
+                    ▼              │ rejectTask                   │
+               submitTask          │ (REVIEW)                     │
+                    │              │                              │
+                    ▼              │                              │
+            ┌───────────────┐      │                              │
+            │   SUBMITTED   │──────┘                              │
             └───────┬───────┘                                     │
                     │                                             │
                     ▼                                             │
@@ -437,9 +440,12 @@ setConfig(ConfigKey.PROJECT_MANAGER, abi.encode(projectId, oldManager, false)); 
 | `UNCLAIMED` | `updateTask` | CREATE permission |
 | `UNCLAIMED` | `cancelTask` | CREATE permission |
 | `CLAIMED` | `submitTask` | Only the claimer |
+| `CLAIMED` | `unclaimTask` — release back to the pool | Only the claimer |
 | `CLAIMED` (claim expired) | `claimTask` / `assignTask` / `approveApplication` — takeover | CLAIM / ASSIGN / ASSIGN |
+| `CLAIMED` (claim expired) | `unclaimTask` — release back to the pool | ASSIGN permission |
 | `CLAIMED` (claim expired, requiresApplication) | `applyForTask` | CLAIM permission |
 | `SUBMITTED` | `completeTask` | REVIEW permission |
+| `SUBMITTED` | `rejectTask` — back to `CLAIMED` for rework | REVIEW permission |
 
 ---
 
@@ -482,6 +488,38 @@ Deadlines never block work — they only remove claim *protection*:
 - Past the `absoluteDeadline`, claims (and takeovers) are still allowed — they are
   simply born unprotected. Reviewers keep full control via `completeTask`.
 
+### Releasing a claim (`unclaimTask`)
+
+A takeover hands the task to a *named* replacement. `unclaimTask` is the same move with
+no replacement: status returns to `UNCLAIMED`, `claimer` is zeroed, `claimDeadline` is
+cleared (`absoluteDeadline` / `completionWindow` are task config and survive), and the
+task is open to anyone eligible again.
+
+- **The claimer may always release**, expired or not, with **no permission check at all**.
+  This is deliberate: `assignTask` / `createAndAssignTask` never check the assignee's
+  mask, and a hat can be revoked after a claim — so gating release on `CLAIM` would trap
+  exactly the people who most need out.
+- **An `ASSIGN` holder (or project manager / executor) may release an expired claim.**
+  Same gate `assignTask`'s takeover uses, so this grants no new authority: whoever can
+  release could already reassign to anyone. A live, unexpired claim stays protected from
+  everyone but its own claimer.
+- **`SUBMITTED` is excluded.** Delivered work must be reviewed first — this is what keeps
+  `completeTask`'s `mint(claimer, …)` from ever seeing `address(0)`, which would brick the
+  task (un-completable, un-submittable, un-cancellable, bounty reserved forever). The route
+  out of `SUBMITTED` is `rejectTask` → `CLAIMED` → `unclaimTask`.
+- **Budgets are untouched.** `spent` tracks what a non-cancelled task has committed, not who
+  holds it. Releasing makes the task `cancelTask`-able again, and `cancelTask` remains the
+  single place a reservation is refunded — so a claim/release cycle can never double-refund.
+- **Applications survive.** Hashes in `taskApplications` are never deleted, so the original
+  pool (including the releaser) stays approvable exactly as after a takeover. The applicant
+  *array* was already emptied at approval time; index `TaskApplicationSubmitted` off-chain
+  for the true pool.
+- **A claimer can refresh their own window** by releasing and immediately re-claiming, which
+  pre-empts a `completionWindow` takeover. This is accepted: v6 already lets an *expired*
+  claimer re-claim to refresh, and the remedy is unchanged — set an `absoluteDeadline` (or
+  push one into the past via `updateTask`), which no amount of re-claiming can refresh.
+  Application-gated tasks are immune: their releaser needs a fresh approval to get back in.
+
 ### Editing deadlines
 
 `updateTask` carries both knobs under its existing permission gates (executor / PM /
@@ -494,7 +532,10 @@ Deadlines never block work — they only remove claim *protection*:
 - A **past `absoluteDeadline` is deliberately accepted on update** (create paths
   revert `InvalidDeadline` for non-future values). This is the admin lever that opens
   an abandoned CLAIMED task to takeover — `cancelTask` is UNCLAIMED-only, so no other
-  remedy exists, including for tasks claimed before v6.
+  remedy exists, including for tasks claimed before v6. A task with **both** deadline
+  fields zero never expires, so this two-step (`updateTask` with a past absolute
+  deadline, then `unclaimTask` or a takeover) is the only way to unstick it. Set a
+  `completionWindow` at creation to avoid needing it.
 
 ### Events (indexer contract)
 
@@ -503,10 +544,12 @@ Deadlines never block work — they only remove claim *protection*:
 | `TaskDeadlinesSet(uint256 indexed id, uint48 absoluteDeadline, uint32 completionWindow)` | At create only when at least one value is non-zero; on `updateTask` whenever either value changes. |
 | `TaskClaimDeadlineSet(uint256 indexed id, uint48 claimDeadline)` | Only when the stored value changes (claim/assign/approve start, reject reset, window-edit adjustment, clear). |
 | `TaskClaimExpired(uint256 indexed id, address indexed previousClaimer, address indexed newClaimer)` | On takeover, always before the lifecycle event (`TaskClaimed` / `TaskAssigned` / `TaskApplicationApproved`) in the same transaction. |
+| `TaskUnclaimed(uint256 indexed id, address indexed previousClaimer, address indexed caller)` | On `unclaimTask`. `caller == previousClaimer` ⇒ voluntary self-release; otherwise an ASSIGN holder released an expired claim. Never accompanied by `TaskClaimExpired` — no new claimer is named. |
 
 Intra-tx ordering guarantees: `TaskCreated` → `TaskDeadlinesSet?` →
 `TaskClaimDeadlineSet?` (create paths); `TaskClaimExpired` → lifecycle event →
-`TaskClaimDeadlineSet?` (takeovers).
+`TaskClaimDeadlineSet?` (takeovers); `TaskUnclaimed` → `TaskClaimDeadlineSet(id, 0)?`
+(release).
 
 ---
 
@@ -801,10 +844,12 @@ struct Layout {
 | `createTask` | Create new task in project | CREATE permission for project |
 | `updateTask` | Modify unclaimed task details | CREATE permission for project |
 | `cancelTask` | Cancel unclaimed task, reclaim budget | CREATE permission for project |
-| `claimTask` | Self-assign open task | CLAIM permission for project |
+| `claimTask` | Self-assign open task (or take over an expired claim) | CLAIM permission for project |
 | `assignTask` | Assign task to specific address | ASSIGN permission for project |
+| `unclaimTask` | Release a claimed task back to the pool | Task claimer always; ASSIGN once the claim has expired |
 | `submitTask` | Submit completed work | Task claimer only |
 | `completeTask` | Approve submission, trigger payout | REVIEW permission for project |
+| `rejectTask` | Send a submission back for rework | REVIEW permission for project |
 | `createAndAssignTask` | Create and assign atomically | CREATE + ASSIGN permissions |
 
 #### Application System
@@ -842,9 +887,16 @@ event TaskUpdated(uint256 indexed id, uint256 payout, address bountyToken,
                   uint256 bountyPayout, bytes title, bytes32 metadataHash);
 event TaskClaimed(uint256 indexed id, address indexed claimer);
 event TaskAssigned(uint256 indexed id, address indexed assignee, address indexed assigner);
+event TaskUnclaimed(uint256 indexed id, address indexed previousClaimer, address indexed caller);
 event TaskSubmitted(uint256 indexed id, bytes32 submissionHash);
 event TaskCompleted(uint256 indexed id, address indexed completer);
 event TaskCancelled(uint256 indexed id, address indexed canceller);
+event TaskRejected(uint256 indexed id, address indexed rejector, bytes32 rejectionHash);
+
+// Deadlines & takeover (v6)
+event TaskDeadlinesSet(uint256 indexed id, uint48 absoluteDeadline, uint32 completionWindow);
+event TaskClaimDeadlineSet(uint256 indexed id, uint48 claimDeadline);
+event TaskClaimExpired(uint256 indexed id, address indexed previousClaimer, address indexed newClaimer);
 
 // Application system
 event TaskApplicationSubmitted(uint256 indexed id, address indexed applicant, bytes32 applicationHash);
@@ -860,9 +912,9 @@ event ExecutorUpdated(address newExecutor);
 | Error | Cause |
 |-------|-------|
 | `NotFound` | Task or project doesn't exist |
-| `BadStatus` | Invalid operation for current task status |
+| `BadStatus` | Invalid operation for current task status (also: releasing a claim that is still protected) |
 | `NotCreator` | Caller lacks creator hat or executor role |
-| `NotClaimer` | Only task claimer can submit |
+| `NotClaimer` | Caller is not the task's current claimer |
 | `NotExecutor` | Only executor can call this config function |
 | `Unauthorized` | Caller lacks required permission |
 | `NotApplicant` | Address hasn't applied for this task |
