@@ -256,6 +256,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
     /// @dev Always followed in the same tx by the lifecycle event recording the new claim
     ///      (`TaskClaimed`, `TaskAssigned`, or `TaskApplicationApproved`).
     event TaskClaimExpired(uint256 indexed id, address indexed previousClaimer, address indexed newClaimer);
+    /// @notice A CLAIMED task was released back to the pool; `previousClaimer` is cleared.
+    /// @dev `caller == previousClaimer` is a self-release; otherwise an ASSIGN holder released an
+    ///      expired claim. Followed by `TaskClaimDeadlineSet(id, 0)` if a window was running.
+    event TaskUnclaimed(uint256 indexed id, address indexed previousClaimer, address indexed caller);
     /// @notice The executor address was set or changed.
     event ExecutorUpdated(address newExecutor);
 
@@ -810,6 +814,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
      *      claim proceeds as normal with a fresh completion window. The expired claimer may
      *      re-claim their own task to refresh the window. SUBMITTED tasks are never
      *      takeover-able: delivered work must be reviewed (completed or rejected) first.
+     *
+     *      Giving a claim back voluntarily (no replacement claimer) is {unclaimTask}.
      * @param id Task ID.
      */
     function claimTask(uint256 id) external {
@@ -858,6 +864,40 @@ contract TaskManager is Initializable, ContextUpgradeable {
         t.claimer = assignee;
         emit TaskAssigned(id, assignee, _msgSender());
         _startClaimWindow(id, t);
+    }
+
+    /**
+     * @notice Release a CLAIMED task back to the pool: status returns to UNCLAIMED with no claimer.
+     * @dev Permission: the claimer may always release (no mask check — an assignee never needs
+     *      CLAIM, and hats get revoked mid-claim, so gating it would trap the very people this
+     *      frees). Anyone else needs ASSIGN on the project (PM / executor bypass included) AND an
+     *      expired claim — {assignTask}'s takeover gate with no new claimer named, so it grants no
+     *      authority that did not already exist. Deadline-less tasks never expire; unstick those
+     *      the documented way (`updateTask` with a past `absoluteDeadline`, then this).
+     *
+     *      CLAIMED only. SUBMITTED would let `completeTask` mint to `address(0)` (PT reverts),
+     *      bricking the task — use `rejectTask` first. Budgets, application hashes and the
+     *      applicant list are untouched: `spent` tracks task existence, and `cancelTask` (now
+     *      reachable again) stays the only refund path. Note a claimer can release and re-claim to
+     *      refresh their window; `absoluteDeadline` is the knob no re-claim can reset.
+     * @param id Task ID.
+     */
+    function unclaimTask(uint256 id) external {
+        Layout storage l = _layout();
+        Task storage t = _task(l, id);
+        if (t.status != Status.CLAIMED) revert BadStatus();
+
+        address prev = t.claimer;
+        address s = _msgSender();
+        if (s != prev) {
+            _requireCanAssign(t.projectId);
+            if (!_claimExpired(t)) revert BadStatus();
+        }
+
+        t.status = Status.UNCLAIMED;
+        t.claimer = address(0);
+        emit TaskUnclaimed(id, prev, s);
+        _clearClaimWindow(id, t);
     }
 
     /**
@@ -934,7 +974,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
 
     /**
      * @notice Cancel an UNCLAIMED task and roll back its PT/bounty budget reservations.
-     * @dev Permission: CREATE on the task's project. Pending applications are cleared.
+     * @dev Permission: CREATE on the task's project. The applicant list is cleared. Reachable
+     *      for a task that was previously claimed once it has been released via {unclaimTask} —
+     *      the reservation was never refunded while it was held, so this stays the one and only
+     *      place a task's budget is given back.
      * @param id Task ID.
      */
     function cancelTask(uint256 id) external {
@@ -958,7 +1001,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
         t.status = Status.CANCELLED;
         t.claimer = address(0);
 
-        // Clear all applications - zero out the mapping and delete applicants array
+        // Drop the applicant list. The per-applicant hashes in `taskApplications` are left in
+        // place (they are never deleted anywhere) — the task is terminal, so nothing reads them.
         delete l.taskApplicants[id];
 
         emit TaskCancelled(id, _msgSender());
@@ -1198,6 +1242,19 @@ contract TaskManager is Initializable, ContextUpgradeable {
         if (newClaimDeadline != t.claimDeadline) {
             t.claimDeadline = newClaimDeadline;
             emit TaskClaimDeadlineSet(id, newClaimDeadline);
+        }
+    }
+
+    /**
+     * @dev Clear the per-claim window when a task returns to the pool ({unclaimTask}), emit-on-
+     *      change like {_startClaimWindow}. Not that helper: it would set `now + completionWindow`
+     *      on a claimer-less task. Task-level deadline config is untouched and re-derived on the
+     *      next claim.
+     */
+    function _clearClaimWindow(uint256 id, Task storage t) internal {
+        if (t.claimDeadline != 0) {
+            t.claimDeadline = 0;
+            emit TaskClaimDeadlineSet(id, 0);
         }
     }
 

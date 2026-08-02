@@ -9145,3 +9145,1269 @@ contract MockToken is Test, IERC20 {
                 assertEq(claimer, member2);
             }
         }
+
+        /*═══════════════════════════════════════════════════════════════════════════════
+         *  unclaimTask — release a CLAIMED task back to the pool.
+         *  Route A: the claimer, always, ungated. Route B: ASSIGN/PM/executor, once expired.
+         *═══════════════════════════════════════════════════════════════════════════════*/
+        contract TaskManagerUnclaimTest is TaskManagerTestBase {
+            bytes32 UC_ID; // default project (creator1 is auto-manager)
+            bytes32 BOUNTY_ID; // project with a funded bounty budget
+            MockERC20 bountyToken;
+
+            address member2 = makeAddr("member2");
+
+            uint32 constant WINDOW = 7 days;
+            uint48 ABS; // T0 + 30 days
+            uint256 T0;
+
+            bytes32 constant TOPIC_UNCLAIMED = keccak256("TaskUnclaimed(uint256,address,address)");
+            bytes32 constant TOPIC_CLAIM_DEADLINE_SET = keccak256("TaskClaimDeadlineSet(uint256,uint48)");
+            bytes32 constant TOPIC_CLAIM_EXPIRED = keccak256("TaskClaimExpired(uint256,address,address)");
+            bytes32 constant TOPIC_DEADLINES_SET = keccak256("TaskDeadlinesSet(uint256,uint48,uint32)");
+
+            function setUp() public {
+                vm.warp(1_700_000_000); // realistic base timestamp so absolute-deadline checks bite
+                T0 = block.timestamp;
+                ABS = uint48(T0 + 30 days);
+                setUpBase();
+                setHat(member2, MEMBER_HAT);
+                UC_ID = _createDefaultProject("UNCLAIM", 0);
+
+                bountyToken = new MockERC20();
+                bountyToken.mint(address(tm), 1000 ether);
+                address[] memory tokens = new address[](1);
+                tokens[0] = address(bountyToken);
+                uint256[] memory caps = new uint256[](1);
+                caps[0] = 100 ether;
+                BOUNTY_ID = _createProjectWithBountyBudget("UNCLAIM_BOUNTY", 0, tokens, caps);
+            }
+
+            /*──────── helpers ───────*/
+            // Task ids are global and sequential; mirror the counter like TaskManagerDeadlineTest.
+            uint256 _nextId;
+
+            function _mkTask(uint48 absoluteDeadline, uint32 completionWindow) internal returns (uint256 id) {
+                id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(
+                    1 ether, bytes("uc"), bytes32(0), UC_ID, address(0), 0, false, absoluteDeadline, completionWindow
+                );
+            }
+
+            function _mkAppTask(uint48 absoluteDeadline, uint32 completionWindow) internal returns (uint256 id) {
+                id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(
+                    1 ether, bytes("uc-app"), bytes32(0), UC_ID, address(0), 0, true, absoluteDeadline, completionWindow
+                );
+            }
+
+            function _mkBountyTask(uint256 bountyPayout, uint32 completionWindow) internal returns (uint256 id) {
+                id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(
+                    1 ether,
+                    bytes("uc-bounty"),
+                    bytes32(0),
+                    BOUNTY_ID,
+                    address(bountyToken),
+                    bountyPayout,
+                    false,
+                    0,
+                    completionWindow
+                );
+            }
+
+            /// @dev Claim by `who` and warp one second past whichever deadline the claim has.
+            ///      Reverts loudly on a deadline-less task rather than silently warping to t=1.
+            function _claimAndExpire(uint256 id, address who) internal {
+                vm.prank(who);
+                tm.claimTask(id);
+                (uint48 abs_,, uint48 cd) = _deadlines(id);
+                uint48 expiry = cd != 0 ? cd : abs_;
+                require(expiry != 0, "_claimAndExpire: task has no deadline and can never expire");
+                vm.warp(uint256(expiry) + 1);
+            }
+
+            /// @dev Read the i-th 32-byte word of an ABI-encoded static tuple.
+            function _word(bytes memory b, uint256 i) internal pure returns (bytes32 w) {
+                assembly {
+                    w := mload(add(add(b, 32), mul(i, 32)))
+                }
+            }
+
+            function _deadlines(uint256 id) internal view returns (uint48 abs_, uint32 window_, uint48 cd_) {
+                bytes memory data = lens.getStorage(
+                    address(tm), TaskManagerLens.StorageKey.TASK_DEADLINES, abi.encode(id)
+                );
+                (abs_, window_, cd_) = abi.decode(data, (uint48, uint32, uint48));
+            }
+
+            function _status(uint256 id) internal view returns (TaskManager.Status st, address claimer) {
+                bytes memory data = lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_INFO, abi.encode(id));
+                (, st, claimer,,) = abi.decode(data, (uint256, TaskManager.Status, address, bytes32, bool));
+            }
+
+            function _projectSpent(bytes32 pid) internal view returns (uint128 spent) {
+                bytes memory data = lens.getStorage(
+                    address(tm), TaskManagerLens.StorageKey.PROJECT_INFO, abi.encode(pid)
+                );
+                (, spent,) = abi.decode(data, (uint128, uint128, bool));
+            }
+
+            function _bountySpent(bytes32 pid, address tok) internal view returns (uint128 spent) {
+                bytes memory data =
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.BOUNTY_BUDGET, abi.encode(pid, tok));
+                (, spent) = abi.decode(data, (uint128, uint128));
+            }
+
+            function _applicantCount(uint256 id) internal view returns (uint256 n) {
+                bytes memory data =
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_APPLICANT_COUNT, abi.encode(id));
+                n = abi.decode(data, (uint256));
+            }
+
+            function _application(uint256 id, address who) internal view returns (bytes32 h) {
+                bytes memory data =
+                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.TASK_APPLICATION, abi.encode(id, who));
+                h = abi.decode(data, (bytes32));
+            }
+
+            function _countTopic(Vm.Log[] memory logs, bytes32 topic) internal pure returns (uint256 n) {
+                for (uint256 i; i < logs.length; i++) {
+                    if (logs[i].topics[0] == topic) n++;
+                }
+            }
+
+            /*──────── self-release: state & events ───────*/
+
+            function test_SelfUnclaimSetsUnclaimedAndClearsClaimer() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED), "back to UNCLAIMED");
+                assertEq(claimer, address(0), "claimer cleared");
+            }
+
+            function test_SelfUnclaimClearsClaimDeadlineOnly() public {
+                uint256 id = _mkTask(ABS, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                (,, uint48 cdWhileClaimed) = _deadlines(id);
+                assertEq(cdWhileClaimed, uint48(block.timestamp) + WINDOW, "precondition: window running");
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                (uint48 abs_, uint32 window_, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, 0, "claim deadline cleared");
+                assertEq(abs_, ABS, "absoluteDeadline is task config - untouched");
+                assertEq(window_, WINDOW, "completionWindow is task config - untouched");
+            }
+
+            function test_SelfUnclaimEmitsEventsInOrder() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskUnclaimed(id, member1, member1);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(id, 0);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+            }
+
+            function test_WindowlessUnclaimEmitsNoDeadlineEvent() public {
+                uint256 id = _mkTask(0, 0);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.recordLogs();
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+                assertEq(_countTopic(logs, TOPIC_UNCLAIMED), 1, "release event still fires");
+                assertEq(_countTopic(logs, TOPIC_CLAIM_DEADLINE_SET), 0, "nothing to clear, nothing emitted");
+            }
+
+            function test_UnclaimEmitsNoClaimExpiredEvent() public {
+                // self-release of a live claim...
+                uint256 a = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(a);
+                vm.recordLogs();
+                vm.prank(member1);
+                tm.unclaimTask(a);
+                assertEq(_countTopic(vm.getRecordedLogs(), TOPIC_CLAIM_EXPIRED), 0, "self-release is not a takeover");
+
+                // ...and third-party release of an expired one
+                uint256 b = _mkTask(0, WINDOW);
+                _claimAndExpire(b, member1);
+                vm.recordLogs();
+                vm.prank(pm1);
+                tm.unclaimTask(b);
+                assertEq(
+                    _countTopic(vm.getRecordedLogs(), TOPIC_CLAIM_EXPIRED),
+                    0,
+                    "release names no new claimer, so no TaskClaimExpired"
+                );
+            }
+
+            function test_SelfUnclaimOfExpiredClaimAllowed() public {
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskUnclaimed(id, member1, member1);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                (TaskManager.Status st,) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+            }
+
+            function test_UnclaimByAssigneeWithoutClaimPermission() public {
+                // assignTask never checks the assignee's mask: `outsider` holds no hat at all.
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(pm1);
+                tm.assignTask(id, outsider);
+
+                vm.prank(outsider);
+                tm.unclaimTask(id); // route A is identity-gated, not permission-gated
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+            }
+
+            function test_UnclaimAfterCreateAndAssign() public {
+                _nextId++; // createAndAssignTask consumes the next id
+                vm.prank(executor);
+                uint256 id =
+                    tm.createAndAssignTask(
+                    1 ether, bytes("caa"), bytes32(0), UC_ID, member1, address(0), 0, false, 0, WINDOW
+                );
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, 0, "assignment window cleared");
+            }
+
+            function test_UnclaimAfterRejectAllowed() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("work"));
+                vm.prank(pm1);
+                tm.rejectTask(id, keccak256("redo")); // back to CLAIMED with member1 still on it
+
+                vm.prank(member1);
+                tm.unclaimTask(id); // "I don't want to rework this"
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+            }
+
+            function test_ClaimerWithRevokedPermissionCanStillUnclaim() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                // strip CLAIM from MEMBER_HAT, project override first then the global mask
+                vm.prank(creator1);
+                tm.setProjectRolePerm(UC_ID, MEMBER_HAT, 0);
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(MEMBER_HAT, uint8(0)));
+
+                uint256 fresh = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.claimTask(fresh); // precondition: member1 really has lost CLAIM
+
+                vm.prank(member1);
+                tm.unclaimTask(id); // ...but is never trapped holding what they already claimed
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+            }
+
+            /*──────── third-party release (ASSIGN + expired) ───────*/
+
+            function test_ThirdPartyUnclaimOfExpiredClaimByAssignHolder() public {
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskUnclaimed(id, member1, pm1);
+                vm.prank(pm1); // PM_HAT holds ASSIGN on this project
+                tm.unclaimTask(id);
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+            }
+
+            function test_ThirdPartyUnclaimOfExpiredClaimByExecutor() public {
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+                vm.prank(executor);
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            function test_ThirdPartyUnclaimOfExpiredClaimByProjectManager() public {
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+                vm.prank(creator1); // auto-added manager of UC_ID; holds no ASSIGN mask
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            function test_ThirdPartyUnclaimAfterAbsoluteExpiryOnly() public {
+                uint256 id = _mkTask(ABS, 0); // no per-claim window: only the calendar cutoff
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.warp(uint256(ABS) + 1);
+                vm.prank(pm1);
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            function test_PmCannotUnclaimLiveClaim() public {
+                uint256 id = _mkTask(ABS, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.BadStatus.selector); // authorized, but the claim is protected
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member1, "claim untouched");
+            }
+
+            function test_ExecutorCannotUnclaimLiveClaim() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(executor);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+            }
+
+            function test_UnclaimAtExactDeadlineSecondReverts() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + WINDOW); // the deadline second itself is still protected
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+
+                vm.warp(block.timestamp + 1);
+                vm.prank(pm1);
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            function test_ClaimOnlyMemberCannotUnclaimOthersExpiredClaim() public {
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+                vm.prank(member2); // MEMBER_HAT has CLAIM, not ASSIGN
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.unclaimTask(id);
+            }
+
+            function test_OutsiderCannotUnclaim() public {
+                uint256 live = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(live);
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.unclaimTask(live);
+
+                uint256 expired = _mkTask(0, WINDOW);
+                _claimAndExpire(expired, member1);
+                vm.prank(outsider);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.unclaimTask(expired);
+            }
+
+            function test_UnclaimNoDeadlinesByAssignHolderReverts() public {
+                uint256 id = _mkTask(0, 0); // pre-v6-shaped task: never expires
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + 365 days);
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+            }
+
+            function test_TwoTxAdminLeverUnsticksDeadlinelessTask() public {
+                uint256 id = _mkTask(0, 0);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + 90 days); // claimer ghosted
+
+                // leg 1: open the claim to takeover with a past absolute deadline
+                vm.prank(executor);
+                tm.updateTask(id, 1 ether, bytes("uc"), bytes32(0), address(0), 0, uint48(block.timestamp - 1), 0);
+                // leg 2: release to the pool instead of naming a replacement
+                vm.prank(pm1);
+                tm.unclaimTask(id);
+
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+            }
+
+            /*──────── status gate & bounds ───────*/
+
+            function test_UnclaimUnclaimedReverts() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+            }
+
+            function test_UnclaimSubmittedReverts() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("work"));
+
+                // delivered work must be reviewed first — nobody can pull the claimer out from under it
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+                vm.prank(executor);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+
+                // ...even long after every deadline has passed
+                vm.warp(block.timestamp + 365 days);
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+            }
+
+            function test_UnclaimCompletedReverts() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.submitTask(id, keccak256("work"));
+                vm.prank(pm1);
+                tm.completeTask(id);
+
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+            }
+
+            function test_UnclaimCancelledReverts() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(creator1);
+                tm.cancelTask(id);
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+            }
+
+            function test_UnclaimUnknownIdReverts() public {
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.NotFound.selector);
+                tm.unclaimTask(_nextId); // one past the last created id
+            }
+
+            function test_DoubleUnclaimReverts() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+            }
+
+            /*──────── budget non-effects ───────*/
+
+            function test_UnclaimDoesNotChangeProjectSpent() public {
+                uint256 id = _mkTask(0, WINDOW);
+                uint128 spentBefore = _projectSpent(UC_ID);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                assertEq(_projectSpent(UC_ID), spentBefore, "release does not refund the PT reservation");
+                (TaskManager.Status st,) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED), "anchor: the release really happened");
+            }
+
+            function test_UnclaimDoesNotChangeBountySpent() public {
+                uint256 id = _mkBountyTask(2 ether, WINDOW);
+                uint128 ptBefore = _projectSpent(BOUNTY_ID);
+                uint128 bountyBefore = _bountySpent(BOUNTY_ID, address(bountyToken));
+                assertEq(bountyBefore, 2 ether, "precondition: bounty reserved at creation");
+
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                assertEq(_projectSpent(BOUNTY_ID), ptBefore, "PT reservation held");
+                assertEq(_bountySpent(BOUNTY_ID, address(bountyToken)), bountyBefore, "bounty reservation held");
+                assertEq(bountyToken.balanceOf(address(tm)), 1000 ether, "no tokens moved");
+                assertEq(bountyToken.balanceOf(member1), 0, "the releaser is not paid out");
+                (TaskManager.Status st,) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED), "anchor: the release really happened");
+            }
+
+            function test_CancelAfterUnclaimRefundsExactlyOnce() public {
+                uint128 ptBefore = _projectSpent(BOUNTY_ID);
+                uint128 bountyBefore = _bountySpent(BOUNTY_ID, address(bountyToken));
+
+                uint256 id = _mkBountyTask(2 ether, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                // a task that reached CLAIMED is cancellable again once released
+                vm.prank(creator1);
+                tm.cancelTask(id);
+
+                assertEq(_projectSpent(BOUNTY_ID), ptBefore, "PT refunded exactly once");
+                assertEq(_bountySpent(BOUNTY_ID, address(bountyToken)), bountyBefore, "bounty refunded exactly once");
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.CANCELLED));
+                assertEq(claimer, address(0));
+            }
+
+            function test_UpdateTaskAfterUnclaimRebasesSpent() public {
+                uint128 spentBefore = _projectSpent(UC_ID);
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(creator1);
+                tm.updateTask(id, 3 ether, bytes("uc"), bytes32(0), address(0), 0, 0, WINDOW);
+                assertEq(_projectSpent(UC_ID), spentBefore + 3 ether, "spent rebased, no underflow");
+            }
+
+            /*──────── re-claim / takeover interaction ───────*/
+
+            function test_ReclaimBySameMemberAfterUnclaim() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + 2 days);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(member1);
+                tm.claimTask(id);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW, "fresh window on re-claim");
+                (, address claimer) = _status(id);
+                assertEq(claimer, member1);
+            }
+
+            function test_ReclaimByDifferentMemberAfterUnclaim() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.recordLogs();
+                vm.prank(member2);
+                tm.claimTask(id);
+                assertEq(
+                    _countTopic(vm.getRecordedLogs(), TOPIC_CLAIM_EXPIRED), 0, "plain UNCLAIMED claim, not a takeover"
+                );
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2);
+            }
+
+            function test_AssignAfterUnclaim() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskAssigned(id, member2, pm1);
+                vm.prank(pm1);
+                tm.assignTask(id, member2);
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW, "fresh window on assignment");
+            }
+
+            function test_ExClaimerCannotSubmitAfterUnclaim() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.BadStatus.selector); // UNCLAIMED: nothing to submit
+                tm.submitTask(id, keccak256("work"));
+
+                vm.prank(member2);
+                tm.claimTask(id);
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.NotClaimer.selector);
+                tm.submitTask(id, keccak256("work"));
+            }
+
+            function test_ExClaimerCannotUnclaimAfterTakeover() public {
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+                vm.prank(member2);
+                tm.claimTask(id); // takeover
+
+                vm.prank(member1); // CLAIM only, and no longer the claimer
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2, "takeover stands");
+            }
+
+            function test_UnclaimRaceWithTakeover() public {
+                // claimer's release lands first: the taker still gets the task, via the UNCLAIMED branch
+                uint256 a = _mkTask(0, WINDOW);
+                _claimAndExpire(a, member1);
+                vm.prank(member1);
+                tm.unclaimTask(a);
+                vm.prank(member2);
+                tm.claimTask(a);
+                (, address claimer) = _status(a);
+                assertEq(claimer, member2);
+
+                // taker lands first: the stale release reverts instead of evicting the new claimer
+                uint256 b = _mkTask(0, WINDOW);
+                _claimAndExpire(b, member1);
+                vm.prank(member2);
+                tm.claimTask(b);
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.unclaimTask(b);
+                (, claimer) = _status(b);
+                assertEq(claimer, member2);
+            }
+
+            function test_UnclaimPastAbsoluteLeavesNextClaimUnprotected() public {
+                uint256 id = _mkTask(ABS, 0);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(uint256(ABS) + 1);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                // past the cutoff every claim is born expired — same as the pre-existing lenient model
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member2);
+                tm.claimTask(id); // immediately takeover-able
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2);
+            }
+
+            /*──────── deadline arithmetic after release ───────*/
+
+            function test_UpdateWindowAfterUnclaimSkipsInFlightBranch() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.recordLogs();
+                vm.prank(creator1);
+                tm.updateTask(id, 1 ether, bytes("uc"), bytes32(0), address(0), 0, 0, 21 days);
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+                assertEq(_countTopic(logs, TOPIC_DEADLINES_SET), 1, "config change is emitted");
+                assertEq(_countTopic(logs, TOPIC_CLAIM_DEADLINE_SET), 0, "no claimer, so no in-flight window to adjust");
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, 0);
+            }
+
+            function test_UnclaimThenReclaimEmitsFreshClaimDeadline() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(id, uint48(block.timestamp) + WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id); // the clear-on-release is what keeps this from being swallowed
+            }
+
+            /*──────── application system ───────*/
+
+            function test_UnclaimApplicationTaskKeepsHashes() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(member2);
+                tm.applyForTask(id, keccak256("app2"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                assertEq(_application(id, member1), keccak256("app1"), "releaser stays approvable");
+                assertEq(_application(id, member2), keccak256("app2"), "other applicants stay approvable");
+                assertEq(_applicantCount(id), 0, "applicant array was already emptied at approval time");
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED), "anchor: the release really happened");
+                assertEq(claimer, address(0));
+            }
+
+            function test_ApproveOriginalApplicantAfterUnclaim() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                // UNCLAIMED branch: no expiry needed to re-approve
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.CLAIMED));
+                assertEq(claimer, member1);
+            }
+
+            function test_ApproveOtherOriginalApplicantAfterUnclaim() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(member2);
+                tm.applyForTask(id, keccak256("app2"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(pm1);
+                tm.approveApplication(id, member2);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2);
+            }
+
+            function test_NewApplicantCanApplyAfterUnclaim() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(member2); // never applied before
+                tm.applyForTask(id, keccak256("app2"));
+                assertEq(_application(id, member2), keccak256("app2"));
+                assertEq(_applicantCount(id), 1, "fresh applicant list rebuilds from the release");
+            }
+
+            function test_OriginalApplicantCannotReapplyAfterUnclaim() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(member1);
+                vm.expectRevert(TaskManager.AlreadyApplied.selector); // harmless: still approvable
+                tm.applyForTask(id, keccak256("app1-again"));
+            }
+
+            function test_DirectClaimStillRevertsAfterUnclaimOfApplicationTask() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(member2);
+                vm.expectRevert(TaskManager.RequiresApplication.selector);
+                tm.claimTask(id);
+            }
+
+            function test_UnclaimKeepsApplicantsFiledDuringExpiredWindow() public {
+                // A non-vacuous applicant list: applications filed while the claim was expired are
+                // still queued at release time and must survive it (cancelTask deletes them; this
+                // must not).
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1); // empties the array
+                (,, uint48 cd) = _deadlines(id);
+                vm.warp(uint256(cd) + 1);
+
+                vm.prank(member2);
+                tm.applyForTask(id, keccak256("app2")); // allowed while CLAIMED-and-expired
+                assertEq(_applicantCount(id), 1, "precondition: a live applicant is queued");
+
+                vm.prank(pm1);
+                tm.unclaimTask(id);
+
+                assertEq(_applicantCount(id), 1, "queued applicants survive the release");
+                assertEq(_application(id, member2), keccak256("app2"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member2);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member2);
+            }
+
+            function test_UnclaimApplicationTaskByAssignHolderAfterExpiry() public {
+                uint256 id = _mkAppTask(0, WINDOW);
+                vm.prank(member1);
+                tm.applyForTask(id, keccak256("app1"));
+                vm.prank(pm1);
+                tm.approveApplication(id, member1);
+                (,, uint48 cd) = _deadlines(id);
+                vm.warp(uint256(cd) + 1);
+
+                vm.prank(pm1);
+                tm.unclaimTask(id);
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+            }
+
+            /*──────── edit-permission consequence ───────*/
+
+            function test_CreateHatRegainsUnclaimedEditPathAfterRelease() public {
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                // creator2 wears CREATOR_HAT (project CREATE) but is not a manager: no post-claim edits
+                vm.prank(creator2);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.updateTask(id, 2 ether, bytes("uc"), bytes32(0), address(0), 0, 0, WINDOW);
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(creator2);
+                tm.updateTask(id, 2 ether, bytes("uc"), bytes32(0), address(0), 0, 0, WINDOW);
+                assertEq(_projectSpent(UC_ID), 2 ether, "the task is genuinely unclaimed again");
+            }
+
+            /*──────── fuzz ───────*/
+
+            function testFuzz_UnclaimAlwaysClearsClaimState(uint32 window, uint32 warpBy) public {
+                window = uint32(bound(window, 0, 3650 days));
+                warpBy = uint32(bound(warpBy, 0, 3650 days));
+
+                uint256 id = _mkTask(0, window);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + warpBy);
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+                (, uint32 window_, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, 0, "claim deadline always cleared");
+                assertEq(window_, window, "task config preserved");
+            }
+
+            function testFuzz_UnclaimNeverChangesSpent(uint96 payout, uint32 window) public {
+                payout = uint96(bound(payout, 1, 1e24));
+                window = uint32(bound(window, 0, 3650 days));
+
+                uint256 id = _nextId++;
+                vm.prank(creator1);
+                tm.createTask(payout, bytes("uc"), bytes32(0), UC_ID, address(0), 0, false, 0, window);
+                uint128 spentAtCreate = _projectSpent(UC_ID);
+
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                assertEq(_projectSpent(UC_ID), spentAtCreate, "budget is keyed to existence, not to who holds it");
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED), "anchor: the release really happened");
+                assertEq(claimer, address(0));
+            }
+
+            function testFuzz_ThirdPartyUnclaimBoundary(uint32 window) public {
+                window = uint32(bound(window, 1, 3650 days));
+                uint256 id = _mkTask(0, window);
+                vm.prank(member1);
+                tm.claimTask(id);
+                uint48 cd = uint48(block.timestamp) + window;
+
+                vm.warp(cd); // protected up to and including the deadline second
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+
+                vm.warp(uint256(cd) + 1);
+                vm.prank(pm1);
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            /*──────── permission-bit precision ───────*/
+
+            function test_ReleaseRequiresTheAssignBitSpecifically() public {
+                // pm1's project mask is REVIEW|ASSIGN, so it cannot tell the two bits apart.
+                // Build an actor that provably holds REVIEW (and everything else) but NOT ASSIGN.
+                uint256 reviewerHat = 7;
+                address reviewer = makeAddr("reviewerOnly");
+                setHat(reviewer, reviewerHat);
+                vm.prank(creator1);
+                tm.setProjectRolePerm(UC_ID, reviewerHat, 0xFF & ~TaskPerm.ASSIGN);
+
+                // proof the actor really wields REVIEW on this project
+                uint256 warmup = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(warmup);
+                vm.prank(member1);
+                tm.submitTask(warmup, keccak256("work"));
+                vm.prank(reviewer);
+                tm.rejectTask(warmup, keccak256("redo")); // REVIEW-gated: succeeds
+
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+                vm.prank(reviewer);
+                vm.expectRevert(TaskManager.Unauthorized.selector); // every bit but ASSIGN is not enough
+                tm.unclaimTask(id);
+
+                // grant exactly the missing bit -> the same call now succeeds
+                vm.prank(creator1);
+                tm.setProjectRolePerm(UC_ID, reviewerHat, 0xFF);
+                vm.prank(reviewer);
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            function test_ClaimerHoldingAssignReleasesLiveClaim() public {
+                // The caller is simultaneously the claimer AND an ASSIGN holder, on an UNEXPIRED
+                // claim: route A must win. Guards the natural "check permission first" rewrite,
+                // which would trap exactly the PM/executor assignees this feature exists to free.
+                uint256 a = _mkTask(0, WINDOW);
+                vm.prank(creator1);
+                tm.assignTask(a, pm1); // creator1 is the project manager
+                vm.prank(pm1);
+                tm.unclaimTask(a);
+                (, address claimerA) = _status(a);
+                assertEq(claimerA, address(0), "ASSIGN-holding claimer releases their own live claim");
+
+                uint256 b = _mkTask(0, WINDOW);
+                vm.prank(pm1);
+                tm.assignTask(b, executor);
+                vm.prank(executor);
+                tm.unclaimTask(b);
+                (, address claimerB) = _status(b);
+                assertEq(claimerB, address(0), "executor releases their own live claim");
+
+                uint256 c = _mkTask(0, WINDOW);
+                vm.prank(pm1);
+                tm.assignTask(c, creator1);
+                vm.prank(creator1);
+                tm.unclaimTask(c);
+                (, address claimerC) = _status(c);
+                assertEq(claimerC, address(0), "project manager releases their own live claim");
+            }
+
+            function test_ReleaseAuthorityIsScopedToTaskProject() public {
+                // A second project whose only manager is creator2.
+                vm.prank(creator2);
+                bytes32 p2 = tm.createProject(
+                    TaskManager.BootstrapProjectConfig({
+                        title: "SECOND",
+                        metadataHash: bytes32(0),
+                        cap: 0,
+                        managers: new address[](0),
+                        createHats: _hatArr(CREATOR_HAT),
+                        claimHats: _hatArr(MEMBER_HAT),
+                        reviewHats: _hatArr(PM_HAT),
+                        assignHats: new uint256[](0), // nobody gets ASSIGN by hat here
+                        bountyTokens: new address[](0),
+                        bountyCaps: new uint256[](0)
+                    })
+                );
+
+                uint256 id = _nextId++;
+                vm.prank(creator2);
+                tm.createTask(1 ether, bytes("p2"), bytes32(0), p2, address(0), 0, false, 0, WINDOW);
+                _claimAndExpire(id, member1);
+
+                // creator1 manages UC_ID, not p2 — authority must not leak across projects
+                vm.prank(creator1);
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, member1, "claim untouched");
+
+                vm.prank(creator2); // p2's own manager
+                tm.unclaimTask(id);
+                (, claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            function test_ProjectOverrideWithoutAssignBlocksRelease() public {
+                // pm1 keeps the global CREATE|REVIEW|ASSIGN mask but loses ASSIGN on UC_ID only.
+                vm.prank(creator1);
+                tm.setProjectRolePerm(UC_ID, PM_HAT, TaskPerm.REVIEW);
+
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.Unauthorized.selector); // project override beats the global mask
+                tm.unclaimTask(id);
+            }
+
+            /*──────── third-party release: full effects ───────*/
+
+            function test_ThirdPartyUnclaimClearsClaimDeadline() public {
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskUnclaimed(id, member1, pm1);
+                vm.expectEmit(true, true, true, true);
+                emit TaskManager.TaskClaimDeadlineSet(id, 0);
+                vm.prank(pm1);
+                tm.unclaimTask(id);
+
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, 0, "route B clears the window too");
+            }
+
+            function test_ThirdPartyUnclaimWhenEitherDeadlineAlonePasses() public {
+                // Both knobs set (the normal production shape): the claim window lapsing is enough,
+                // even though the calendar cutoff is still in the future.
+                uint256 a = _mkTask(ABS, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(a);
+                vm.warp(block.timestamp + WINDOW + 1);
+                assertLt(block.timestamp, uint256(ABS), "precondition: absolute deadline still ahead");
+                vm.prank(pm1);
+                tm.unclaimTask(a);
+                (, address claimerA) = _status(a);
+                assertEq(claimerA, address(0), "claim-window expiry alone suffices");
+
+                // ...and symmetrically, the calendar cutoff passing is enough while the window runs.
+                uint48 soon = uint48(block.timestamp + 1 days);
+                uint256 b = _mkTask(soon, 3650 days);
+                vm.prank(member1);
+                tm.claimTask(b);
+                (,, uint48 cd) = _deadlines(b);
+                vm.warp(uint256(soon) + 1);
+                assertGt(uint256(cd), block.timestamp, "precondition: claim window still running");
+                vm.prank(pm1);
+                tm.unclaimTask(b);
+                (, address claimerB) = _status(b);
+                assertEq(claimerB, address(0), "absolute expiry alone suffices");
+            }
+
+            function test_TaskUnclaimedTopicLayout() public {
+                // expectEmit cannot see indexedness; the subgraph ABI can. Pin the topic layout.
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+
+                vm.recordLogs();
+                vm.prank(pm1);
+                tm.unclaimTask(id);
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+
+                bool seen;
+                for (uint256 i; i < logs.length; i++) {
+                    if (logs[i].topics[0] != TOPIC_UNCLAIMED) continue;
+                    seen = true;
+                    assertEq(logs[i].topics.length, 4, "id, previousClaimer and caller are all indexed");
+                    assertEq(uint256(logs[i].topics[1]), id);
+                    assertEq(address(uint160(uint256(logs[i].topics[2]))), member1);
+                    assertEq(address(uint160(uint256(logs[i].topics[3]))), pm1);
+                    assertEq(logs[i].data.length, 0, "no unindexed payload");
+                }
+                assertTrue(seen, "TaskUnclaimed emitted");
+            }
+
+            /*──────── org-level interactions ───────*/
+
+            function test_ClaimerCanReleaseAfterProjectDeleted() public {
+                // deleteProject has no live-task guard, so a claimer can be left holding a task
+                // whose project is gone — the trapped-claimer case route A must survive.
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(creator1);
+                tm.deleteProject(UC_ID);
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                (TaskManager.Status st, address claimer) = _status(id);
+                assertEq(uint8(st), uint8(TaskManager.Status.UNCLAIMED));
+                assertEq(claimer, address(0));
+            }
+
+            function test_SelfReleaseWorksWhenHatsReverts() public {
+                // Route A must make no Hats call at all: a bricked eligibility/toggle module
+                // (Hats reverting) is exactly when a contributor needs to hand work back.
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                vm.mockCallRevert(address(hats), bytes(""), bytes("boom"));
+                vm.prank(member2);
+                vm.expectRevert(); // sanity: permission-gated paths really are broken now
+                tm.claimTask(id);
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                vm.clearMockedCalls();
+
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            function test_ExecutorRotationMovesReleaseAuthority() public {
+                address newExec = makeAddr("newExecutor");
+                uint256 id = _mkTask(0, WINDOW);
+                _claimAndExpire(id, member1);
+
+                vm.prank(executor);
+                tm.setConfig(TaskManager.ConfigKey.EXECUTOR, abi.encode(newExec));
+
+                vm.prank(executor); // the old executor is nobody now
+                vm.expectRevert(TaskManager.Unauthorized.selector);
+                tm.unclaimTask(id);
+
+                vm.prank(newExec);
+                tm.unclaimTask(id);
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+
+            function test_CompleteAfterReleasePaysNewClaimerOnly() public {
+                uint256 id = _mkBountyTask(2 ether, WINDOW);
+                uint128 ptBefore = _projectSpent(BOUNTY_ID);
+                uint128 bountyBefore = _bountySpent(BOUNTY_ID, address(bountyToken));
+
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+
+                vm.prank(member2);
+                tm.claimTask(id);
+                vm.prank(member2);
+                tm.submitTask(id, keccak256("work"));
+                vm.prank(pm1);
+                tm.completeTask(id);
+
+                assertEq(token.balanceOf(member2), 1 ether, "the finisher is paid the PT");
+                assertEq(token.balanceOf(member1), 0, "the releaser gets nothing");
+                assertEq(bountyToken.balanceOf(member2), 2 ether, "the finisher is paid the bounty");
+                assertEq(bountyToken.balanceOf(member1), 0, "no partial credit on release");
+                assertEq(bountyToken.balanceOf(address(tm)), 998 ether, "exactly one bounty transfer");
+                assertEq(_projectSpent(BOUNTY_ID), ptBefore, "reservations untouched by the whole cycle");
+                assertEq(_bountySpent(BOUNTY_ID, address(bountyToken)), bountyBefore);
+            }
+
+            function test_LensFullInfoOnlyClaimFieldsChange() public {
+                uint256 id = _mkBountyTask(2 ether, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                bytes memory before = lens.getStorage(
+                    address(tm), TaskManagerLens.StorageKey.TASK_FULL_INFO, abi.encode(id)
+                );
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                bytes memory after_ = lens.getStorage(
+                    address(tm), TaskManagerLens.StorageKey.TASK_FULL_INFO, abi.encode(id)
+                );
+
+                // 0 payout, 1 bountyPayout, 2 bountyToken, 3 status, 4 claimer,
+                // 5 projectId, 6 requiresApplication, 7 absoluteDeadline, 8 completionWindow, 9 claimDeadline
+                uint256[7] memory untouched = [uint256(0), 1, 2, 5, 6, 7, 8];
+                for (uint256 i; i < untouched.length; i++) {
+                    assertEq(_word(after_, untouched[i]), _word(before, untouched[i]), "field must not change");
+                }
+                assertEq(uint256(_word(after_, 3)), uint256(TaskManager.Status.UNCLAIMED), "status");
+                assertEq(uint256(_word(after_, 4)), 0, "claimer");
+                assertEq(uint256(_word(after_, 9)), 0, "claimDeadline");
+                assertTrue(_word(before, 4) != bytes32(0), "precondition: was claimed");
+            }
+
+            /*──────── documented consequence: the window can be refreshed by the claimer ───────*/
+
+            function test_ReleaseAndReclaimRefreshesProtection() public {
+                // A claimer can pre-empt takeover by releasing and immediately re-claiming.
+                // This is accepted (v6 already lets an expired claimer re-claim to refresh);
+                // absoluteDeadline is the lever that defeats it.
+                uint256 id = _mkTask(0, WINDOW);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.warp(block.timestamp + WINDOW - 1); // one second before losing protection
+
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                vm.prank(member1);
+                tm.claimTask(id);
+
+                (,, uint48 cd_) = _deadlines(id);
+                assertEq(cd_, uint48(block.timestamp) + WINDOW, "protection refreshed");
+                vm.prank(pm1);
+                vm.expectRevert(TaskManager.BadStatus.selector);
+                tm.unclaimTask(id);
+
+                // ...but a past absoluteDeadline makes every re-claim born unprotected
+                vm.prank(executor);
+                tm.updateTask(id, 1 ether, bytes("uc"), bytes32(0), address(0), 0, uint48(block.timestamp - 1), WINDOW);
+                vm.prank(member1);
+                tm.unclaimTask(id);
+                vm.prank(member1);
+                tm.claimTask(id);
+                vm.prank(pm1);
+                tm.unclaimTask(id); // still releasable: absolute expiry cannot be refreshed
+                (, address claimer) = _status(id);
+                assertEq(claimer, address(0));
+            }
+        }
