@@ -432,30 +432,19 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         _wireZkInfra();
 
         // Deploy with autoWhitelistContracts = true and assert that all FOUR ZkEmailInvites claim
-        // selectors are now allowed rules on PaymasterHub for our org. These four selector strings
-        // are copied verbatim from OrgDeployer._appendZkEmailInvitesRules.
+        // selectors are now allowed rules on PaymasterHub for our org.
+        //
+        // These selectors are derived from the ABI by the compiler — NOT copied from
+        // OrgDeployer._appendZkEmailInvitesRules. That independence is the whole point: this test is what
+        // pins the deployer's auto-whitelist to the live ZkEmailInvites struct. The previous version copied
+        // the deployer's hand-hashed signature strings verbatim, so it stayed green through the Blocker-2
+        // domain-binding change that moved every claim selector (issue #188). Never reintroduce a literal here.
         OrgDeployer.DeploymentResult memory result = _deployZkOrgWithPaymaster(ZK_ORG_ID);
 
-        bytes4 selClaimDomain = bytes4(
-            keccak256(
-                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
-            )
-        );
-        bytes4 selClaimEmail = bytes4(
-            keccak256(
-                "claimRoleByEmail((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),address,uint256[],bytes32[])"
-            )
-        );
-        bytes4 selRegisterClaimDomain = bytes4(
-            keccak256(
-                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),uint256[],bytes32[])"
-            )
-        );
-        bytes4 selRegisterClaimEmail = bytes4(
-            keccak256(
-                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),uint256[],bytes32[])"
-            )
-        );
+        bytes4 selClaimDomain = ZkEmailInvites.claimRoleByDomain.selector;
+        bytes4 selClaimEmail = ZkEmailInvites.claimRoleByEmail.selector;
+        bytes4 selRegisterClaimDomain = ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector;
+        bytes4 selRegisterClaimEmail = ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector;
 
         PaymasterHub.Rule memory rClaimDomain = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaimDomain);
         PaymasterHub.Rule memory rClaimEmail = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaimEmail);
@@ -480,12 +469,17 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         OrgDeployer.DeploymentResult memory result = _deployZkOrgWithPaymaster(ZK_ORG_ID);
         assertEq(result.zkEmailInvites, address(0), "ZkEmailInvites not deployed");
 
-        // Even if we query for the selector, it should be unset (allowed=false, cap=0).
-        bytes4 selClaimDomain = bytes4(
-            keccak256(
-                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
-            )
+        // The claim selectors must not be whitelisted anywhere. Probing address(0) proves nothing (a rule can
+        // never exist there — _setRulesBatch reverts on a zero target), so probe the modules that WERE
+        // deployed and got real rules.
+        bytes4 selClaimDomain = ZkEmailInvites.claimRoleByDomain.selector;
+        assertFalse(
+            paymasterHub.getRule(ZK_ORG_ID, result.quickJoin, selClaimDomain).allowed, "no zk rule on QuickJoin"
         );
+        assertFalse(
+            paymasterHub.getRule(ZK_ORG_ID, result.taskManager, selClaimDomain).allowed, "no zk rule on TaskManager"
+        );
+
         PaymasterHub.Rule memory rClaim = paymasterHub.getRule(ZK_ORG_ID, address(0), selClaimDomain);
         assertFalse(rClaim.allowed, "no rule for address(0)");
         assertEq(uint256(rClaim.maxCallGasHint), 0, "no gas hint");
