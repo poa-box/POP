@@ -765,11 +765,16 @@ abstract contract SimBase is Script, TargetTypesData {
     }
 
     /// @dev The registered orgs' target types must match the migration data, and effective
-    ///      resolution must allow TaskManager.unclaimTask — the v7 selector that today requires
-    ///      a per-org vote — purely via the rulebook.
+    ///      resolution must allow TaskManager.unclaimTask (the v7 selector that today requires a
+    ///      per-org vote) AND createTasksBatch v6 0xf31d148f — the issue-#153 selector that Poa,
+    ///      Argus and Decentral Park are missing on-chain today (they whitelist only the dead v5
+    ///      0xc18aa1c9, reproducing AA33) — purely via the rulebook. This is what closes #153
+    ///      without broadcasting the per-org WhitelistTaskDeadlineRules*ViaGovernance scripts.
     function _assertOrgCoverage(PaymasterHub pm, OrgTargets[] memory orgs) internal {
         PaymasterHubLens lens = new PaymasterHubLens(address(pm));
         bytes4 unclaimSel = bytes4(keccak256("unclaimTask(uint256)"));
+        bytes4 batchSelV6 =
+            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])"));
         for (uint256 i = 0; i < orgs.length; i++) {
             // Skip orgs that never registered with the paymaster (defensive).
             if (pm.getOrgConfig(orgs[i].orgId).adminHatId == 0) {
@@ -788,6 +793,8 @@ abstract contract SimBase is Script, TargetTypesData {
             (bool allowed,, uint8 source) = lens.effectiveRuleOf(orgs[i].orgId, taskManager, unclaimSel);
             require(allowed, "SIM: unclaimTask not covered by rulebook for live org");
             require(source == 2 || pm.getRule(orgs[i].orgId, taskManager, unclaimSel).allowed, "SIM: bad source");
+            (bool batchAllowed,,) = lens.effectiveRuleOf(orgs[i].orgId, taskManager, batchSelV6);
+            require(batchAllowed, "SIM: createTasksBatch v6 (#153) not healed for live org");
         }
         console.log("SIM: all registered orgs resolve unclaimTask via the rulebook.");
     }
