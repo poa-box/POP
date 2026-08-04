@@ -220,8 +220,11 @@ abstract contract Test6Base is Script {
         }
     }
 
-    /* ── Selectors (must match ZkEmailInvites external signatures exactly; copied from
-     *    OrgDeployer._appendZkEmailInvitesRules so a per-org retrofit matches new-org deploys). ── */
+    /* ── HISTORICAL: the PRE-Blocker-2 claim selectors this script actually broadcast (see the
+     *    SUPERSEDED banner above). Preserved verbatim as the record of what was written on-chain —
+     *    do NOT copy them anywhere, and do NOT "refresh" them: they are stale by design.
+     *    Any NEW script must derive selectors as `ZkEmailInvites.<fn>.selector` (issue #188);
+     *    CeremonyDeployTest6Gnosis.s.sol is the current reference. ── */
     bytes4 internal constant SEL_CLAIM_DOMAIN = bytes4(
         keccak256(
             "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"

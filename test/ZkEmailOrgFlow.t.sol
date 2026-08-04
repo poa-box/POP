@@ -434,7 +434,7 @@ contract ZkEmailOrgFlowTest is DeployerTest {
 
         // Deploy with autoWhitelistContracts = true and assert that all FOUR ZkEmailInvites claim
         // selectors resolve as allowed for our org via the global rulebook (the module gets the
-        // ZKEMAIL_INVITES_ID target type at deploy; selector strings live in DefaultGlobalRules).
+        // ZKEMAIL_INVITES_ID target type at deploy; selector entries live in DefaultGlobalRules).
         OrgDeployer.DeploymentResult memory result = _deployZkOrgWithPaymaster(ZK_ORG_ID);
         assertEq(
             paymasterHub.getTargetType(ZK_ORG_ID, result.zkEmailInvites),
@@ -443,9 +443,10 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         );
         _seedGlobalRulebook();
 
-        // Compiler-derived selectors: the old hand-written strings here used `string` where the
-        // real proof tuple has `bytes32` (domain hash) — a latent bug this test used to share
-        // with the deployer's whitelist builder (string compared against the same string).
+        // These selectors are derived from the ABI by the compiler — NOT hand-hashed strings.
+        // That independence is the whole point: the previous version copied the deployer's
+        // signature strings verbatim, so it stayed green through the Blocker-2 domain-binding
+        // change that moved every claim selector (issue #188). Never reintroduce a literal here.
         bytes4 selClaimDomain = ZkEmailInvites.claimRoleByDomain.selector;
         bytes4 selClaimEmail = ZkEmailInvites.claimRoleByEmail.selector;
         bytes4 selRegisterClaimDomain = ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector;
@@ -481,11 +482,18 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         OrgDeployer.DeploymentResult memory result = _deployZkOrgWithPaymaster(ZK_ORG_ID);
         assertEq(result.zkEmailInvites, address(0), "ZkEmailInvites not deployed");
 
-        // Even if we query for the selector, it should be unset (allowed=false, cap=0).
+        // The claim selectors must not be sponsored anywhere. Probing address(0) proves nothing
+        // (a rule can never exist there), so probe the modules that WERE deployed — including via
+        // effective resolution, which covers the global-rulebook tier too.
         bytes4 selClaimDomain = ZkEmailInvites.claimRoleByDomain.selector;
-        PaymasterHub.Rule memory rClaim = paymasterHub.getRule(ZK_ORG_ID, address(0), selClaimDomain);
-        assertFalse(rClaim.allowed, "no rule for address(0)");
-        assertEq(uint256(rClaim.maxCallGasHint), 0, "no gas hint");
+        assertFalse(
+            paymasterHub.getRule(ZK_ORG_ID, result.quickJoin, selClaimDomain).allowed, "no zk rule on QuickJoin"
+        );
+        assertFalse(
+            paymasterHub.getRule(ZK_ORG_ID, result.taskManager, selClaimDomain).allowed, "no zk rule on TaskManager"
+        );
+        (bool zkAllowed,,) = _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.quickJoin, selClaimDomain);
+        assertFalse(zkAllowed, "no effective zk rule on QuickJoin");
     }
 
     /*──────────── Helpers ────────────*/

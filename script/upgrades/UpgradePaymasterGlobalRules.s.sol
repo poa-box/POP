@@ -52,9 +52,9 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
 // type-registering deployer whenever convenient. Both sims exercise the legacy selector.
 //
 // Order per chain: Step1 (impl) → Step2 (beacon upgrade) → Step3 (seed rulebook)
-//                  → Step4 (org target types) → Step5 (redeploy Lens) → Step6 (OrgDeployer v19,
-//                  two-surface probed FREE on both chains 2026-08-04, predicted
-//                  0x90BAe532D26100a2106c3b16bEA1Ad27D2286b3A).
+//                  → Step4 (org target types) → Step5 (redeploy Lens) → Step6 (OrgDeployer v20 —
+//                  v19 is reserved by UpgradeOrgDeployerZkEmailRules; re-probe both surfaces
+//                  before broadcast).
 //
 // Sims (run BOTH before any broadcast):
 //   FOUNDRY_PROFILE=production forge script script/upgrades/UpgradePaymasterGlobalRules.s.sol:SimGnosis \
@@ -72,7 +72,9 @@ address constant ARB_POA_MANAGER = 0xFF585Fae4A944cD173B19158C6FC5E08980b0815;
 address constant GNOSIS_SATELLITE = 0x4Ad70029a9247D369a5bEA92f90840B9ee58eD06; // PoaManagerSatellite
 address constant ADMIN_EOA = 0xA6F4D9f44Dd980b7168D829d5f74c2b00a46b2c9;
 string constant VERSION = "v20";
-string constant ORG_DEPLOYER_VERSION = "v19";
+// v19 is reserved by UpgradeOrgDeployerZkEmailRules (the pre-rulebook zk-selector fix);
+// the type-registering deployer ships as v20 regardless of whether v19 was broadcast.
+string constant ORG_DEPLOYER_VERSION = "v20";
 
 /// @dev Selector of the pre-rulebook registerAndConfigureOrg — the one the LIVE OrgDeployer
 ///      proxies call. The v20 hub MUST keep answering it (legacy overload).
@@ -497,7 +499,7 @@ contract Step5b_RedeployLensArbitrum is Script {
     }
 }
 
-/// @title Step6_UpgradeOrgDeployerGnosis — deploy OrgDeployer v19 (type-registering) + upgrade
+/// @title Step6_UpgradeOrgDeployerGnosis — deploy the type-registering OrgDeployer + upgrade
 ///        its beacon. NOT time-critical: until this lands, the old deployer keeps working via
 ///        the hub's legacy registerAndConfigureOrg overload (orgs get address-keyed local rules
 ///        as today); after it, new orgs get target types + Mirror resolution instead.
@@ -515,7 +517,7 @@ contract Step6_UpgradeOrgDeployerGnosis is Script {
         require(predicted.code.length <= 24576, "impl exceeds EIP-170 -- lower --optimizer-runs");
         IGnosisSatellite(GNOSIS_SATELLITE).upgradeBeaconDirect("OrgDeployer", predicted, ORG_DEPLOYER_VERSION);
         vm.stopBroadcast();
-        console.log("Gnosis OrgDeployer beacon upgraded to v19:", predicted);
+        console.log("Gnosis OrgDeployer beacon upgraded:", predicted);
     }
 }
 
@@ -534,7 +536,7 @@ contract Step6b_UpgradeOrgDeployerArbitrum is Script {
         require(predicted.code.length <= 24576, "impl exceeds EIP-170 -- lower --optimizer-runs");
         PoaManagerHub(payable(HUB)).upgradeBeaconLocal("OrgDeployer", predicted, ORG_DEPLOYER_VERSION);
         vm.stopBroadcast();
-        console.log("Arbitrum OrgDeployer beacon upgraded to v19:", predicted);
+        console.log("Arbitrum OrgDeployer beacon upgraded:", predicted);
     }
 }
 
@@ -790,7 +792,7 @@ contract SimGnosis is SimBase {
             PoaManager(GNOSIS_POA_MANAGER).getCurrentImplementationById(keccak256("OrgDeployer")) == newDeployerImpl,
             "SIM: OrgDeployer beacon not upgraded"
         );
-        console.log("SIM: OrgDeployer beacon upgrade to v19 OK.");
+        console.log("SIM: OrgDeployer beacon upgrade OK.");
 
         console.log("PASS: SimGnosis - v20 global rulebook validated against live Gnosis state.");
     }
@@ -851,7 +853,7 @@ contract SimArbitrum is SimBase {
             PoaManager(ARB_POA_MANAGER).getCurrentImplementationById(keccak256("OrgDeployer")) == newDeployerImpl,
             "SIM: OrgDeployer beacon not upgraded"
         );
-        console.log("SIM: OrgDeployer beacon upgrade to v19 OK.");
+        console.log("SIM: OrgDeployer beacon upgrade OK.");
 
         console.log("PASS: SimArbitrum - v20 global rulebook validated against live Arbitrum state.");
     }
