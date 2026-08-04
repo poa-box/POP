@@ -761,6 +761,60 @@ contract PaymasterGlobalRulesTest is Test {
         _validateExpectDenied(_rawOp(ORG, callData), TASK_MANAGER, bytes4(0));
     }
 
+    /*═══════════════════════ Pre-v20 explicit-denial preservation (P1) ═══════════════════════*/
+
+    /// @dev Storage slot of rules[ORG][target][selector] — used to plant PRE-v20 state that the
+    ///      post-v20 setters can no longer produce (they pair every deny with a block).
+    function _legacyRuleSlot(address target, bytes4 selector) internal pure returns (bytes32) {
+        bytes32 rulesLoc = keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.rules")) - 1));
+        return keccak256(abi.encode(selector, keccak256(abi.encode(target, keccak256(abi.encode(ORG, rulesLoc))))));
+    }
+
+    /// @notice A pre-v20 explicit deny that stored a hint ({allowed:false, hint!=0}) must NEVER
+    ///         fall through to the rulebook — the resolver honors it with no block needed.
+    function testPreV20DenyWithHint_NeverFallsThrough() public {
+        _setGlobal(ModuleTypes.TASK_MANAGER_ID, SEL_CLAIM_TASK, true, 0);
+        _mapTaskManager();
+
+        // Plant the pre-v20 write directly: old setRule stored {false, 777} with NO block.
+        vm.store(address(hub), _legacyRuleSlot(TASK_MANAGER, SEL_CLAIM_TASK), bytes32(uint256(777)));
+        PaymasterHub.Rule memory planted = hub.getRule(ORG, TASK_MANAGER, SEL_CLAIM_TASK);
+        assertFalse(planted.allowed);
+        assertEq(planted.maxCallGasHint, 777, "fixture must model the hinted pre-v20 deny");
+        assertFalse(hub.isGlobalRuleBlocked(ORG, TASK_MANAGER, SEL_CLAIM_TASK), "no block exists pre-v20");
+
+        // Denied by the RESOLVER alone — and the Lens agrees.
+        _validateExpectDenied(_op(TASK_MANAGER, SEL_CLAIM_TASK), TASK_MANAGER, SEL_CLAIM_TASK);
+        (bool allowed,, uint8 source) = lens.effectiveRuleOf(ORG, TASK_MANAGER, SEL_CLAIM_TASK);
+        assertFalse(allowed, "hinted pre-v20 deny must not resurrect via the rulebook");
+        assertEq(source, 0);
+
+        // clearRule still resets the pair to protocol default afterwards.
+        vm.prank(orgAdmin);
+        hub.clearRule(ORG, TASK_MANAGER, SEL_CLAIM_TASK);
+        _validate(_op(TASK_MANAGER, SEL_CLAIM_TASK));
+    }
+
+    /// @notice A pre-v20 explicit deny written with hint=0 leaves a ZERO struct — on-chain state
+    ///         cannot distinguish it from unset, so the migration reconstructs it as a block from
+    ///         the RuleSet event log, applied BEFORE the target is typed (no sponsorship window).
+    function testPreV20DenyZeroHint_PreservedByReconstructedBlock() public {
+        _setGlobal(ModuleTypes.TASK_MANAGER_ID, SEL_CLAIM_TASK, true, 0);
+        // (Nothing to plant: {false, 0} IS the zero struct — exactly the migration's problem.)
+
+        // Step4 order: reconstruct the denial as a block FIRST...
+        vm.prank(poaManager);
+        hub.setGlobalRuleBlock(ORG, TASK_MANAGER, SEL_CLAIM_TASK, true);
+        // ...then type the target (this is what arms the rulebook fallback).
+        vm.prank(poaManager);
+        hub.setTargetTypesBatch(ORG, _oneAddr(TASK_MANAGER), _one32(ModuleTypes.TASK_MANAGER_ID));
+
+        // The denial survives typing; a sibling selector resolves via the rulebook as intended.
+        _validateExpectDenied(_op(TASK_MANAGER, SEL_CLAIM_TASK), TASK_MANAGER, SEL_CLAIM_TASK);
+        _setGlobal(ModuleTypes.TASK_MANAGER_ID, SEL_UNCLAIM_TASK, true, 0);
+        _validate(_op(TASK_MANAGER, SEL_UNCLAIM_TASK));
+    }
+
     /*═══════════════════════ Seed-list accuracy (reads DefaultGlobalRules itself) ═══════════════════════*/
 
     /// @dev Bijection check between DefaultGlobalRules.entries() and the REAL contract

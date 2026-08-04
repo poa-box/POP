@@ -106,6 +106,46 @@ abstract contract TargetTypesData {
         bytes32[] typeIds;
     }
 
+    /// @dev A (org, target, selector) pair whose LAST pre-v20 RuleSet event has allowed=false —
+    ///      an explicit denial. Pre-v20 denies with hint=0 leave a ZERO storage struct
+    ///      (indistinguishable from unset on-chain), so once Step4 types the target the resolver
+    ///      would fall through to a global allow and silently restore sponsorship. Step4 rebuilds
+    ///      these as global-rule blocks BEFORE registering target types (denies with hint!=0 are
+    ///      additionally honored by the resolver itself, no block needed).
+    ///
+    ///      Data source: full RuleSet event scan per chain (topic0
+    ///      0x75d8443004953c3d7605bbc7f3a1bd6db7a2182752ccb451f5cdb875ebd264ea), last-write-wins
+    ///      per pair, scanned 2026-08-04. Gnosis: 7 pairs (Test6 + KUBI TaskManagers — all four
+    ///      selectors are RETIRED pre-v6 TaskManager signatures with no rulebook entry, so
+    ///      blocking them is purely behavior-preserving). Arbitrum: none.
+    ///      ⚠ RE-SCAN before broadcast — new denials may have been written since:
+    ///        cast logs --rpc-url <chain> --from-block 0 --address <hub> <topic0> --json
+    ///        (keep pairs whose last event decodes allowed=false)
+    struct DeniedPair {
+        bytes32 orgId;
+        address target;
+        bytes4 selector;
+    }
+
+    function _gnosisReconstructedDenials() internal pure returns (DeniedPair[] memory d) {
+        bytes32 test6 = 0x263b2b29f392647f0fb8ddbb26f099e812ab4ba2777e5e07b906277164181f6b;
+        address test6Tm = 0x3d93f0D090356D25E7a1614F0F8764b103ca99bc;
+        bytes32 kubi = 0xc0f2765d555e21bfad5c6b05accef86a5758e0dee3e9a5b4ee3c3f3069c2102e;
+        address kubiTm = 0xF57024fC77915Fce8f2608afdd027941bCEE3336;
+        d = new DeniedPair[](7);
+        d[0] = DeniedPair(test6, test6Tm, 0x22fa79bc);
+        d[1] = DeniedPair(test6, test6Tm, 0xaf425951);
+        d[2] = DeniedPair(test6, test6Tm, 0xc18aa1c9);
+        d[3] = DeniedPair(kubi, kubiTm, 0x22fa79bc);
+        d[4] = DeniedPair(kubi, kubiTm, 0xaf425951);
+        d[5] = DeniedPair(kubi, kubiTm, 0xc18aa1c9);
+        d[6] = DeniedPair(kubi, kubiTm, 0x48db6f65);
+    }
+
+    function _arbReconstructedDenials() internal pure returns (DeniedPair[] memory d) {
+        d = new DeniedPair[](0);
+    }
+
     /// @dev Standard 8-module org layout (no ZkEmailInvites) + the two shared registries.
     function _org8(
         bytes32 orgId,
@@ -442,7 +482,21 @@ contract Step4_RegisterTargetTypesGnosis is Script, TargetTypesData {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(IGnosisSatellite(GNOSIS_SATELLITE).owner() == vm.addr(deployerKey), "signer must own the Satellite");
         OrgTargets[] memory orgs = _gnosisOrgs();
+        DeniedPair[] memory denials = _gnosisReconstructedDenials();
         vm.startBroadcast(deployerKey);
+        // Reconstruct pre-v20 explicit denials as blocks BEFORE typing any target — typing is
+        // what arms the rulebook fallback, so this order leaves no window where a previously
+        // denied pair is sponsored. ⚠ Re-run the RuleSet event scan first (see DeniedPair docs).
+        for (uint256 i = 0; i < denials.length; i++) {
+            IGnosisSatellite(GNOSIS_SATELLITE)
+                .adminCall(
+                    GNOSIS_PAYMASTER,
+                    abi.encodeCall(
+                        PaymasterHub.setGlobalRuleBlock,
+                        (denials[i].orgId, denials[i].target, denials[i].selector, true)
+                    )
+                );
+        }
         for (uint256 i = 0; i < orgs.length; i++) {
             IGnosisSatellite(GNOSIS_SATELLITE)
                 .adminCall(
@@ -451,6 +505,7 @@ contract Step4_RegisterTargetTypesGnosis is Script, TargetTypesData {
                 );
         }
         vm.stopBroadcast();
+        console.log("Gnosis: reconstructed denial blocks:", denials.length);
         console.log("Gnosis target types registered for", orgs.length, "orgs");
     }
 }
@@ -461,7 +516,19 @@ contract Step4b_RegisterTargetTypesArbitrum is Script, TargetTypesData {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(PoaManagerHub(payable(HUB)).owner() == vm.addr(deployerKey), "signer must own the Hub");
         OrgTargets[] memory orgs = _arbOrgs();
+        DeniedPair[] memory denials = _arbReconstructedDenials();
         vm.startBroadcast(deployerKey);
+        // Blocks BEFORE types — see Step4. (Zero pairs on Arbitrum at scan time; re-scan first.)
+        for (uint256 i = 0; i < denials.length; i++) {
+            PoaManagerHub(payable(HUB))
+                .adminCall(
+                    ARB_PAYMASTER,
+                    abi.encodeCall(
+                        PaymasterHub.setGlobalRuleBlock,
+                        (denials[i].orgId, denials[i].target, denials[i].selector, true)
+                    )
+                );
+        }
         for (uint256 i = 0; i < orgs.length; i++) {
             PoaManagerHub(payable(HUB))
                 .adminCall(
@@ -470,6 +537,7 @@ contract Step4b_RegisterTargetTypesArbitrum is Script, TargetTypesData {
                 );
         }
         vm.stopBroadcast();
+        console.log("Arbitrum: reconstructed denial blocks:", denials.length);
         console.log("Arbitrum target types registered for", orgs.length, "orgs");
     }
 }
@@ -546,6 +614,43 @@ contract Step6b_UpgradeOrgDeployerArbitrum is Script {
 
 abstract contract SimBase is Script, TargetTypesData {
     uint8 constant SUBJECT_TYPE_ACCOUNT = 0x00;
+
+    bytes4 constant SIM_SEL_CLAIM_TASK = bytes4(keccak256("claimTask(uint256)"));
+    bytes4 constant SIM_SEL_SUBMIT_TASK = bytes4(keccak256("submitTask(uint256,bytes32)"));
+    bytes4 constant SIM_SEL_UNCLAIM_TASK = bytes4(keccak256("unclaimTask(uint256)"));
+
+    /// @dev BEFORE the upgrade, write two pre-v20-style explicit denials through the OLD impl's
+    ///      setRule (which predates the block mapping): a zero-hint one (leaves a ZERO struct —
+    ///      only the event log knows it was denied) and a hint-carrying one ({false, 777}).
+    ///      These model the live denials Step4 must not resurrect.
+    function _createPreV20DenialFixtures(PaymasterHub pm, address poaMgr, bytes32 orgId, address taskManager) internal {
+        vm.prank(poaMgr);
+        pm.setRule(orgId, taskManager, SIM_SEL_CLAIM_TASK, false, 0);
+        vm.prank(poaMgr);
+        pm.setRule(orgId, taskManager, SIM_SEL_SUBMIT_TASK, false, 777);
+        require(!pm.getRule(orgId, taskManager, SIM_SEL_CLAIM_TASK).allowed, "SIM: fixture denial not written");
+        require(pm.getRule(orgId, taskManager, SIM_SEL_SUBMIT_TASK).maxCallGasHint == 777, "SIM: fixture hint lost");
+    }
+
+    /// @dev AFTER seed + denial-block reconstruction + target typing: both pre-v20 denials must
+    ///      still deny — the zero-hint one via its reconstructed block, the hinted one via the
+    ///      resolver itself (assert NO block, proving the on-chain hardening) — while a sibling
+    ///      selector on the same target resolves through the rulebook.
+    function _assertPreV20DenialsPreserved(PaymasterHub pm, bytes32 orgId, address taskManager) internal {
+        PaymasterHubLens lens = new PaymasterHubLens(address(pm));
+        (bool aClaim,,) = lens.effectiveRuleOf(orgId, taskManager, SIM_SEL_CLAIM_TASK);
+        require(!aClaim, "SIM: zero-hint pre-v20 denial RESURRECTED by rulebook");
+        require(pm.isGlobalRuleBlocked(orgId, taskManager, SIM_SEL_CLAIM_TASK), "SIM: reconstructed block missing");
+        (bool aSubmit,,) = lens.effectiveRuleOf(orgId, taskManager, SIM_SEL_SUBMIT_TASK);
+        require(!aSubmit, "SIM: hinted pre-v20 denial RESURRECTED by rulebook");
+        require(
+            !pm.isGlobalRuleBlocked(orgId, taskManager, SIM_SEL_SUBMIT_TASK),
+            "SIM: hinted denial should be honored by the resolver, not a block"
+        );
+        (bool aUnclaim,,) = lens.effectiveRuleOf(orgId, taskManager, SIM_SEL_UNCLAIM_TASK);
+        require(aUnclaim, "SIM: sibling selector must still resolve via the rulebook");
+        console.log("SIM: pre-v20 explicit denials preserved (block + resolver paths).");
+    }
 
     /// @dev The LIVE OrgDeployer must keep working across the hub upgrade: replicate its exact
     ///      call — the OLD 13-field registerAndConfigureOrg selector — and prove the legacy
@@ -725,6 +830,7 @@ contract SimGnosis is SimBase {
     // Test6's live zk-email rule (set on-chain) — used as the storage-survival witness.
     bytes32 constant TEST6_ORG = 0x263b2b29f392647f0fb8ddbb26f099e812ab4ba2777e5e07b906277164181f6b;
     address constant TEST6_ZK = 0xADAf24f05EE0D647A7c2AF5cAD0F377F1B159FD2;
+    address constant TEST6_TM = 0x3d93f0D090356D25E7a1614F0F8764b103ca99bc;
     bytes32 constant KUBI_ORG = 0xc0f2765d555e21bfad5c6b05accef86a5758e0dee3e9a5b4ee3c3f3069c2102e;
 
     function run() public {
@@ -734,6 +840,9 @@ contract SimGnosis is SimBase {
         // Pre-upgrade witnesses.
         PaymasterHub.OrgFinancials memory preFin = pm.getOrgFinancials(KUBI_ORG);
         bool preZkRule = pm.getRule(TEST6_ORG, TEST6_ZK, zkSel).allowed;
+
+        // Pre-v20 explicit-denial fixtures on Test6's TaskManager (written via the OLD impl).
+        _createPreV20DenialFixtures(pm, GNOSIS_POA_MANAGER, TEST6_ORG, TEST6_TM);
 
         // 1. Deploy new impl (libs auto-deployed in-fork) + upgrade the beacon as ADMIN_EOA.
         address newImpl = address(new PaymasterHub());
@@ -768,7 +877,21 @@ contract SimGnosis is SimBase {
         // 4. Seed via the Satellite adminCall (poaManager path) + spot checks.
         _seedViaAdminCall(pm, _satelliteAdminCall);
 
-        // 5. Register target types for all live orgs + assert unclaimTask coverage.
+        // 5. Step4 order: reconstructed denial blocks FIRST (event-scan data + the zero-hint
+        //    fixture, exactly as a pre-broadcast re-scan would include it), then target types.
+        DeniedPair[] memory denials = _gnosisReconstructedDenials();
+        for (uint256 i = 0; i < denials.length; i++) {
+            _satelliteAdminCall(
+                GNOSIS_PAYMASTER,
+                abi.encodeCall(
+                    PaymasterHub.setGlobalRuleBlock, (denials[i].orgId, denials[i].target, denials[i].selector, true)
+                )
+            );
+        }
+        _satelliteAdminCall(
+            GNOSIS_PAYMASTER,
+            abi.encodeCall(PaymasterHub.setGlobalRuleBlock, (TEST6_ORG, TEST6_TM, SIM_SEL_CLAIM_TASK, true))
+        );
         OrgTargets[] memory orgs = _gnosisOrgs();
         for (uint256 i = 0; i < orgs.length; i++) {
             _satelliteAdminCall(
@@ -777,6 +900,7 @@ contract SimGnosis is SimBase {
             );
         }
         _assertOrgCoverage(pm, orgs);
+        _assertPreV20DenialsPreserved(pm, TEST6_ORG, TEST6_TM);
 
         // 6. The LIVE OrgDeployer's legacy ABI keeps working (no bricking window).
         _simLegacyRegisterAndConfigure(pm, GNOSIS_POA_MANAGER);
@@ -811,8 +935,14 @@ contract SimGnosis is SimBase {
  *   --fork-url arbitrum -vvv
  */
 contract SimArbitrum is SimBase {
+    bytes32 constant POA_ORG = 0xa71879ef0e38b15fe7080196c0102f859e0ca8e7b8c0703ec8df03c66befd069;
+    address constant POA_TM = 0x681f29751724D2bED331d3EB35e0C9B1C57aF9F0;
+
     function run() public {
         PaymasterHub pm = PaymasterHub(payable(ARB_PAYMASTER));
+
+        // Pre-v20 explicit-denial fixtures on the Poa org's TaskManager (via the OLD impl).
+        _createPreV20DenialFixtures(pm, ARB_POA_MANAGER, POA_ORG, POA_TM);
 
         // 1. Deploy new impl + upgrade the beacon as ADMIN_EOA (local, no Hyperlane).
         address newImpl = address(new PaymasterHub());
@@ -829,7 +959,21 @@ contract SimArbitrum is SimBase {
         // 2. Seed via Hub.adminCall (poaManager path) + spot checks.
         _seedViaAdminCall(pm, _hubAdminCall);
 
-        // 3. Register target types for the live org(s) + assert unclaimTask coverage.
+        // 3. Step4b order: reconstructed denial blocks FIRST (zero live pairs at scan time —
+        //    the zero-hint fixture stands in, exactly as a pre-broadcast re-scan would add it),
+        //    then target types.
+        DeniedPair[] memory denials = _arbReconstructedDenials();
+        for (uint256 i = 0; i < denials.length; i++) {
+            _hubAdminCall(
+                ARB_PAYMASTER,
+                abi.encodeCall(
+                    PaymasterHub.setGlobalRuleBlock, (denials[i].orgId, denials[i].target, denials[i].selector, true)
+                )
+            );
+        }
+        _hubAdminCall(
+            ARB_PAYMASTER, abi.encodeCall(PaymasterHub.setGlobalRuleBlock, (POA_ORG, POA_TM, SIM_SEL_CLAIM_TASK, true))
+        );
         OrgTargets[] memory orgs = _arbOrgs();
         for (uint256 i = 0; i < orgs.length; i++) {
             _hubAdminCall(
@@ -838,6 +982,7 @@ contract SimArbitrum is SimBase {
             );
         }
         _assertOrgCoverage(pm, orgs);
+        _assertPreV20DenialsPreserved(pm, POA_ORG, POA_TM);
 
         // 4. The LIVE OrgDeployer's legacy ABI keeps working (no bricking window).
         _simLegacyRegisterAndConfigure(pm, ARB_POA_MANAGER);

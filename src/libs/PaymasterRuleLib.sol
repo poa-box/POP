@@ -24,9 +24,12 @@ import {PaymasterHubErrors} from "./PaymasterHubErrors.sol";
  *           resolves local only — the org votes new rules in, exactly like a pinned beacon.
  *         - Mirror orgs can veto a single global rule via `setGlobalRuleBlock` without leaving
  *           Mirror mode.
- *         Resolution order: local allowed → pass; org Static → deny; org block → deny;
- *         target typeId unset → deny; global rule allowed → pass; else deny. Fail-closed at
- *         every step, and fully inert for an org until its targetTypes are registered.
+ *         Resolution order: local allowed → pass; local {allowed:false, hint != 0} → deny
+ *         (explicit deny, incl. pre-v20 writes that predate the block mapping); org Static →
+ *         deny; org block → deny; target typeId unset → deny; global rule allowed → pass; else
+ *         deny. Fail-closed at every step, and fully inert for an org until its targetTypes are
+ *         registered. Pre-v20 zero-hint denies (zero struct — on-chain-indistinguishable from
+ *         unset) are preserved by the migration's event-log block reconstruction instead.
  *
  * @dev STORAGE: operates on the HUB's own ERC-7201 namespaced slots via delegatecall — struct
  *      definitions and slot derivations below MUST stay byte-identical to PaymasterHub's.
@@ -220,6 +223,14 @@ library PaymasterRuleLib {
     {
         Rule storage local = _rules()[orgId][target][selector];
         if (local.allowed) return (true, local.maxCallGasHint);
+
+        // A stored {allowed:false, hint != 0} rule is an EXPLICIT pre-v20 deny (written by the
+        // old setRule before the block mapping existed — post-v20 denies always pair with a
+        // block). Honor it: never fall through to the rulebook. Pre-v20 denies written with
+        // hint == 0 leave a zero struct (indistinguishable from unset on-chain) and are
+        // preserved by the migration's event-log block reconstruction instead — see
+        // UpgradePaymasterGlobalRules Step4.
+        if (local.maxCallGasHint != 0) return (false, 0);
 
         if (_rulesModes()[orgId] != RULES_MODE_MIRROR) return (false, 0);
         if (_globalRuleBlocks()[orgId][target][selector]) return (false, 0);

@@ -194,6 +194,9 @@ contract PaymasterHubLens {
         Rule memory local = hub.getRule(orgId, target, selector);
         if (local.allowed) return (true, local.maxCallGasHint, 1);
 
+        // Explicit pre-v20 deny ({allowed:false, hint != 0}) — mirrors PaymasterRuleLib.
+        if (local.maxCallGasHint != 0) return (false, 0, 0);
+
         if (hub.getRulesMode(orgId) != 0) return (false, 0, 0); // Static: local only
         if (hub.isGlobalRuleBlocked(orgId, target, selector)) return (false, 0, 0);
 

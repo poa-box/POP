@@ -303,13 +303,16 @@ Local rules are keyed by each org's own proxy addresses, so a new protocol funct
 Resolution order (fail-closed at every step):
 
 ```text
-local rule allowed?            → allow (local maxCallGasHint applies)
-org rules mode == Static?      → deny
-org blocked (target,selector)? → deny
-targetTypes[org][target] == 0? → deny
-global rule allowed?           → allow (global maxCallGasHint applies)
-else                           → deny (RuleDenied)
+local rule allowed?                     → allow (local maxCallGasHint applies)
+local {allowed:false, hint != 0}?       → deny (explicit deny — incl. pre-v20 writes, no block needed)
+org rules mode == Static?               → deny
+org blocked (target,selector)?          → deny
+targetTypes[org][target] == 0?          → deny
+global rule allowed?                    → allow (global maxCallGasHint applies)
+else                                    → deny (RuleDenied)
 ```
+
+Migration note: pre-v20 explicit denies written with hint = 0 leave a zero storage struct (indistinguishable from unset on-chain). The v20 rollout reconstructs those from the RuleSet event log as per-pair blocks, applied **before** any target types are registered — see `UpgradePaymasterGlobalRules.s.sol` Step4.
 
 **Managing the rulebook (poaManager or protocolAdmin):**
 
