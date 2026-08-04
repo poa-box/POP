@@ -362,7 +362,7 @@ abstract contract TargetTypesData {
 
 /// @title Step1_DeployImplGnosis — deploy PaymasterHub v20 impl on Gnosis via DD (CREATE3).
 /// Usage: FOUNDRY_PROFILE=production forge script .../UpgradePaymasterGlobalRules.s.sol:Step1_DeployImplGnosis \
-///        --rpc-url gnosis --broadcast --slow --optimizer-runs 1
+///        --rpc-url gnosis --broadcast --slow
 contract Step1_DeployImplGnosis is Script {
     function run() public {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
@@ -378,7 +378,7 @@ contract Step1_DeployImplGnosis is Script {
         address deployed = dd.deploy(salt, type(PaymasterHub).creationCode);
         vm.stopBroadcast();
         require(deployed == predicted, "Address mismatch");
-        require(deployed.code.length <= 24576, "impl exceeds EIP-170 -- lower --optimizer-runs");
+        require(deployed.code.length <= 24576, "impl exceeds EIP-170");
         console.log("Deployed:", deployed);
     }
 }
@@ -398,7 +398,7 @@ contract Step1b_DeployImplArbitrum is Script {
         address deployed = dd.deploy(salt, type(PaymasterHub).creationCode);
         vm.stopBroadcast();
         require(deployed == predicted, "Address mismatch");
-        require(deployed.code.length <= 24576, "impl exceeds EIP-170 -- lower --optimizer-runs");
+        require(deployed.code.length <= 24576, "impl exceeds EIP-170");
         console.log("Deployed:", deployed);
     }
 }
@@ -582,7 +582,7 @@ contract Step6_UpgradeOrgDeployerGnosis is Script {
         if (predicted.code.length == 0) {
             dd.deploy(salt, type(OrgDeployer).creationCode);
         }
-        require(predicted.code.length <= 24576, "impl exceeds EIP-170 -- lower --optimizer-runs");
+        require(predicted.code.length <= 24576, "impl exceeds EIP-170");
         IGnosisSatellite(GNOSIS_SATELLITE).upgradeBeaconDirect("OrgDeployer", predicted, ORG_DEPLOYER_VERSION);
         vm.stopBroadcast();
         console.log("Gnosis OrgDeployer beacon upgraded:", predicted);
@@ -601,7 +601,7 @@ contract Step6b_UpgradeOrgDeployerArbitrum is Script {
         if (predicted.code.length == 0) {
             dd.deploy(salt, type(OrgDeployer).creationCode);
         }
-        require(predicted.code.length <= 24576, "impl exceeds EIP-170 -- lower --optimizer-runs");
+        require(predicted.code.length <= 24576, "impl exceeds EIP-170");
         PoaManagerHub(payable(HUB)).upgradeBeaconLocal("OrgDeployer", predicted, ORG_DEPLOYER_VERSION);
         vm.stopBroadcast();
         console.log("Arbitrum OrgDeployer beacon upgraded:", predicted);
