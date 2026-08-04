@@ -11,6 +11,9 @@ import {GovernanceFactory, IHatsTreeSetup} from "./factories/GovernanceFactory.s
 import {AccessFactory} from "./factories/AccessFactory.sol";
 import {ModulesFactory} from "./factories/ModulesFactory.sol";
 import {RoleConfigStructs} from "./libs/RoleConfigStructs.sol";
+/// @dev Imported ONLY for compiler-derived `.selector` constants in the paymaster auto-whitelist
+///      (no runtime cost, no creation code — the edge already exists via ModulesFactory).
+import {ZkEmailInvites} from "./ZkEmailInvites.sol";
 
 /*────────────────────── Module‑specific hooks ──────────────────────────*/
 interface IExecutorAdmin {
@@ -104,6 +107,9 @@ contract OrgDeployer is Initializable {
     error OrgExistsMismatch();
     error Reentrant();
     error InvalidRoleConfiguration();
+    /// @dev The default-paymaster-rule builder filled a different number of slots than it allocated —
+    ///      a rule was added/removed without updating the `count` literal.
+    error RuleCountMismatch();
 
     /*────────────────────────────  Events  ───────────────────────────────*/
     event OrgDeployed(
@@ -1041,13 +1047,17 @@ contract OrgDeployer is Initializable {
         i++;
 
         if (educationEnabled) {
-            _appendEducationHubRules(targets, selectors, result.educationHub, i);
-            i += 4;
+            i = _appendEducationHubRules(targets, selectors, result.educationHub, i);
         }
 
         if (zkEmailEnabled) {
             i = _appendZkEmailInvitesRules(targets, selectors, gasHints, result.zkEmailInvites, i);
         }
+
+        // Every slot must be filled: an under-count panics (array OOB) inside a helper, but an OVER-count
+        // would leave a trailing zero-address rule that PaymasterHub only rejects incidentally. Assert the
+        // invariant explicitly so a future rule addition that forgets to bump `count` fails loudly here.
+        if (i != count) revert RuleCountMismatch();
 
         // Set all rules to allowed (gas hints already populated where non-zero).
         for (uint256 j = 0; j < count; j++) {
@@ -1055,11 +1065,11 @@ contract OrgDeployer is Initializable {
         }
     }
 
-    /// @dev ZkEmailProof tuple (domain): (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string)
-    ///      ZkEmailProofV2 tuple (email): (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32)
-    ///      PasskeyEnrollment tuple: (bytes32,bytes32,bytes32,uint256)
-    ///      WebAuthnAuth tuple: (bytes,bytes,uint256,uint256,bytes32,bytes32)
-    ///      4 selectors: domain claim, specific-address claim, and the two passkey register-and-claim variants.
+    /// @dev 4 selectors: domain claim, specific-address claim, and the two passkey register-and-claim variants.
+    ///      These MUST be compiler-derived `.selector` references, never hand-hashed signature strings: the
+    ///      Blocker-2 domain-binding change swapped `ZkEmailProof`'s trailing `string` for `bytes32
+    ///      fromDomainHash`, which moved all four selectors. The stale strings survived that change and every
+    ///      new org got four rules no function answers, so gasless claims failed rule validation (issue #188).
     function _appendZkEmailInvitesRules(
         address[] memory targets,
         bytes4[] memory selectors,
@@ -1069,38 +1079,22 @@ contract OrgDeployer is Initializable {
     ) private pure returns (uint256) {
         // Bare domain claim: Groth16 verify (~250k) + DKIM lookup + merkle proof + hat mint.
         targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
-            )
-        );
+        selectors[i] = ZkEmailInvites.claimRoleByDomain.selector;
         gasHints[i] = 800_000;
         i++;
         // Bare specific-address claim (v2 proof carries emailHash).
         targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "claimRoleByEmail((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),address,uint256[],bytes32[])"
-            )
-        );
+        selectors[i] = ZkEmailInvites.claimRoleByEmail.selector;
         gasHints[i] = 800_000;
         i++;
         // Combined register + domain claim: passkey registration + account create + proof + merkle + mint.
         targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),uint256[],bytes32[])"
-            )
-        );
+        selectors[i] = ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector;
         gasHints[i] = 1_200_000;
         i++;
         // Combined register + specific-address claim.
         targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),uint256[],bytes32[])"
-            )
-        );
+        selectors[i] = ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector;
         gasHints[i] = 1_200_000;
         i++;
         return i;
@@ -1308,12 +1302,14 @@ contract OrgDeployer is Initializable {
         return i;
     }
 
+    /// @dev Returns the advanced index like every sibling helper — the caller must NOT hand-advance `i`,
+    ///      or adding a rule here silently overwrites the next module's slot.
     function _appendEducationHubRules(
         address[] memory targets,
         bytes4[] memory selectors,
         address educationHub,
         uint256 startIdx
-    ) private pure {
+    ) private pure returns (uint256) {
         targets[startIdx] = educationHub;
         selectors[startIdx] = bytes4(keccak256("completeModule(uint256,uint8)"));
         targets[startIdx + 1] = educationHub;
@@ -1322,6 +1318,7 @@ contract OrgDeployer is Initializable {
         selectors[startIdx + 2] = bytes4(keccak256("updateModule(uint256,bytes,bytes32,uint256)"));
         targets[startIdx + 3] = educationHub;
         selectors[startIdx + 3] = bytes4(keccak256("removeModule(uint256)"));
+        return startIdx + 4;
     }
 
     /**
