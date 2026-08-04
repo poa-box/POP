@@ -35,6 +35,7 @@ import {EligibilityModule} from "../src/EligibilityModule.sol";
 import {RoleConfigStructs} from "../src/libs/RoleConfigStructs.sol";
 import {IHybridVotingInit} from "../src/libs/ModuleDeploymentLib.sol";
 import {PaymasterHub} from "../src/PaymasterHub.sol";
+import {PaymasterHubLens} from "../src/PaymasterHubLens.sol";
 
 /*──────────────────────────────  Mocks  ──────────────────────────────*/
 
@@ -432,47 +433,47 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         _wireZkInfra();
 
         // Deploy with autoWhitelistContracts = true and assert that all FOUR ZkEmailInvites claim
-        // selectors are now allowed rules on PaymasterHub for our org. These four selector strings
-        // are copied verbatim from OrgDeployer._appendZkEmailInvitesRules.
+        // selectors resolve as allowed for our org via the global rulebook (the module gets the
+        // ZKEMAIL_INVITES_ID target type at deploy; selector strings live in DefaultGlobalRules).
         OrgDeployer.DeploymentResult memory result = _deployZkOrgWithPaymaster(ZK_ORG_ID);
-
-        bytes4 selClaimDomain = bytes4(
-            keccak256(
-                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
-            )
+        assertEq(
+            paymasterHub.getTargetType(ZK_ORG_ID, result.zkEmailInvites),
+            ModuleTypes.ZKEMAIL_INVITES_ID,
+            "zkEmailInvites target type registered at deploy"
         );
-        bytes4 selClaimEmail = bytes4(
-            keccak256(
-                "claimRoleByEmail((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),address,uint256[],bytes32[])"
-            )
-        );
-        bytes4 selRegisterClaimDomain = bytes4(
-            keccak256(
-                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),uint256[],bytes32[])"
-            )
-        );
-        bytes4 selRegisterClaimEmail = bytes4(
-            keccak256(
-                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),uint256[],bytes32[])"
-            )
-        );
+        _seedGlobalRulebook();
 
-        PaymasterHub.Rule memory rClaimDomain = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaimDomain);
-        PaymasterHub.Rule memory rClaimEmail = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaimEmail);
-        PaymasterHub.Rule memory rRegisterDomain =
-            paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimDomain);
-        PaymasterHub.Rule memory rRegisterEmail =
-            paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimEmail);
+        // Compiler-derived selectors: the old hand-written strings here used `string` where the
+        // real proof tuple has `bytes32` (domain hash) — a latent bug this test used to share
+        // with the deployer's whitelist builder (string compared against the same string).
+        bytes4 selClaimDomain = ZkEmailInvites.claimRoleByDomain.selector;
+        bytes4 selClaimEmail = ZkEmailInvites.claimRoleByEmail.selector;
+        bytes4 selRegisterClaimDomain = ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector;
+        bytes4 selRegisterClaimEmail = ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector;
 
-        assertTrue(rClaimDomain.allowed, "claimRoleByDomain allowed");
-        assertTrue(rClaimEmail.allowed, "claimRoleByEmail allowed");
-        assertTrue(rRegisterDomain.allowed, "registerAndClaimByDomainWithPasskey allowed");
-        assertTrue(rRegisterEmail.allowed, "registerAndClaimByEmailWithPasskey allowed");
+        (bool aDomain, uint32 hDomain,) = _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.zkEmailInvites, selClaimDomain);
+        (bool aEmail, uint32 hEmail,) = _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.zkEmailInvites, selClaimEmail);
+        (bool aRegDomain, uint32 hRegDomain,) =
+            _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimDomain);
+        (bool aRegEmail, uint32 hRegEmail,) =
+            _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimEmail);
 
-        assertEq(uint256(rClaimDomain.maxCallGasHint), 800_000, "domain claim gas hint");
-        assertEq(uint256(rClaimEmail.maxCallGasHint), 800_000, "email claim gas hint");
-        assertEq(uint256(rRegisterDomain.maxCallGasHint), 1_200_000, "combined domain claim gas hint");
-        assertEq(uint256(rRegisterEmail.maxCallGasHint), 1_200_000, "combined email claim gas hint");
+        assertTrue(aDomain, "claimRoleByDomain allowed");
+        assertTrue(aEmail, "claimRoleByEmail allowed");
+        assertTrue(aRegDomain, "registerAndClaimByDomainWithPasskey allowed");
+        assertTrue(aRegEmail, "registerAndClaimByEmailWithPasskey allowed");
+
+        assertEq(uint256(hDomain), 800_000, "domain claim gas hint");
+        assertEq(uint256(hEmail), 800_000, "email claim gas hint");
+        assertEq(uint256(hRegDomain), 1_200_000, "combined domain claim gas hint");
+        assertEq(uint256(hRegEmail), 1_200_000, "combined email claim gas hint");
+    }
+
+    PaymasterHubLens private _zkLens;
+
+    function _pmLensZk() internal returns (PaymasterHubLens) {
+        if (address(_zkLens) == address(0)) _zkLens = new PaymasterHubLens(address(paymasterHub));
+        return _zkLens;
     }
 
     function testPaymasterRules_unaffected_whenInfraNotWired() public {
@@ -481,11 +482,7 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         assertEq(result.zkEmailInvites, address(0), "ZkEmailInvites not deployed");
 
         // Even if we query for the selector, it should be unset (allowed=false, cap=0).
-        bytes4 selClaimDomain = bytes4(
-            keccak256(
-                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
-            )
-        );
+        bytes4 selClaimDomain = ZkEmailInvites.claimRoleByDomain.selector;
         PaymasterHub.Rule memory rClaim = paymasterHub.getRule(ZK_ORG_ID, address(0), selClaimDomain);
         assertFalse(rClaim.allowed, "no rule for address(0)");
         assertEq(uint256(rClaim.maxCallGasHint), 0, "no gas hint");

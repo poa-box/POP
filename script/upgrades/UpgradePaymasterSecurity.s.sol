@@ -6,6 +6,7 @@ import "forge-std/console.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
 import {PaymasterHubLens} from "../../src/PaymasterHubLens.sol";
 import {PaymasterHubErrors} from "../../src/libs/PaymasterHubErrors.sol";
+import {PaymasterRuleLib} from "../../src/libs/PaymasterRuleLib.sol";
 import {IPaymaster} from "../../src/interfaces/IPaymaster.sol";
 import {PackedUserOperation} from "../../src/interfaces/PackedUserOperation.sol";
 import {PoaManagerHub} from "../../src/crosschain/PoaManagerHub.sol";
@@ -370,7 +371,7 @@ contract SimGnosis is SimBase {
         bcaps[0] = type(uint128).max;
         blens[0] = 7 days;
 
-        PaymasterHub.DeployConfig memory cfg = PaymasterHub.DeployConfig({
+        PaymasterRuleLib.DeployConfig memory cfg = PaymasterRuleLib.DeployConfig({
             operatorHatId: 0,
             maxFeePerGas: 100 gwei,
             maxPriorityFeePerGas: 100 gwei,
@@ -383,7 +384,10 @@ contract SimGnosis is SimBase {
             ruleMaxCallGasHints: hints,
             budgetSubjectKeys: bkeys,
             budgetCapsPerEpoch: bcaps,
-            budgetEpochLens: blens
+            budgetEpochLens: blens,
+            typeTargets: new address[](0),
+            typeIds: new bytes32[](0),
+            rulesMode: 0
         });
 
         vm.prank(poaMgr);

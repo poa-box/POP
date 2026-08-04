@@ -11,6 +11,7 @@ import {GovernanceFactory, IHatsTreeSetup} from "./factories/GovernanceFactory.s
 import {AccessFactory} from "./factories/AccessFactory.sol";
 import {ModulesFactory} from "./factories/ModulesFactory.sol";
 import {RoleConfigStructs} from "./libs/RoleConfigStructs.sol";
+import {ModuleTypes} from "./libs/ModuleTypes.sol";
 
 /*────────────────────── Module‑specific hooks ──────────────────────────*/
 interface IExecutorAdmin {
@@ -50,6 +51,10 @@ interface IPaymasterHub {
         bytes32[] budgetSubjectKeys;
         uint128[] budgetCapsPerEpoch;
         uint32[] budgetEpochLens;
+        // Target module-type registration for global-rulebook resolution (PaymasterRuleLib)
+        address[] typeTargets;
+        bytes32[] typeIds;
+        uint8 rulesMode; // 0 = Mirror (follow global rulebook), 1 = Static (local snapshot)
     }
 
     function registerOrg(bytes32 orgId, uint256 adminHatId, uint256 operatorHatId) external;
@@ -955,12 +960,14 @@ contract OrgDeployer is Initializable {
         bool hasConfig = hasFeeCaps || pmCfg.autoWhitelistContracts || hasBudgets || msg.value > 0;
 
         if (hasConfig) {
-            // Build rules for auto-whitelisting deployed contracts
-            (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints) = pmCfg.autoWhitelistContracts
-                ? _buildDefaultPaymasterRules(
-                    result, params.educationHubConfig.enabled, params.registryAddr, address(l.orgRegistry)
-                )
-                : (new address[](0), new bytes4[](0), new bool[](0), new uint32[](0));
+            // Map deployed org contracts (+ shared registries) to module typeIds so the org's
+            // sponsorship rules resolve through the PaymasterHub's type-keyed GLOBAL RULEBOOK.
+            // Replaces the former hardcoded per-selector whitelist (_buildDefaultPaymasterRules):
+            // new/changed functions are now added once to the rulebook by Poa instead of
+            // requiring an OrgDeployer redeploy plus a vote in every org.
+            (address[] memory typeTargets, bytes32[] memory typeIds) = pmCfg.autoWhitelistContracts
+                ? _buildTargetTypes(result, params.registryAddr, address(l.orgRegistry))
+                : (new address[](0), new bytes32[](0));
 
             // Build per-role-hat budgets if configured (+ the zk-email CLAIM budget when the module deploys)
             (bytes32[] memory budgetKeys, uint128[] memory budgetCaps, uint32[] memory budgetEpochLens) = hasBudgets
@@ -976,13 +983,19 @@ contract OrgDeployer is Initializable {
                 maxCallGas: pmCfg.maxCallGas,
                 maxVerificationGas: pmCfg.maxVerificationGas,
                 maxPreVerificationGas: pmCfg.maxPreVerificationGas,
-                ruleTargets: targets,
-                ruleSelectors: selectors,
-                ruleAllowed: allowed,
-                ruleMaxCallGasHints: gasHints,
+                ruleTargets: new address[](0),
+                ruleSelectors: new bytes4[](0),
+                ruleAllowed: new bool[](0),
+                ruleMaxCallGasHints: new uint32[](0),
                 budgetSubjectKeys: budgetKeys,
                 budgetCapsPerEpoch: budgetCaps,
-                budgetEpochLens: budgetEpochLens
+                budgetEpochLens: budgetEpochLens,
+                typeTargets: typeTargets,
+                typeIds: typeIds,
+                // autoUpgrade orgs mirror the global rulebook; pinned orgs get a Static local
+                // snapshot of it and vote changes in afterwards (bootstrap currently requires
+                // autoUpgrade=true, so Static-at-deploy is future-proofing).
+                rulesMode: params.autoUpgrade ? 0 : 1
             });
 
             IPaymasterHub(l.paymasterHub).registerAndConfigureOrg{value: msg.value}(params.orgId, topHatId, config);
@@ -993,335 +1006,57 @@ contract OrgDeployer is Initializable {
     }
 
     /**
-     * @notice Build default paymaster whitelist rules for deployed org contracts
-     * @dev Whitelists common user-facing functions on QuickJoin, TaskManager, Voting, etc.
-     *      Split into per-contract helpers to stay under stack-depth limits with via_ir.
+     * @notice Map the org's deployed contracts (and the shared registries) to module typeIds
+     * @dev Sponsored selectors per typeId live in the PaymasterHub's global rulebook, managed by
+     *      Poa (setGlobalRulesBatch) — see script/helpers/DefaultGlobalRules.sol for the seed set.
+     *      `registryAddr` is the UniversalAccountRegistry (holds `setProfileMetadata`),
+     *      `orgRegistryAddr` is the OrgRegistry (holds `updateOrgMetaAsAdmin`) — two distinct
+     *      contracts (L-53).
      */
-    /// @dev `registryAddr` is the UniversalAccountRegistry (holds `setProfileMetadata`),
-    ///      `orgRegistryAddr` is the OrgRegistry (holds `updateOrgMetaAsAdmin`). These are
-    ///      two distinct contracts — L-53 fix: `updateOrgMetaAsAdmin` was previously
-    ///      registered against `registryAddr`, so gasless org-metadata edits never worked
-    ///      (the paymaster rule pointed at a contract that doesn't implement the selector).
-    function _buildDefaultPaymasterRules(
-        DeploymentResult memory result,
-        bool educationEnabled,
-        address registryAddr,
-        address orgRegistryAddr
-    )
+    function _buildTargetTypes(DeploymentResult memory result, address registryAddr, address orgRegistryAddr)
         internal
         pure
-        returns (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints)
+        returns (address[] memory typeTargets, bytes32[] memory typeIds)
     {
-        // Count: QuickJoin(6) + TaskManager(17) + HybridVoting(3) + DDVoting(3) + PaymentManager(5) + EligibilityModule(5) + ParticipationToken(3) + Registry(2) + EducationHub(0 or 4) + ZkEmailInvites(0 or 4)
-        uint256 count = 44;
-        if (educationEnabled) count += 4;
+        bool educationEnabled = result.educationHub != address(0);
         bool zkEmailEnabled = result.zkEmailInvites != address(0);
-        if (zkEmailEnabled) count += 4;
 
-        targets = new address[](count);
-        selectors = new bytes4[](count);
-        allowed = new bool[](count);
-        gasHints = new uint32[](count);
+        uint256 count = 9;
+        if (educationEnabled) count += 1;
+        if (zkEmailEnabled) count += 1;
 
-        uint256 i = 0;
-        i = _appendQuickJoinRules(targets, selectors, result.quickJoin, i);
-        i = _appendTaskManagerRules(targets, selectors, result.taskManager, i);
-        i = _appendVotingRules(targets, selectors, result.hybridVoting, result.directDemocracyVoting, i);
-        i = _appendPaymentManagerRules(targets, selectors, result.paymentManager, i);
-        i = _appendEligibilityRules(targets, selectors, result.eligibilityModule, i);
-        i = _appendParticipationTokenRules(targets, selectors, result.participationToken, i);
+        typeTargets = new address[](count);
+        typeIds = new bytes32[](count);
 
-        // setProfileMetadata lives on UniversalAccountRegistry (registryAddr).
-        targets[i] = registryAddr;
-        selectors[i] = bytes4(keccak256("setProfileMetadata(bytes32)"));
-        i++;
-        // updateOrgMetaAsAdmin lives on OrgRegistry (orgRegistryAddr), NOT the account registry.
-        targets[i] = orgRegistryAddr;
-        selectors[i] = bytes4(keccak256("updateOrgMetaAsAdmin(bytes32,bytes,bytes32)"));
-        i++;
+        typeTargets[0] = result.quickJoin;
+        typeIds[0] = ModuleTypes.QUICK_JOIN_ID;
+        typeTargets[1] = result.taskManager;
+        typeIds[1] = ModuleTypes.TASK_MANAGER_ID;
+        typeTargets[2] = result.hybridVoting;
+        typeIds[2] = ModuleTypes.HYBRID_VOTING_ID;
+        typeTargets[3] = result.directDemocracyVoting;
+        typeIds[3] = ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID;
+        typeTargets[4] = result.paymentManager;
+        typeIds[4] = ModuleTypes.PAYMENT_MANAGER_ID;
+        typeTargets[5] = result.eligibilityModule;
+        typeIds[5] = ModuleTypes.ELIGIBILITY_MODULE_ID;
+        typeTargets[6] = result.participationToken;
+        typeIds[6] = ModuleTypes.PARTICIPATION_TOKEN_ID;
+        typeTargets[7] = registryAddr;
+        typeIds[7] = ModuleTypes.UNIVERSAL_ACCOUNT_REGISTRY_ID;
+        typeTargets[8] = orgRegistryAddr;
+        typeIds[8] = ModuleTypes.ORG_REGISTRY_ID;
 
+        uint256 i = 9;
         if (educationEnabled) {
-            _appendEducationHubRules(targets, selectors, result.educationHub, i);
-            i += 4;
+            typeTargets[i] = result.educationHub;
+            typeIds[i] = ModuleTypes.EDUCATION_HUB_ID;
+            i++;
         }
-
         if (zkEmailEnabled) {
-            i = _appendZkEmailInvitesRules(targets, selectors, gasHints, result.zkEmailInvites, i);
+            typeTargets[i] = result.zkEmailInvites;
+            typeIds[i] = ModuleTypes.ZKEMAIL_INVITES_ID;
         }
-
-        // Set all rules to allowed (gas hints already populated where non-zero).
-        for (uint256 j = 0; j < count; j++) {
-            allowed[j] = true;
-        }
-    }
-
-    /// @dev ZkEmailProof tuple (domain): (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string)
-    ///      ZkEmailProofV2 tuple (email): (uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32)
-    ///      PasskeyEnrollment tuple: (bytes32,bytes32,bytes32,uint256)
-    ///      WebAuthnAuth tuple: (bytes,bytes,uint256,uint256,bytes32,bytes32)
-    ///      4 selectors: domain claim, specific-address claim, and the two passkey register-and-claim variants.
-    function _appendZkEmailInvitesRules(
-        address[] memory targets,
-        bytes4[] memory selectors,
-        uint32[] memory gasHints,
-        address zk,
-        uint256 i
-    ) private pure returns (uint256) {
-        // Bare domain claim: Groth16 verify (~250k) + DKIM lookup + merkle proof + hat mint.
-        targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "claimRoleByDomain((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),address,uint256[],bytes32[])"
-            )
-        );
-        gasHints[i] = 800_000;
-        i++;
-        // Bare specific-address claim (v2 proof carries emailHash).
-        targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "claimRoleByEmail((uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),address,uint256[],bytes32[])"
-            )
-        );
-        gasHints[i] = 800_000;
-        i++;
-        // Combined register + domain claim: passkey registration + account create + proof + merkle + mint.
-        targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "registerAndClaimByDomainWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string),uint256[],bytes32[])"
-            )
-        );
-        gasHints[i] = 1_200_000;
-        i++;
-        // Combined register + specific-address claim.
-        targets[i] = zk;
-        selectors[i] = bytes4(
-            keccak256(
-                "registerAndClaimByEmailWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),(uint256[2],uint256[2][2],uint256[2],bytes32,bytes32,string,bytes32),uint256[],bytes32[])"
-            )
-        );
-        gasHints[i] = 1_200_000;
-        i++;
-        return i;
-    }
-
-    function _appendQuickJoinRules(address[] memory targets, bytes4[] memory selectors, address qj, uint256 i)
-        private
-        pure
-        returns (uint256)
-    {
-        targets[i] = qj;
-        selectors[i] = bytes4(keccak256("quickJoinWithUser()"));
-        i++;
-        targets[i] = qj;
-        selectors[i] = bytes4(keccak256("registerAndQuickJoin(address,string,uint256,uint256,bytes)"));
-        i++;
-        targets[i] = qj;
-        selectors[i] = bytes4(
-            keccak256(
-                "registerAndQuickJoinWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32))"
-            )
-        );
-        i++;
-        targets[i] = qj;
-        selectors[i] = bytes4(keccak256("claimHatsWithUser(uint256[])"));
-        i++;
-        targets[i] = qj;
-        selectors[i] = bytes4(keccak256("registerAndClaimHats(address,string,uint256,uint256,bytes,uint256[])"));
-        i++;
-        targets[i] = qj;
-        selectors[i] = bytes4(
-            keccak256(
-                "registerAndClaimHatsWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),uint256[])"
-            )
-        );
-        i++;
-        return i;
-    }
-
-    function _appendTaskManagerRules(address[] memory targets, bytes4[] memory selectors, address tm, uint256 i)
-        private
-        pure
-        returns (uint256)
-    {
-        // TaskManager v6: create/update selectors carry deadline params (uint48 absoluteDeadline,
-        // uint32 completionWindow appended).
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] =
-            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("claimTask(uint256)"));
-        i++;
-        // TaskManager v7: voluntary claim release (and ASSIGN release of an expired claim).
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("unclaimTask(uint256)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("submitTask(uint256,bytes32)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("completeTask(uint256)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("applyForTask(uint256,bytes32)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("approveApplication(uint256,address)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("assignTask(uint256,address)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("rejectTask(uint256,bytes32)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("cancelTask(uint256)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(
-            keccak256("createAndAssignTask(uint256,bytes,bytes32,bytes32,address,address,uint256,bool,uint48,uint32)")
-        );
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(
-            keccak256(
-                "createProject((bytes,bytes32,uint256,address[],uint256[],uint256[],uint256[],uint256[],address[],uint256[]))"
-            )
-        );
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("deleteProject(bytes32)"));
-        i++;
-        // TaskManager v4: setFolders is gated on executor OR organizerHatIds wearer;
-        // whitelist for gasless 4337/passkey calls by organizer-hat holders.
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("setFolders(bytes32,bytes32)"));
-        i++;
-        // TaskManager v5: post-claim edit functions, gated on EDIT_META / EDIT_FULL perms.
-        // Whitelist for gasless 4337/passkey calls by edit-permitted hat holders.
-        // (updateTask signature is the v6 variant with deadline params.)
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)"));
-        i++;
-        targets[i] = tm;
-        selectors[i] = bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)"));
-        i++;
-        return i;
-    }
-
-    function _appendVotingRules(address[] memory targets, bytes4[] memory selectors, address hv, address ddv, uint256 i)
-        private
-        pure
-        returns (uint256)
-    {
-        bytes4 voteSel = bytes4(keccak256("vote(uint256,uint8[],uint8[])"));
-        bytes4 announceSel = bytes4(keccak256("announceWinner(uint256)"));
-        bytes4 proposalSel =
-            bytes4(keccak256("createProposal(bytes,bytes32,uint32,uint8,(address,uint256,bytes)[][],uint256[])"));
-
-        targets[i] = hv;
-        selectors[i] = voteSel;
-        i++;
-        targets[i] = hv;
-        selectors[i] = announceSel;
-        i++;
-        targets[i] = hv;
-        selectors[i] = proposalSel;
-        i++;
-        targets[i] = ddv;
-        selectors[i] = voteSel;
-        i++;
-        targets[i] = ddv;
-        selectors[i] = announceSel;
-        i++;
-        targets[i] = ddv;
-        selectors[i] = proposalSel;
-        i++;
-        return i;
-    }
-
-    function _appendPaymentManagerRules(address[] memory targets, bytes4[] memory selectors, address pm, uint256 i)
-        private
-        pure
-        returns (uint256)
-    {
-        targets[i] = pm;
-        selectors[i] = bytes4(keccak256("claimDistribution(uint256,uint256,bytes32[])"));
-        i++;
-        targets[i] = pm;
-        selectors[i] = bytes4(keccak256("claimMultiple(uint256[],uint256[],bytes32[][])"));
-        i++;
-        targets[i] = pm;
-        selectors[i] = bytes4(keccak256("optOut(bool)"));
-        i++;
-        targets[i] = pm;
-        selectors[i] = bytes4(keccak256("createDistribution(address,uint256,bytes32,uint256)"));
-        i++;
-        targets[i] = pm;
-        selectors[i] = bytes4(keccak256("finalizeDistribution(uint256,uint256)"));
-        i++;
-        return i;
-    }
-
-    function _appendEligibilityRules(address[] memory targets, bytes4[] memory selectors, address em, uint256 i)
-        private
-        pure
-        returns (uint256)
-    {
-        targets[i] = em;
-        selectors[i] = bytes4(keccak256("claimVouchedHat(uint256)"));
-        i++;
-        targets[i] = em;
-        selectors[i] = bytes4(keccak256("vouchFor(address,uint256)"));
-        i++;
-        targets[i] = em;
-        selectors[i] = bytes4(keccak256("revokeVouch(address,uint256)"));
-        i++;
-        targets[i] = em;
-        selectors[i] = bytes4(keccak256("applyForRole(uint256,bytes32)"));
-        i++;
-        targets[i] = em;
-        selectors[i] = bytes4(keccak256("withdrawApplication(uint256)"));
-        i++;
-        return i;
-    }
-
-    function _appendParticipationTokenRules(address[] memory targets, bytes4[] memory selectors, address pt, uint256 i)
-        private
-        pure
-        returns (uint256)
-    {
-        targets[i] = pt;
-        selectors[i] = bytes4(keccak256("requestTokens(uint96,string)"));
-        i++;
-        targets[i] = pt;
-        selectors[i] = bytes4(keccak256("approveRequest(uint256)"));
-        i++;
-        targets[i] = pt;
-        selectors[i] = bytes4(keccak256("cancelRequest(uint256)"));
-        i++;
-        return i;
-    }
-
-    function _appendEducationHubRules(
-        address[] memory targets,
-        bytes4[] memory selectors,
-        address educationHub,
-        uint256 startIdx
-    ) private pure {
-        targets[startIdx] = educationHub;
-        selectors[startIdx] = bytes4(keccak256("completeModule(uint256,uint8)"));
-        targets[startIdx + 1] = educationHub;
-        selectors[startIdx + 1] = bytes4(keccak256("createModule(bytes,bytes32,uint256,uint8)"));
-        targets[startIdx + 2] = educationHub;
-        selectors[startIdx + 2] = bytes4(keccak256("updateModule(uint256,bytes,bytes32,uint256)"));
-        targets[startIdx + 3] = educationHub;
-        selectors[startIdx + 3] = bytes4(keccak256("removeModule(uint256)"));
     }
 
     /**

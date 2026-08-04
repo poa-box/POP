@@ -93,6 +93,13 @@ interface IPaymasterHubStorage {
     function getOrgDeployCount(address account) external view returns (uint8);
     function ENTRY_POINT() external view returns (address);
     function HATS() external view returns (address);
+    // Global rulebook getters (PaymasterRuleLib feature)
+    function getGlobalRule(bytes32 typeId, bytes4 selector) external view returns (Rule memory);
+    function getGlobalRuleCount() external view returns (uint256);
+    function getGlobalRuleAt(uint256 index) external view returns (bytes32 typeId, bytes4 selector, Rule memory rule);
+    function getTargetType(bytes32 orgId, address target) external view returns (bytes32);
+    function getRulesMode(bytes32 orgId) external view returns (uint8);
+    function isGlobalRuleBlocked(bytes32 orgId, address target, bytes4 selector) external view returns (bool);
 }
 
 /**
@@ -154,12 +161,48 @@ contract PaymasterHubLens {
         return budget.capPerEpoch > budget.usedInEpoch ? budget.capPerEpoch - budget.usedInEpoch : 0;
     }
 
+    /// @notice The org's LOCAL rule only (no global fallback) — see effectiveRuleOf for resolution
     function ruleOf(bytes32 orgId, address target, bytes4 selector) external view returns (Rule memory) {
         return hub.getRule(orgId, target, selector);
     }
 
+    /// @notice Whether (target, selector) is sponsored for the org — local rule OR global fallback
     function isAllowed(bytes32 orgId, address target, bytes4 selector) external view returns (bool) {
-        return hub.getRule(orgId, target, selector).allowed;
+        (bool allowed,,) = _effectiveRule(orgId, target, selector);
+        return allowed;
+    }
+
+    /// @notice Resolve the rule the hub would enforce for (org, target, selector)
+    /// @return allowed Whether the pair is sponsored
+    /// @return maxCallGasHint The gas hint that applies (from whichever rule resolved)
+    /// @return source 0 = denied, 1 = local rule, 2 = global rulebook
+    function effectiveRuleOf(bytes32 orgId, address target, bytes4 selector)
+        external
+        view
+        returns (bool allowed, uint32 maxCallGasHint, uint8 source)
+    {
+        return _effectiveRule(orgId, target, selector);
+    }
+
+    /// @dev Mirrors PaymasterRuleLib._resolveRule exactly: local allowed wins; global rulebook
+    ///      applies only for Mirror-mode orgs, not blocked, with a registered target typeId.
+    function _effectiveRule(bytes32 orgId, address target, bytes4 selector)
+        private
+        view
+        returns (bool allowed, uint32 maxCallGasHint, uint8 source)
+    {
+        Rule memory local = hub.getRule(orgId, target, selector);
+        if (local.allowed) return (true, local.maxCallGasHint, 1);
+
+        if (hub.getRulesMode(orgId) != 0) return (false, 0, 0); // Static: local only
+        if (hub.isGlobalRuleBlocked(orgId, target, selector)) return (false, 0, 0);
+
+        bytes32 typeId = hub.getTargetType(orgId, target);
+        if (typeId == bytes32(0)) return (false, 0, 0);
+
+        Rule memory global = hub.getGlobalRule(typeId, selector);
+        if (!global.allowed) return (false, 0, 0);
+        return (true, global.maxCallGasHint, 2);
     }
 
     function orgConfig(bytes32 orgId) external view returns (OrgConfig memory) {
@@ -357,7 +400,8 @@ contract PaymasterHubLens {
                             innerSelector := mload(add(d, 0x20))
                         }
                     }
-                    if (!hub.getRule(orgId, targets[i], innerSelector).allowed) return false;
+                    (bool innerAllowed,,) = _effectiveRule(orgId, targets[i], innerSelector);
+                    if (!innerAllowed) return false;
                     unchecked {
                         ++i;
                     }
@@ -367,14 +411,14 @@ contract PaymasterHubLens {
         }
 
         (address target, bytes4 selector) = _extractTargetSelector(userOp, ruleId);
-        Rule memory rule = hub.getRule(orgId, target, selector);
-        if (!rule.allowed) return false;
-        // Parity with PaymasterHub._validateRules single-call path: a set maxCallGasHint
+        (bool allowed, uint32 maxCallGasHint,) = _effectiveRule(orgId, target, selector);
+        if (!allowed) return false;
+        // Parity with PaymasterRuleLib.validateRules single-call path: a set maxCallGasHint
         // rejects ops whose callGasLimit exceeds it (GasTooHigh). The batch path above
         // intentionally skips per-call gas hints, matching the hub.
-        if (rule.maxCallGasHint > 0) {
+        if (maxCallGasHint > 0) {
             (, uint128 callGasLimit) = UserOpLib.unpackAccountGasLimits(userOp.accountGasLimits);
-            if (callGasLimit > rule.maxCallGasHint) return false;
+            if (callGasLimit > maxCallGasHint) return false;
         }
         return true;
     }

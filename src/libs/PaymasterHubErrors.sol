@@ -131,6 +131,17 @@ library PaymasterHubErrors {
     /// @notice Org deploy request is malformed (bad calldata, has initCode, etc.)
     error InvalidOrgDeployRequest();
 
+    // ============ Global Rulebook Errors ============
+
+    /// @notice Rules mode value out of range (0 = Mirror, 1 = Static)
+    error InvalidRulesMode();
+
+    /// @notice Module typeId is zero / target has no registered typeId
+    error InvalidTypeId();
+
+    /// @notice Referenced global rulebook entry does not exist
+    error GlobalRuleUnknown();
+
     // ============ Events ============
 
     /// @notice Emitted when the PaymasterHub is initialized
@@ -216,4 +227,17 @@ library PaymasterHubErrors {
 
     /// @notice Emitted when solidarity fund distribution is unpaused
     event SolidarityDistributionUnpaused();
+
+    /// @notice Emitted when a protocol-level global rulebook entry is set (allowed=true) or removed (allowed=false)
+    /// @dev typeId = keccak256(module type name), matching ModuleTypes / OrgRegistry typeIds
+    event GlobalRuleSet(bytes32 indexed typeId, bytes4 indexed selector, bool allowed, uint32 maxCallGasHint);
+
+    /// @notice Emitted when an org target is mapped to a module typeId (bytes32(0) = cleared)
+    event TargetTypeSet(bytes32 indexed orgId, address indexed target, bytes32 indexed typeId);
+
+    /// @notice Emitted when an org's rules mode changes (0 = Mirror: local + global rulebook; 1 = Static: local only)
+    event RulesModeSet(bytes32 indexed orgId, uint8 mode);
+
+    /// @notice Emitted when an org blocks/unblocks a single global rule (Mirror-mode veto)
+    event GlobalRuleBlockSet(bytes32 indexed orgId, address indexed target, bytes4 indexed selector, bool blocked);
 }

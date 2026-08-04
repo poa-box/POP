@@ -276,105 +276,99 @@ hub.setSolidarityFee(100); // basis points (100 = 1%)
 
 ### Rules Engine
 
-The rules engine validates **which smart contracts and functions** users can call. Organizations whitelist/blacklist specific targets and selectors.
+The rules engine validates **which smart contracts and functions** users can call. Resolution has two tiers: each org's **local rules** (address-keyed, org-managed) and the protocol-wide **global rulebook** (type-keyed, Poa-managed). All rule logic lives in `PaymasterRuleLib`, a delegatecall library operating on the hub's own storage (EIP-170 headroom + ERC-7562-safe validation).
 
 #### Rule Structure
 
 ```solidity
 struct Rule {
+    uint32 maxCallGasHint;  // Optional gas limit hint (field order matters for decoders!)
     bool allowed;           // Is this target/selector allowed?
-    uint32 maxCallGasHint;  // Optional gas limit hint
 }
 
-// Storage: orgId → target → selector → Rule
-mapping(bytes32 => mapping(address => mapping(bytes4 => Rule))) private _rules;
+// Local rules:  orgId → target address → selector → Rule   (poa.paymasterhub.rules)
+// Global rules: module typeId → selector → Rule             (poa.paymasterhub.globalrules)
 ```
+
+#### Global Rulebook (type-keyed, Poa-managed)
+
+Local rules are keyed by each org's own proxy addresses, so a new protocol function used to require a vote in *every* org (or a `adminBatchAddRules` fan-out enumerating them all) plus an OrgDeployer redeploy. The global rulebook removes that burden — it is the `SwitchableBeacon` analog for sponsorship rules:
+
+- Entries are keyed by `(module typeId, selector)` where typeId = `keccak256(moduleName)` — the same IDs `OrgRegistry`/`ModuleTypes` use. One entry covers the matching module of **every** org.
+- Each org maps its proxy addresses to typeIds (`setTargetTypesBatch`, seeded automatically by OrgDeployer at deploy). Resolution is inert for an org until its targets are mapped.
+- Per-org **rules mode** (`setRulesMode`): `0 = Mirror` (default) — local rules first, then global rulebook; `1 = Static` — local rules only, the org votes changes in exactly like a pinned beacon upgrade.
+- Mirror orgs can veto one specific global rule without leaving Mirror mode: `setGlobalRuleBlock(orgId, target, selector, true)`.
+- The rulebook is enumerable on-chain (`getGlobalRuleCount` / `getGlobalRuleAt`), which powers `snapshotGlobalRules`.
+
+Resolution order (fail-closed at every step):
+
+```text
+local rule allowed?            → allow (local maxCallGasHint applies)
+org rules mode == Static?      → deny
+org blocked (target,selector)? → deny
+targetTypes[org][target] == 0? → deny
+global rule allowed?           → allow (global maxCallGasHint applies)
+else                           → deny (RuleDenied)
+```
+
+**Managing the rulebook (poaManager or protocolAdmin):**
+
+```solidity
+// Upsert entries (allowed=true) or remove them (allowed=false)
+hub.setGlobalRulesBatch(typeIds, selectors, allowed, maxCallGasHints);
+```
+
+The canonical seed set lives in `script/helpers/DefaultGlobalRules.sol`. To sponsor a new function protocol-wide: add it there, broadcast one `setGlobalRulesBatch` per chain — every Mirror org picks it up instantly, and no OrgDeployer redeploy is needed. Removing an entry is the central kill-switch: sponsorship stops immediately for all Mirror orgs.
+
+**Org-side controls (admin/operator hat, or PoaManager):**
+
+```solidity
+hub.setTargetTypesBatch(orgId, targets, typeIds);      // map/clear module typeIds
+hub.setRulesMode(orgId, mode);                         // 0 = Mirror, 1 = Static
+hub.setGlobalRuleBlock(orgId, target, selector, bool); // veto one global rule
+hub.adoptGlobalRules(orgId, targets, selectors);       // copy specific entries → local rules
+hub.snapshotGlobalRules(orgId, targets);               // copy ALL applicable entries → local rules
+```
+
+A Static-leaning org should pass `snapshotGlobalRules` + `setRulesMode(orgId, 1)` in one governance batch — sponsorship continues from the local copies and later rulebook changes no longer apply. OrgDeployer does this automatically for orgs deployed with `autoUpgrade = false`; Mirror orgs get only target-type mappings (zero local rules) and resolve everything through the rulebook.
+
+Trust note: this adds **no new Poa power** — PoaManager could already write any org's local rules via the `onlyOrgOperator` bypass (and `adminBatchAddRules`). The rulebook just makes that administration transparent (evented, enumerable) and instantly revocable, while Static mode / blocks give orgs an explicit opt-out.
 
 #### Validation Modes
 
 **1. Generic Mode (RULE_ID = 0x00000000)**
 
-For accounts that execute **nested calls** (e.g., SimpleAccount calling `execute(target, data)`):
+For accounts that execute **nested calls** (e.g., SimpleAccount calling `execute(target, data)`): the inner `(target, selector)` is extracted from calldata, and `executeBatch` variants are validated **per inner call** (every inner pair must resolve allowed; gas hints are not checked per-inner-call).
+
+**2. Coarse Mode (RULE_ID = 0x000000FF)**
+
+Checks `(userOp.sender, outer selector)` — account-level rules. Note the account itself has no target-type mapping, so coarse mode resolves through local rules only.
+
+#### Setting Local Rules
 
 ```solidity
-// Extracts target and selector from calldata
-target = extractTarget(userOp.callData);
-selector = extractSelector(userOp.callData);
+// Allow (clears any standing global-rule block for the pair)
+hub.setRule(orgId, target, selector, true, 500000);
 
-// Check rule
-if (!rules[target][selector].allowed) {
-    revert RuleDenied(target, selector);
-}
-```
+// EXPLICIT DENY — actually revokes for Mirror orgs: writes the local deny AND blocks the
+// global fallback (without the block, allowed=false would silently fall through to the rulebook)
+hub.setRule(orgId, target, selector, false, 0);
 
-**2. Executor Mode (RULE_ID = 0x00000001)**
+// Batch rules (same allow/deny semantics per entry)
+hub.setRulesBatch(orgId, targets, selectors, allowedFlags, gasHints);
 
-For the **org's executor contract** itself:
-
-```solidity
-// Validates executor's own functions
-target = userOp.sender; // The executor
-selector = bytes4(userOp.callData);
-
-if (!rules[target][selector].allowed) {
-    revert RuleDenied(target, selector);
-}
-```
-
-**3. Coarse Mode (RULE_ID = 0x000000FF)**
-
-**Skip validation entirely** - account-level approval only.
-
-#### Setting Rules
-
-```solidity
-// Single rule
-hub.setRule(
-    orgId,
-    0x1234...5678,              // target contract
-    0xabcdef00,                 // function selector
-    true,                       // allowed
-    500000                      // maxCallGasHint (optional)
-);
-
-// Batch rules
-hub.setRulesBatch(
-    orgId,
-    [target1, target2, target3],
-    [selector1, selector2, selector3],
-    [true, true, false],
-    [500000, 300000, 0]
-);
-
-// Clear rule
+// RESET to protocol default: deletes the local rule AND any standing block — a Mirror org
+// falls back to the global rulebook for this pair afterwards
 hub.clearRule(orgId, target, selector);
 ```
 
-**Access:** Admin or Operator hat
+**Access:** Admin or Operator hat (or PoaManager)
 
-#### Example: Whitelist DEX and Token
+Legacy note: the hub also keeps the pre-rulebook 13-field `registerAndConfigureOrg` overload (selector `0xc6f422d9`) so already-deployed OrgDeployer versions keep working across the v20 upgrade — they seed address-keyed local rules exactly as before.
 
-```solidity
-// Allow Uniswap V3 Router swaps
-hub.setRule(
-    orgId,
-    0xE592427A0AEce92De3Edee1F18E0157C05861564, // Uniswap V3 Router
-    0x414bf389,                                   // exactInputSingle(params)
-    true,
-    1000000
-);
+#### Reading effective rules
 
-// Allow USDC transfers
-hub.setRule(
-    orgId,
-    0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48, // USDC
-    0xa9059cbb,                                   // transfer(to, amount)
-    true,
-    100000
-);
-
-// Block everything else by default
-```
+`PaymasterHubLens.effectiveRuleOf(orgId, target, selector)` returns `(allowed, maxCallGasHint, source)` with `source`: 0 = denied, 1 = local rule, 2 = global rulebook. `lens.wouldValidate` predicts the full validation including global resolution. `hub.getRule` returns the LOCAL rule only.
 
 ---
 
