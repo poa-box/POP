@@ -275,6 +275,15 @@ abstract contract ZkEmailRulesBase is Script {
 
     /* ── shared verify ── */
 
+    /// @dev Accepts EITHER env var. Do NOT collapse this to
+    ///      `vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"))` (the older upgrade scripts'
+    ///      spelling): Solidity evaluates the default eagerly, so that form reverts when
+    ///      DEPLOYER_PRIVATE_KEY is unset even if PRIVATE_KEY is set.
+    function _signerKey() internal view returns (uint256 key) {
+        key = vm.envOr("PRIVATE_KEY", uint256(0));
+        if (key == 0) key = vm.envUint("DEPLOYER_PRIVATE_KEY");
+    }
+
     function _alreadyLive(address poaManager, address impl) internal view returns (bool live) {
         live = PoaManager(poaManager).getCurrentImplementationById(keccak256("OrgDeployer")) == impl;
         if (live) console.log("Beacon already points at", impl, "- skipping upgrade call");
@@ -353,7 +362,7 @@ contract SimZkEmailRulesArbitrum is ZkEmailRulesBase {
 contract Step1_UpgradeGnosis is ZkEmailRulesBase {
     function run() external {
         require(block.chainid == 100, "run on gnosis");
-        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
+        uint256 key = _signerKey();
         require(vm.addr(key) == ISatelliteZk(GNOSIS_SATELLITE).owner(), "signer must own the Satellite");
 
         console.log("\n=== Step 1: OrgDeployer v19 on Gnosis ===");
@@ -374,7 +383,7 @@ contract Step1_UpgradeGnosis is ZkEmailRulesBase {
 contract Step2_UpgradeArbitrum is ZkEmailRulesBase {
     function run() external {
         require(block.chainid == 42161, "run on arbitrum");
-        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
+        uint256 key = _signerKey();
         require(vm.addr(key) == IHubZk(HUB).owner(), "signer must own the Hub");
         require(!IHubZk(HUB).paused(), "Hub is paused");
 
