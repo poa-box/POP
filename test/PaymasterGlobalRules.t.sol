@@ -761,6 +761,43 @@ contract PaymasterGlobalRulesTest is Test {
         _validateExpectDenied(_rawOp(ORG, callData), TASK_MANAGER, bytes4(0));
     }
 
+    /*═══════════════════════ adminBatchAddRules event parity ═══════════════════════*/
+
+    /// @notice adminBatchAddRules must EMIT RuleSet for every write (the old inline write was
+    ///         event-less — subgraph-invisible state) and share writeLocalRule's allow
+    ///         semantics: a fresh allow clears any standing global-rule block for the pair.
+    ///         Unregistered orgs are still skipped silently (no write, no event).
+    function testAdminBatchAddRules_EmitsAndClearsBlocks() public {
+        // Standing block from an earlier explicit deny — the batch allow must clear it.
+        vm.prank(orgAdmin);
+        hub.setGlobalRuleBlock(ORG, TASK_MANAGER, SEL_CLAIM_TASK, true);
+
+        bytes32[] memory orgIds = new bytes32[](2);
+        address[] memory targets = new address[](2);
+        bytes4[] memory selectors = new bytes4[](2);
+        orgIds[0] = ORG;
+        targets[0] = TASK_MANAGER;
+        selectors[0] = SEL_CLAIM_TASK;
+        orgIds[1] = keccak256("NEVER_REGISTERED_ORG"); // must be skipped: no write, no event
+        targets[1] = TASK_MANAGER;
+        selectors[1] = SEL_CLAIM_TASK;
+
+        vm.expectEmit(true, true, true, true);
+        emit PaymasterHubErrors.RuleSet(ORG, TASK_MANAGER, SEL_CLAIM_TASK, true, 0);
+        vm.expectEmit(true, true, true, true);
+        emit PaymasterHubErrors.GlobalRuleBlockSet(ORG, TASK_MANAGER, SEL_CLAIM_TASK, false);
+        vm.prank(poaManager);
+        hub.adminBatchAddRules(orgIds, targets, selectors);
+
+        assertTrue(hub.getRule(ORG, TASK_MANAGER, SEL_CLAIM_TASK).allowed);
+        assertFalse(hub.isGlobalRuleBlocked(ORG, TASK_MANAGER, SEL_CLAIM_TASK), "batch allow must clear the block");
+        assertFalse(
+            hub.getRule(keccak256("NEVER_REGISTERED_ORG"), TASK_MANAGER, SEL_CLAIM_TASK).allowed,
+            "unregistered org must be skipped"
+        );
+        _validate(_op(TASK_MANAGER, SEL_CLAIM_TASK));
+    }
+
     /*═══════════════════════ Pre-v20 explicit-denial preservation (P1) ═══════════════════════*/
 
     /// @dev Storage slot of rules[ORG][target][selector] — used to plant PRE-v20 state that the

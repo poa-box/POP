@@ -860,7 +860,10 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         for (uint256 i; i < len;) {
             if (targets[i] == address(0)) revert PaymasterHubErrors.ZeroAddress();
             if (_getOrgsStorage()[orgIds[i]].adminHatId != 0) {
-                _getRulesStorage()[orgIds[i]][targets[i]][selectors[i]] = Rule({allowed: true, maxCallGasHint: 0});
+                // Routed through the lib writer so the write EMITS RuleSet (the old inline write
+                // was event-less — subgraph-invisible state) and shares the allow semantics
+                // (a fresh allow clears any standing global-rule block for the pair).
+                PaymasterRuleLib.writeLocalRule(orgIds[i], targets[i], selectors[i], true, 0);
             }
             unchecked {
                 ++i;
