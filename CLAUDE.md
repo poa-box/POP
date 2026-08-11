@@ -24,6 +24,7 @@
 
 ## Gotchas
 
+- **Paymaster whitelist is the type-keyed GLOBAL RULEBOOK** — sponsored selectors live in PaymasterHub's global rulebook keyed by `(module typeId, selector)` and are managed via `setGlobalRulesBatch` (poaManager/protocolAdmin). The canonical list is `script/helpers/DefaultGlobalRules.sol`. To sponsor a new/changed function: add it there + broadcast one `setGlobalRulesBatch` per chain — do NOT re-add hardcoded selector lists to OrgDeployer (`_buildDefaultPaymasterRules` was deleted for this). Orgs resolve local rules first, then (in Mirror mode, the default) the rulebook via their `targetTypes` mapping; Static-mode orgs vote rules in like a pinned upgrade. All rule logic is in `PaymasterRuleLib` (delegatecall lib — its ERC-7201 slot mirrors must stay byte-identical to PaymasterHub's).
 - **Optimizer is OFF by default** — Solidity IR codegen bug causes `vm.roll()` to silently produce wrong results with optimizer enabled (foundry.toml documents the upstream issues). Use `FOUNDRY_PROFILE=production` only for real deployments, never for tests.
 - **Default EVM is osaka, production is cancun** — osaka enables the P256 precompile at `0x100` for passkey signature tests. Production targets cancun for L2 compatibility.
 - **Org deploys need ~22M gas** — exceeds L1 Sepolia block gas limit. Must deploy on L2 (Base Sepolia, Optimism Sepolia, or Arbitrum Sepolia).

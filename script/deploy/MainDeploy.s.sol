@@ -14,6 +14,7 @@ import {PoaManager} from "../../src/PoaManager.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {OrgDeployer, ITaskManagerBootstrap} from "../../src/OrgDeployer.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
+import {DefaultGlobalRules} from "../helpers/DefaultGlobalRules.sol";
 import {UniversalAccountRegistry} from "../../src/UniversalAccountRegistry.sol";
 
 // Factories
@@ -212,6 +213,29 @@ contract DeployHomeChain is DeployHelper {
         PoaManager(infra.poaManager)
             .adminCall(infra.paymasterHub, abi.encodeWithSignature("unpauseSolidarityDistribution()"));
         console.log("Solidarity distribution unpaused for onboarding");
+
+        // Seed the global rulebook — without this, orgs deployed with autoWhitelistContracts
+        // resolve ZERO sponsored selectors (the deployer registers target types only).
+        {
+            (
+                bytes32[] memory grTypeIds,
+                bytes4[] memory grSelectors,
+                bool[] memory grAllowed,
+                uint32[] memory grHints
+            ) = DefaultGlobalRules.defaults();
+            PoaManager(infra.poaManager)
+                .adminCall(
+                    infra.paymasterHub,
+                    abi.encodeWithSignature(
+                        "setGlobalRulesBatch(bytes32[],bytes4[],bool[],uint32[])",
+                        grTypeIds,
+                        grSelectors,
+                        grAllowed,
+                        grHints
+                    )
+                );
+            console.log("Global rulebook seeded with entries:", grTypeIds.length);
+        }
 
         // Deploy OrgDeployer proxy
         address deployerBeacon = PoaManager(infra.poaManager).getBeaconById(keccak256("OrgDeployer"));

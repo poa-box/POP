@@ -18,6 +18,15 @@ import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
  * OrgDeployer v19 — real ZkEmailInvites claim selectors in the auto-whitelist (issue #188)
  * ============================================================================
  *
+ * ⚠ SUPERSEDED for post-v20 rollouts by UpgradePaymasterGlobalRules.s.sol (OrgDeployer v20):
+ * the global-rulebook refactor DELETED _buildDefaultPaymasterRules entirely — sponsored
+ * selectors (including the corrected zk-email ones, cross-checked against the ABI by
+ * OrgDeployerPaymasterRules.t.sol / PaymasterGlobalRules.t.sol) now live in
+ * script/helpers/DefaultGlobalRules.sol and ship via setGlobalRulesBatch. Broadcast THIS
+ * script only if it lands BEFORE the v20 hub upgrade (the near-term protective fix); its
+ * sims assume the pre-v20 hub ABI and the pre-v20 deployer sources, so on the rulebook
+ * branch they will not pass — compile-only here, kept as the v19 broadcast record.
+ *
  * `_appendZkEmailInvitesRules` derived its four selectors by hashing PRE-Blocker-2
  * signature strings whose `ZkEmailProof` tuple ended in `string`. The live struct ends in
  * `bytes32 fromDomainHash`, so every one of those four selectors was wrong:

@@ -18,6 +18,7 @@ import {PaymasterCalldataLib} from "./libs/PaymasterCalldataLib.sol";
 import {PaymasterAdminLib} from "./libs/PaymasterAdminLib.sol";
 import {PaymasterFinanceLib} from "./libs/PaymasterFinanceLib.sol";
 import {PaymasterSponsorshipLib} from "./libs/PaymasterSponsorshipLib.sol";
+import {PaymasterRuleLib} from "./libs/PaymasterRuleLib.sol";
 
 /**
  * @title PaymasterHub
@@ -47,7 +48,6 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
     uint8 private constant SPONSORSHIP_ORG_DEPLOY = 2;
 
     uint32 private constant RULE_ID_GENERIC = 0x00000000;
-    uint32 private constant RULE_ID_COARSE = 0x000000FF;
 
     uint32 private constant MIN_EPOCH_LENGTH = 1 hours;
     uint32 private constant MAX_EPOCH_LENGTH = 365 days;
@@ -179,6 +179,18 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.orgdeploy.counts")) - 1));
     bytes32 private constant ONBOARDING_COUNTS_STORAGE_LOCATION =
         keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.onboarding.counts")) - 1));
+    // Global rulebook namespaces — written exclusively via PaymasterRuleLib (delegatecall);
+    // mirrored here only for the read-only getters. Slot derivations MUST match the lib.
+    bytes32 private constant GLOBAL_RULES_STORAGE_LOCATION =
+        keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.globalrules")) - 1));
+    bytes32 private constant GLOBAL_RULE_KEYS_STORAGE_LOCATION =
+        keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.globalrulekeys")) - 1));
+    bytes32 private constant TARGET_TYPES_STORAGE_LOCATION =
+        keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.targettypes")) - 1));
+    bytes32 private constant RULES_MODES_STORAGE_LOCATION =
+        keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.rulesmodes")) - 1));
+    bytes32 private constant GLOBAL_RULE_BLOCKS_STORAGE_LOCATION =
+        keccak256(abi.encode(uint256(keccak256("poa.paymasterhub.globalruleblocks")) - 1));
 
     // ============ Constructor ============
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -258,31 +270,6 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         PaymasterAdminLib.setProtocolAdmin(newAdmin);
     }
 
-    // ============ Deploy Config Struct ============
-
-    /**
-     * @notice Configuration passed by OrgDeployer during org creation
-     * @dev Allows initial paymaster setup in the same transaction as org deployment
-     */
-    struct DeployConfig {
-        uint256 operatorHatId;
-        // Fee caps (all zeros = skip)
-        uint256 maxFeePerGas;
-        uint256 maxPriorityFeePerGas;
-        uint32 maxCallGas;
-        uint32 maxVerificationGas;
-        uint32 maxPreVerificationGas;
-        // Rules batch (empty arrays = skip)
-        address[] ruleTargets;
-        bytes4[] ruleSelectors;
-        bool[] ruleAllowed;
-        uint32[] ruleMaxCallGasHints;
-        // Budgets batch (empty arrays = skip)
-        bytes32[] budgetSubjectKeys;
-        uint128[] budgetCapsPerEpoch;
-        uint32[] budgetEpochLens;
-    }
-
     // ============ Org Registration ============
 
     /**
@@ -299,73 +286,45 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
 
     /**
      * @notice Register and configure an org with paymaster in one call
-     * @dev Called by OrgDeployer to register, configure rules/fee caps, and optionally deposit ETH
+     * @dev Called by OrgDeployer to register, configure rules/fee caps/target types/rules mode,
+     *      and optionally deposit ETH. Config application is delegated to PaymasterRuleLib
+     *      (EIP-170 headroom); the registrar gate and org registration stay here.
      * @param orgId Unique organization identifier
      * @param adminHatId Hat ID for org admin (topHat)
-     * @param config Initial paymaster configuration (operator hat, fee caps, rules)
+     * @param config Initial paymaster configuration (operator hat, fee caps, rules, target types)
      */
-    function registerAndConfigureOrg(bytes32 orgId, uint256 adminHatId, DeployConfig calldata config) external payable {
+    function registerAndConfigureOrg(bytes32 orgId, uint256 adminHatId, PaymasterRuleLib.DeployConfig calldata config)
+        external
+        payable
+    {
         _onlyRegistrar();
         _registerOrg(orgId, adminHatId, config.operatorHatId);
 
-        // Set fee caps if any non-zero
-        if (
-            config.maxFeePerGas != 0 || config.maxPriorityFeePerGas != 0 || config.maxCallGas != 0
-                || config.maxVerificationGas != 0 || config.maxPreVerificationGas != 0
-        ) {
-            FeeCaps storage feeCaps = _getFeeCapsStorage()[orgId];
-            feeCaps.maxFeePerGas = config.maxFeePerGas;
-            feeCaps.maxPriorityFeePerGas = config.maxPriorityFeePerGas;
-            feeCaps.maxCallGas = config.maxCallGas;
-            feeCaps.maxVerificationGas = config.maxVerificationGas;
-            feeCaps.maxPreVerificationGas = config.maxPreVerificationGas;
+        PaymasterRuleLib.applyDeployConfig(orgId, config);
 
-            emit PaymasterHubErrors.FeeCapsSet(
-                orgId,
-                config.maxFeePerGas,
-                config.maxPriorityFeePerGas,
-                config.maxCallGas,
-                config.maxVerificationGas,
-                config.maxPreVerificationGas
-            );
+        // Deposit ETH if sent
+        if (msg.value > 0) {
+            _depositForOrg(orgId, msg.value);
         }
+    }
 
-        // Set rules if arrays provided
-        if (config.ruleTargets.length > 0) {
-            _setRulesBatch(
-                orgId, config.ruleTargets, config.ruleSelectors, config.ruleAllowed, config.ruleMaxCallGasHints
-            );
-        }
+    /**
+     * @notice Legacy-ABI overload of registerAndConfigureOrg (pre-rulebook 13-field DeployConfig)
+     * @dev Retains the function selector the LIVE OrgDeployer proxies call, so the hub upgrade
+     *      needs NO lockstep OrgDeployer upgrade: orgs deployed through an un-upgraded deployer
+     *      get fee caps + address-keyed local rules + budgets exactly as before (no target types,
+     *      default Mirror mode — inert until types are mapped). Remove once every chain's
+     *      OrgDeployer speaks the new ABI.
+     */
+    function registerAndConfigureOrg(
+        bytes32 orgId,
+        uint256 adminHatId,
+        PaymasterRuleLib.LegacyDeployConfig calldata config
+    ) external payable {
+        _onlyRegistrar();
+        _registerOrg(orgId, adminHatId, config.operatorHatId);
 
-        // Set budgets if arrays provided
-        if (config.budgetSubjectKeys.length > 0) {
-            uint256 budgetLen = config.budgetSubjectKeys.length;
-            if (budgetLen != config.budgetCapsPerEpoch.length || budgetLen != config.budgetEpochLens.length) {
-                revert PaymasterHubErrors.ArrayLengthMismatch();
-            }
-
-            mapping(bytes32 => Budget) storage budgets = _getBudgetsStorage()[orgId];
-
-            for (uint256 j; j < budgetLen;) {
-                uint32 epochLen = config.budgetEpochLens[j];
-                if (epochLen < MIN_EPOCH_LENGTH || epochLen > MAX_EPOCH_LENGTH) {
-                    revert PaymasterHubErrors.InvalidEpochLength();
-                }
-
-                Budget storage budget = budgets[config.budgetSubjectKeys[j]];
-                budget.capPerEpoch = config.budgetCapsPerEpoch[j];
-                budget.epochLen = epochLen;
-                budget.epochStart = uint32(block.timestamp);
-
-                emit PaymasterHubErrors.BudgetSet(
-                    orgId, config.budgetSubjectKeys[j], config.budgetCapsPerEpoch[j], epochLen, uint32(block.timestamp)
-                );
-
-                unchecked {
-                    ++j;
-                }
-            }
-        }
+        PaymasterRuleLib.applyLegacyDeployConfig(orgId, config);
 
         // Deposit ETH if sent
         if (msg.value > 0) {
@@ -623,8 +582,9 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
                 subjectKey = _validateSubjectEligibility(userOp.sender, subjectType, subjectId);
             }
 
-            // Validate target/selector rules
-            _validateRules(userOp, ruleId, orgId);
+            // Validate target/selector rules (local org rules with global rulebook fallback for
+            // Mirror-mode orgs — delegatecall lib, hub's own storage only, ERC-7562 safe)
+            PaymasterRuleLib.validateRules(userOp, ruleId, orgId);
 
             // Validate fee and gas caps
             _validateFeeCaps(userOp, orgId);
@@ -823,11 +783,9 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         external
         onlyOrgOperator(orgId)
     {
-        if (target == address(0)) revert PaymasterHubErrors.ZeroAddress();
-
-        mapping(address => mapping(bytes4 => Rule)) storage rules = _getRulesStorage()[orgId];
-        rules[target][selector] = Rule({allowed: allowed, maxCallGasHint: maxCallGasHint});
-        emit PaymasterHubErrors.RuleSet(orgId, target, selector, allowed, maxCallGasHint);
+        // allowed=false is an EXPLICIT DENY (also blocks the global fallback for Mirror orgs);
+        // clearRule resets the pair to the protocol default instead. See PaymasterRuleLib.
+        PaymasterRuleLib.writeLocalRule(orgId, target, selector, allowed, maxCallGasHint);
     }
 
     /**
@@ -840,7 +798,51 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         bool[] calldata allowed,
         uint32[] calldata maxCallGasHints
     ) external onlyOrgOperator(orgId) {
-        _setRulesBatch(orgId, targets, selectors, allowed, maxCallGasHints);
+        PaymasterRuleLib.writeLocalRulesBatch(orgId, targets, selectors, allowed, maxCallGasHints);
+    }
+
+    // ============ Global Rulebook (see PaymasterRuleLib) ============
+
+    /// @notice Set or remove protocol-wide rulebook entries keyed by (module typeId, selector)
+    /// @dev poaManager/protocolAdmin gated (inside the lib). One entry covers the matching module
+    ///      of every Mirror-mode org — replaces per-org adminBatchAddRules fan-outs.
+    function setGlobalRulesBatch(
+        bytes32[] calldata typeIds,
+        bytes4[] calldata selectors,
+        bool[] calldata allowed,
+        uint32[] calldata maxCallGasHints
+    ) external {
+        PaymasterRuleLib.setGlobalRulesBatch(typeIds, selectors, allowed, maxCallGasHints);
+    }
+
+    /// @notice Map an org's target addresses to module typeIds for global rule resolution
+    /// @dev Org admin/operator/poaManager gated (inside the lib); bytes32(0) clears an entry
+    function setTargetTypesBatch(bytes32 orgId, address[] calldata targets, bytes32[] calldata typeIds) external {
+        PaymasterRuleLib.setTargetTypesBatch(orgId, targets, typeIds);
+    }
+
+    /// @notice Switch an org between Mirror (0, follow global rulebook) and Static (1, local only)
+    /// @dev Org admin/operator/poaManager gated (inside the lib)
+    function setRulesMode(bytes32 orgId, uint8 mode) external {
+        PaymasterRuleLib.setRulesMode(orgId, mode);
+    }
+
+    /// @notice Block or unblock a single global rule for an org without leaving Mirror mode
+    /// @dev Org admin/operator/poaManager gated (inside the lib)
+    function setGlobalRuleBlock(bytes32 orgId, address target, bytes4 selector, bool blocked) external {
+        PaymasterRuleLib.setGlobalRuleBlock(orgId, target, selector, blocked);
+    }
+
+    /// @notice Copy specific current global rulebook entries into the org's local rules
+    /// @dev Org admin/operator/poaManager gated (inside the lib)
+    function adoptGlobalRules(bytes32 orgId, address[] calldata targets, bytes4[] calldata selectors) external {
+        PaymasterRuleLib.adoptGlobalRules(orgId, targets, selectors);
+    }
+
+    /// @notice Copy all applicable global rulebook entries into the org's local rules
+    /// @dev Org admin/operator/poaManager gated (inside the lib)
+    function snapshotGlobalRules(bytes32 orgId, address[] calldata targets) external {
+        PaymasterRuleLib.snapshotGlobalRules(orgId, targets);
     }
 
     /// @notice Batch-add rules across orgs. Skips unregistered orgs.
@@ -858,35 +860,11 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         for (uint256 i; i < len;) {
             if (targets[i] == address(0)) revert PaymasterHubErrors.ZeroAddress();
             if (_getOrgsStorage()[orgIds[i]].adminHatId != 0) {
-                _getRulesStorage()[orgIds[i]][targets[i]][selectors[i]] = Rule({allowed: true, maxCallGasHint: 0});
+                // Routed through the lib writer so the write EMITS RuleSet (the old inline write
+                // was event-less — subgraph-invisible state) and shares the allow semantics
+                // (a fresh allow clears any standing global-rule block for the pair).
+                PaymasterRuleLib.writeLocalRule(orgIds[i], targets[i], selectors[i], true, 0);
             }
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    function _setRulesBatch(
-        bytes32 orgId,
-        address[] calldata targets,
-        bytes4[] calldata selectors,
-        bool[] calldata allowed,
-        uint32[] calldata maxCallGasHints
-    ) internal {
-        uint256 length = targets.length;
-        if (length != selectors.length || length != allowed.length || length != maxCallGasHints.length) {
-            revert PaymasterHubErrors.ArrayLengthMismatch();
-        }
-
-        mapping(address => mapping(bytes4 => Rule)) storage rules = _getRulesStorage()[orgId];
-
-        for (uint256 i; i < length;) {
-            if (targets[i] == address(0)) revert PaymasterHubErrors.ZeroAddress();
-
-            rules[targets[i]][selectors[i]] = Rule({allowed: allowed[i], maxCallGasHint: maxCallGasHints[i]});
-
-            emit PaymasterHubErrors.RuleSet(orgId, targets[i], selectors[i], allowed[i], maxCallGasHints[i]);
-
             unchecked {
                 ++i;
             }
@@ -897,9 +875,9 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
      * @notice Clear a rule for target/selector combination
      */
     function clearRule(bytes32 orgId, address target, bytes4 selector) external onlyOrgOperator(orgId) {
-        mapping(address => mapping(bytes4 => Rule)) storage rules = _getRulesStorage()[orgId];
-        delete rules[target][selector];
-        emit PaymasterHubErrors.RuleSet(orgId, target, selector, false, 0);
+        // Resets the pair to the protocol default: deletes the local rule AND any standing
+        // block, so a Mirror org falls back to the global rulebook afterwards.
+        PaymasterRuleLib.clearLocalRule(orgId, target, selector);
     }
 
     /**
@@ -1215,6 +1193,58 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
     }
 
     /**
+     * @notice Get a global rulebook entry for a (module typeId, selector) pair
+     * @param typeId Module type identifier (keccak256 of the type name, per ModuleTypes)
+     * @param selector The function selector
+     * @return The Rule struct
+     */
+    function getGlobalRule(bytes32 typeId, bytes4 selector) external view returns (Rule memory) {
+        return _getGlobalRulesStorage()[typeId][selector];
+    }
+
+    /**
+     * @notice Number of entries currently in the global rulebook
+     */
+    function getGlobalRuleCount() external view returns (uint256) {
+        return _getGlobalRuleKeysStorage().keys.length;
+    }
+
+    /**
+     * @notice Enumerate the global rulebook
+     * @param index Position in the enumeration (0-based, unordered, changes on removal)
+     * @return typeId Module type identifier
+     * @return selector Function selector
+     * @return rule The Rule struct for the entry
+     */
+    function getGlobalRuleAt(uint256 index) external view returns (bytes32 typeId, bytes4 selector, Rule memory rule) {
+        PaymasterRuleLib.GlobalRuleKey storage key = _getGlobalRuleKeysStorage().keys[index];
+        typeId = key.typeId;
+        selector = key.selector;
+        rule = _getGlobalRulesStorage()[typeId][selector];
+    }
+
+    /**
+     * @notice Get the module typeId registered for an org's target address (bytes32(0) = none)
+     */
+    function getTargetType(bytes32 orgId, address target) external view returns (bytes32) {
+        return _getTargetTypesStorage()[orgId][target];
+    }
+
+    /**
+     * @notice Get an org's rules mode (0 = Mirror: local + global rulebook; 1 = Static: local only)
+     */
+    function getRulesMode(bytes32 orgId) external view returns (uint8) {
+        return _getRulesModesStorage()[orgId];
+    }
+
+    /**
+     * @notice Whether an org has vetoed the global rule for (target, selector)
+     */
+    function isGlobalRuleBlocked(bytes32 orgId, address target, bytes4 selector) external view returns (bool) {
+        return _getGlobalRuleBlocksStorage()[orgId][target][selector];
+    }
+
+    /**
      * @notice Get the fee caps for an org
      * @param orgId Organization identifier
      * @return The FeeCaps struct
@@ -1308,6 +1338,45 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
 
     function _getBudgetsStorage() private pure returns (mapping(bytes32 => mapping(bytes32 => Budget)) storage $) {
         bytes32 slot = BUDGETS_STORAGE_LOCATION;
+        assembly {
+            $.slot := slot
+        }
+    }
+
+    function _getGlobalRulesStorage() private pure returns (mapping(bytes32 => mapping(bytes4 => Rule)) storage $) {
+        bytes32 slot = GLOBAL_RULES_STORAGE_LOCATION;
+        assembly {
+            $.slot := slot
+        }
+    }
+
+    function _getGlobalRuleKeysStorage() private pure returns (PaymasterRuleLib.GlobalRulesEnum storage $) {
+        bytes32 slot = GLOBAL_RULE_KEYS_STORAGE_LOCATION;
+        assembly {
+            $.slot := slot
+        }
+    }
+
+    function _getTargetTypesStorage() private pure returns (mapping(bytes32 => mapping(address => bytes32)) storage $) {
+        bytes32 slot = TARGET_TYPES_STORAGE_LOCATION;
+        assembly {
+            $.slot := slot
+        }
+    }
+
+    function _getRulesModesStorage() private pure returns (mapping(bytes32 => uint8) storage $) {
+        bytes32 slot = RULES_MODES_STORAGE_LOCATION;
+        assembly {
+            $.slot := slot
+        }
+    }
+
+    function _getGlobalRuleBlocksStorage()
+        private
+        pure
+        returns (mapping(bytes32 => mapping(address => mapping(bytes4 => bool))) storage $)
+    {
+        bytes32 slot = GLOBAL_RULE_BLOCKS_STORAGE_LOCATION;
         assembly {
             $.slot := slot
         }
@@ -1453,120 +1522,9 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
         }
     }
 
-    function _validateRules(PackedUserOperation calldata userOp, uint32 ruleId, bytes32 orgId) private view {
-        bytes calldata callData = userOp.callData;
-        if (callData.length < 4) revert PaymasterHubErrors.InvalidPaymasterData();
-
-        // For RULE_ID_GENERIC, executeBatch needs per-inner-call validation
-        if (ruleId == RULE_ID_GENERIC) {
-            bytes4 outerSelector = bytes4(callData[0:4]);
-            // executeBatch(address[],uint256[],bytes[]) or executeBatch(address[],bytes[])
-            if (outerSelector == bytes4(0x47e1da2a) || outerSelector == bytes4(0x18dfb3c7)) {
-                _validateBatchRules(callData, outerSelector, orgId);
-                return;
-            }
-        }
-
-        // Single-call path (existing logic)
-        (address target, bytes4 selector) = _extractTargetSelector(userOp, ruleId);
-
-        mapping(address => mapping(bytes4 => Rule)) storage rules = _getRulesStorage()[orgId];
-        Rule storage rule = rules[target][selector];
-
-        if (!rule.allowed) revert PaymasterHubErrors.RuleDenied(target, selector);
-
-        // Check gas hint if set
-        if (rule.maxCallGasHint > 0) {
-            (, uint128 callGasLimit) = UserOpLib.unpackAccountGasLimits(userOp.accountGasLimits);
-            if (callGasLimit > rule.maxCallGasHint) revert PaymasterHubErrors.GasTooHigh();
-        }
-    }
-
-    /// @dev Validates that every inner call in an executeBatch is allowed by org rules.
-    ///      Decodes the batch targets and datas, then checks each (target, selector) pair.
-    ///      Gas hints are not checked per-call (total callGasLimit still applies via FeeCaps).
-    ///      Inner calls with < 4 bytes of data use selector bytes4(0) (treated as raw ETH transfer / fallback).
-    function _validateBatchRules(bytes calldata callData, bytes4 outerSelector, bytes32 orgId) private view {
-        mapping(address => mapping(bytes4 => Rule)) storage rules = _getRulesStorage()[orgId];
-
-        // Decode targets and datas from either batch format
-        address[] memory targets;
-        bytes[] memory datas;
-        if (outerSelector == bytes4(0x47e1da2a)) {
-            // executeBatch(address[],uint256[],bytes[]) — PasskeyAccount pattern
-            (targets,, datas) = abi.decode(callData[4:], (address[], uint256[], bytes[]));
-        } else {
-            // executeBatch(address[],bytes[]) — SimpleAccount pattern (0x18dfb3c7)
-            (targets, datas) = abi.decode(callData[4:], (address[], bytes[]));
-        }
-
-        if (targets.length != datas.length) revert PaymasterHubErrors.ArrayLengthMismatch();
-        for (uint256 i = 0; i < targets.length;) {
-            bytes4 innerSelector;
-            if (datas[i].length >= 4) {
-                bytes memory d = datas[i];
-                assembly {
-                    innerSelector := mload(add(d, 0x20))
-                }
-            }
-            Rule storage rule = rules[targets[i]][innerSelector];
-            if (!rule.allowed) revert PaymasterHubErrors.RuleDenied(targets[i], innerSelector);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    function _extractTargetSelector(PackedUserOperation calldata userOp, uint32 ruleId)
-        private
-        pure
-        returns (address target, bytes4 selector)
-    {
-        bytes calldata callData = userOp.callData;
-
-        if (callData.length < 4) revert PaymasterHubErrors.InvalidPaymasterData();
-
-        if (ruleId == RULE_ID_GENERIC) {
-            // ERC-4337 account execute patterns (SimpleAccount, PasskeyAccount, etc.)
-            selector = bytes4(callData[0:4]);
-
-            // Check for execute(address,uint256,bytes) - 0xb61d27f6
-            // Used by SimpleAccount, PasskeyAccount, and most ERC-4337 wallets
-            if (selector == 0xb61d27f6 && callData.length >= 0x64) {
-                assembly {
-                    // Extract target address at offset 0x04
-                    target := calldataload(add(callData.offset, 0x04))
-
-                    // Read the bytes data offset pointer at position 0x44
-                    // This offset is relative to the start of params (0x04)
-                    let dataOffset := calldataload(add(callData.offset, 0x44))
-
-                    // Only extract inner selector if dataOffset is the standard 0x60
-                    // (3rd dynamic param in ABI encoding). A non-standard offset could
-                    // allow an attacker to point at arbitrary calldata.
-                    if eq(dataOffset, 0x60) {
-                        let dataStart := add(add(0x04, dataOffset), 0x20)
-                        if lt(dataStart, callData.length) {
-                            selector := calldataload(add(callData.offset, dataStart))
-                        }
-                    }
-                }
-                selector = bytes4(selector);
-            }
-            // For RULE_ID_GENERIC, executeBatch selectors (0x47e1da2a, 0x18dfb3c7) are
-            // intercepted by _validateRules → _validateBatchRules before reaching here.
-            // Any other outer selector (including non-execute custom functions) falls through.
-            else {
-                target = userOp.sender;
-            }
-        } else if (ruleId == RULE_ID_COARSE) {
-            // Coarse mode: only check account's selector
-            target = userOp.sender;
-            selector = bytes4(callData[0:4]);
-        } else {
-            revert PaymasterHubErrors.InvalidRuleId();
-        }
-    }
+    // NOTE: rule validation (_validateRules / _validateBatchRules / _extractTargetSelector)
+    // moved to PaymasterRuleLib (delegatecall) together with the new global-rulebook fallback
+    // resolution — see PaymasterRuleLib.validateRules. Keeping hub copies would be dead code.
 
     function _validateFeeCaps(PackedUserOperation calldata userOp, bytes32 orgId) private view {
         FeeCaps storage caps = _getFeeCapsStorage()[orgId];

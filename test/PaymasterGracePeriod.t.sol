@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {PaymasterHub} from "../src/PaymasterHub.sol";
+import {PaymasterRuleLib} from "../src/libs/PaymasterRuleLib.sol";
 import {IPaymaster} from "../src/interfaces/IPaymaster.sol";
 import {IEntryPoint} from "../src/interfaces/IEntryPoint.sol";
 import {PackedUserOperation} from "../src/interfaces/PackedUserOperation.sol";
@@ -92,7 +93,7 @@ contract PaymasterGracePeriodTest is Test {
         budgetCaps[0] = BUDGET_CAP;
         budgetEpochLens[0] = BUDGET_EPOCH_LEN;
 
-        PaymasterHub.DeployConfig memory config = PaymasterHub.DeployConfig({
+        PaymasterRuleLib.DeployConfig memory config = PaymasterRuleLib.DeployConfig({
             operatorHatId: 0,
             maxFeePerGas: 100 gwei,
             maxPriorityFeePerGas: 100 gwei,
@@ -105,7 +106,10 @@ contract PaymasterGracePeriodTest is Test {
             ruleMaxCallGasHints: gasHints,
             budgetSubjectKeys: budgetKeys,
             budgetCapsPerEpoch: budgetCaps,
-            budgetEpochLens: budgetEpochLens
+            budgetEpochLens: budgetEpochLens,
+            typeTargets: new address[](0),
+            typeIds: new bytes32[](0),
+            rulesMode: 0
         });
 
         // Register and configure org (as registrar, this sets rules/budgets/caps)
@@ -909,7 +913,7 @@ contract PaymasterGracePeriodTest is Test {
         budgetCaps[0] = BUDGET_CAP;
         budgetEpochLens[0] = BUDGET_EPOCH_LEN;
 
-        PaymasterHub.DeployConfig memory config = PaymasterHub.DeployConfig({
+        PaymasterRuleLib.DeployConfig memory config = PaymasterRuleLib.DeployConfig({
             operatorHatId: 0,
             maxFeePerGas: 100 gwei,
             maxPriorityFeePerGas: 100 gwei,
@@ -922,7 +926,10 @@ contract PaymasterGracePeriodTest is Test {
             ruleMaxCallGasHints: gasHints,
             budgetSubjectKeys: budgetKeys,
             budgetCapsPerEpoch: budgetCaps,
-            budgetEpochLens: budgetEpochLens
+            budgetEpochLens: budgetEpochLens,
+            typeTargets: new address[](0),
+            typeIds: new bytes32[](0),
+            rulesMode: 0
         });
 
         pm2.registerAndConfigureOrg{value: 0.1 ether}(orgId2, ADMIN_HAT, config);
@@ -999,7 +1006,7 @@ contract PaymasterGracePeriodTest is Test {
         budgetCaps[0] = BUDGET_CAP;
         budgetEpochLens[0] = BUDGET_EPOCH_LEN;
 
-        PaymasterHub.DeployConfig memory config = PaymasterHub.DeployConfig({
+        PaymasterRuleLib.DeployConfig memory config = PaymasterRuleLib.DeployConfig({
             operatorHatId: 0,
             maxFeePerGas: 100 gwei,
             maxPriorityFeePerGas: 100 gwei,
@@ -1012,7 +1019,10 @@ contract PaymasterGracePeriodTest is Test {
             ruleMaxCallGasHints: gasHints,
             budgetSubjectKeys: budgetKeys,
             budgetCapsPerEpoch: budgetCaps,
-            budgetEpochLens: budgetEpochLens
+            budgetEpochLens: budgetEpochLens,
+            typeTargets: new address[](0),
+            typeIds: new bytes32[](0),
+            rulesMode: 0
         });
 
         // Register WITHOUT deposit

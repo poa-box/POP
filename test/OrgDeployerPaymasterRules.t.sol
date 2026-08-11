@@ -2,54 +2,46 @@
 pragma solidity ^0.8.21;
 
 /// @title OrgDeployerPaymasterRules.t.sol
-/// @notice Pins the auto-whitelist rule table produced by `OrgDeployer._buildDefaultPaymasterRules`
-///         to the live ABI of every target contract.
-/// @dev    WHY THIS EXISTS (issue #188). The rule table is built from hand-hashed signature STRINGS.
-///         When `ZkEmailProof` gained `bytes32 fromDomainHash` (Blocker-2 domain binding), all four
-///         ZkEmailInvites claim selectors moved, but the strings did not — so every new org with
-///         `autoWhitelistContracts: true` got four paymaster rules that no function answers, and gasless
-///         zk-email claims silently failed rule validation. Nothing caught it: the one test that
-///         exercised those rules re-derived the SAME stale strings ("copied verbatim from OrgDeployer"),
-///         so it asserted the bug and stayed green.
-///
-///         This test is deliberately NOT a copy of the source literals. Every expected selector is a
-///         compiler-derived `Contract.fn.selector`, so it is anchored to the ABI. Set equality is
-///         asserted in BOTH directions, which makes it fail on drift, on a dropped rule, on an added
-///         rule the test doesn't know about, and on a duplicated slot.
+/// @notice Pins the paymaster auto-whitelist surface OrgDeployer produces — now the TARGET-TYPE
+///         map consumed by the PaymasterHub global rulebook — plus the rulebook's zk-email
+///         entries, to the live ABI of every module.
+/// @dev    WHY THIS EXISTS (issue #188). The old per-selector rule table was built from
+///         hand-hashed signature STRINGS; when `ZkEmailProof` gained `bytes32 fromDomainHash`
+///         (Blocker-2), all four ZkEmailInvites claim selectors moved but the strings did not,
+///         and the one test exercising them re-derived the SAME stale strings — asserting the
+///         bug. The global-rulebook refactor replaced the deployer's selector table with
+///         `_buildTargetTypes` (module → typeId), and the selector list moved to
+///         `script/helpers/DefaultGlobalRules.sol`. This suite pins BOTH halves:
+///           - `_buildTargetTypes` branch outputs (set equality in BOTH directions, per branch),
+///           - the rulebook's zk-email entries against compiler-derived `.selector` values
+///             (never literals — see also testDefaultGlobalRules_MatchRealContractSelectors in
+///             PaymasterGlobalRules.t.sol for the full 52-entry bijection).
 ///
 ///         It needs no fork and no RPC — it calls the pure builder directly through a harness.
 
 import "forge-std/Test.sol";
 
 import {OrgDeployer} from "../src/OrgDeployer.sol";
-import {OrgRegistry} from "../src/OrgRegistry.sol";
-import {QuickJoin} from "../src/QuickJoin.sol";
-import {TaskManager} from "../src/TaskManager.sol";
-import {HybridVoting} from "../src/HybridVoting.sol";
-import {DirectDemocracyVoting} from "../src/DirectDemocracyVoting.sol";
-import {PaymentManager} from "../src/PaymentManager.sol";
-import {EligibilityModule} from "../src/EligibilityModule.sol";
-import {ParticipationToken} from "../src/ParticipationToken.sol";
-import {EducationHub} from "../src/EducationHub.sol";
-import {UniversalAccountRegistry} from "../src/UniversalAccountRegistry.sol";
+import {ModuleTypes} from "../src/libs/ModuleTypes.sol";
+import {DefaultGlobalRules} from "../script/helpers/DefaultGlobalRules.sol";
 import {ZkEmailInvites} from "../src/ZkEmailInvites.sol";
 
-/// @dev `_buildDefaultPaymasterRules` is `internal pure`, so a derived contract can expose it with no
+/// @dev `_buildTargetTypes` is `internal pure`, so a derived contract can expose it with no
 ///      initialization, no proxy and no infra. Deploying an over-EIP-170 contract is fine in tests.
 contract OrgDeployerRulesHarness is OrgDeployer {
-    function exposeRules(DeploymentResult memory result, bool educationEnabled, address reg, address orgReg)
+    function exposeTargetTypes(DeploymentResult memory result, address reg, address orgReg)
         external
         pure
-        returns (address[] memory, bytes4[] memory, bool[] memory, uint32[] memory)
+        returns (address[] memory, bytes32[] memory)
     {
-        return _buildDefaultPaymasterRules(result, educationEnabled, reg, orgReg);
+        return _buildTargetTypes(result, reg, orgReg);
     }
 }
 
 contract OrgDeployerPaymasterRulesTest is Test {
     OrgDeployerRulesHarness internal harness;
 
-    /* Sentinel targets — distinct so a rule written against the wrong module is visible. */
+    /* Sentinel targets — distinct so a mapping written against the wrong module is visible. */
     address internal constant HV = address(0x1001);
     address internal constant DDV = address(0x1002);
     address internal constant EXEC = address(0x1003);
@@ -69,85 +61,108 @@ contract OrgDeployerPaymasterRulesTest is Test {
 
     /*────────────────────── the pin ──────────────────────*/
 
-    /// @notice Full table (education + zk-email enabled) must equal the ABI-derived expectation exactly.
-    function testDefaultRules_matchAbi_fullOrg() public view {
-        (address[] memory targets, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory gasHints) =
-            harness.exposeRules(_result(EDU, ZK), true, ACCT_REG, ORG_REG);
+    /// @notice Full map (education + zk-email enabled) must equal the expectation exactly.
+    function testTargetTypes_matchExpected_fullOrg() public view {
+        (address[] memory targets, bytes32[] memory typeIds) =
+            harness.exposeTargetTypes(_result(EDU, ZK), ACCT_REG, ORG_REG);
+        (address[] memory expT, bytes32[] memory expTy) = _expected(true, true);
+        assertEq(expT.length, 11, "expectation must cover 9 base + education + zk-email");
+        _assertSameTypeSet(targets, typeIds, expT, expTy);
 
-        (address[] memory expT, bytes4[] memory expS) = _expected(true, true);
-        assertEq(expT.length, 52, "expectation must cover 44 base + 4 education + 4 zk-email");
-        _assertSameRuleSet(targets, selectors, expT, expS);
-
-        for (uint256 i = 0; i < allowed.length; i++) {
-            assertTrue(allowed[i], "every default rule is allowed");
-            assertTrue(targets[i] != address(0), "no zero target");
-            assertTrue(selectors[i] != bytes4(0), "no zero selector");
-        }
-        assertEq(gasHints.length, targets.length, "gasHints array length");
-    }
-
-    /// @notice The zk-email rules carry the gas hints the Groth16 verify + hat mint actually need.
-    function testDefaultRules_zkEmailGasHints() public view {
-        (address[] memory targets, bytes4[] memory selectors,, uint32[] memory gasHints) =
-            harness.exposeRules(_result(EDU, ZK), true, ACCT_REG, ORG_REG);
-
-        assertEq(_hintOf(targets, selectors, gasHints, ZK, ZkEmailInvites.claimRoleByDomain.selector), 800_000);
-        assertEq(_hintOf(targets, selectors, gasHints, ZK, ZkEmailInvites.claimRoleByEmail.selector), 800_000);
-        assertEq(
-            _hintOf(targets, selectors, gasHints, ZK, ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector),
-            1_200_000
-        );
-        assertEq(
-            _hintOf(targets, selectors, gasHints, ZK, ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector),
-            1_200_000
-        );
-
-        // Everything else is hint-free (0 = "no per-rule cap", the hub's default).
         for (uint256 i = 0; i < targets.length; i++) {
-            if (targets[i] != ZK) assertEq(gasHints[i], 0, "only zk-email rules carry gas hints");
+            assertTrue(targets[i] != address(0), "no zero target");
+            assertTrue(typeIds[i] != bytes32(0), "no zero typeId");
         }
     }
 
     /// @notice The three optional-module branches each produce exactly the count they allocate.
-    function testDefaultRules_countsPerBranch() public view {
-        (address[] memory tBoth,,,) = harness.exposeRules(_result(EDU, ZK), true, ACCT_REG, ORG_REG);
-        assertEq(tBoth.length, 52, "education + zk-email");
+    function testTargetTypes_countsPerBranch() public view {
+        (address[] memory tBoth,) = harness.exposeTargetTypes(_result(EDU, ZK), ACCT_REG, ORG_REG);
+        assertEq(tBoth.length, 11, "education + zk-email");
 
-        (address[] memory tEdu,,,) = harness.exposeRules(_result(EDU, address(0)), true, ACCT_REG, ORG_REG);
-        assertEq(tEdu.length, 48, "education only");
+        (address[] memory tEdu,) = harness.exposeTargetTypes(_result(EDU, address(0)), ACCT_REG, ORG_REG);
+        assertEq(tEdu.length, 10, "education only");
 
-        (address[] memory tZk,,,) = harness.exposeRules(_result(address(0), ZK), false, ACCT_REG, ORG_REG);
-        assertEq(tZk.length, 48, "zk-email only");
+        (address[] memory tZk,) = harness.exposeTargetTypes(_result(address(0), ZK), ACCT_REG, ORG_REG);
+        assertEq(tZk.length, 10, "zk-email only");
 
-        (address[] memory tBase,,,) = harness.exposeRules(_result(address(0), address(0)), false, ACCT_REG, ORG_REG);
-        assertEq(tBase.length, 44, "base only");
+        (address[] memory tBase,) = harness.exposeTargetTypes(_result(address(0), address(0)), ACCT_REG, ORG_REG);
+        assertEq(tBase.length, 9, "base only");
     }
 
-    /// @notice Optional-module branches stay ABI-correct too (the zk-only branch is the one #188 broke).
-    function testDefaultRules_matchAbi_optionalBranches() public view {
-        (address[] memory tEdu, bytes4[] memory sEdu,,) =
-            harness.exposeRules(_result(EDU, address(0)), true, ACCT_REG, ORG_REG);
-        (address[] memory expTEdu, bytes4[] memory expSEdu) = _expected(true, false);
-        _assertSameRuleSet(tEdu, sEdu, expTEdu, expSEdu);
+    /// @notice Optional-module branches stay correct too (array sizing / trailing-slot bugs).
+    function testTargetTypes_matchExpected_optionalBranches() public view {
+        (address[] memory tEdu, bytes32[] memory tyEdu) =
+            harness.exposeTargetTypes(_result(EDU, address(0)), ACCT_REG, ORG_REG);
+        (address[] memory expTEdu, bytes32[] memory expTyEdu) = _expected(true, false);
+        _assertSameTypeSet(tEdu, tyEdu, expTEdu, expTyEdu);
 
-        (address[] memory tZk, bytes4[] memory sZk,,) =
-            harness.exposeRules(_result(address(0), ZK), false, ACCT_REG, ORG_REG);
-        (address[] memory expTZk, bytes4[] memory expSZk) = _expected(false, true);
-        _assertSameRuleSet(tZk, sZk, expTZk, expSZk);
+        (address[] memory tZk, bytes32[] memory tyZk) =
+            harness.exposeTargetTypes(_result(address(0), ZK), ACCT_REG, ORG_REG);
+        (address[] memory expTZk, bytes32[] memory expTyZk) = _expected(false, true);
+        _assertSameTypeSet(tZk, tyZk, expTZk, expTyZk);
 
-        (address[] memory tBase, bytes4[] memory sBase,,) =
-            harness.exposeRules(_result(address(0), address(0)), false, ACCT_REG, ORG_REG);
-        (address[] memory expTBase, bytes4[] memory expSBase) = _expected(false, false);
-        _assertSameRuleSet(tBase, sBase, expTBase, expSBase);
+        (address[] memory tBase, bytes32[] memory tyBase) =
+            harness.exposeTargetTypes(_result(address(0), address(0)), ACCT_REG, ORG_REG);
+        (address[] memory expTBase, bytes32[] memory expTyBase) = _expected(false, false);
+        _assertSameTypeSet(tBase, tyBase, expTBase, expTyBase);
+    }
+
+    /// @notice L-53 regression, type-map edition: updateOrgMetaAsAdmin resolves via the
+    ///         OrgRegistry typeId on the OrgRegistry address, never the account registry.
+    function testTargetTypes_registriesDistinct() public view {
+        (address[] memory targets, bytes32[] memory typeIds) =
+            harness.exposeTargetTypes(_result(EDU, ZK), ACCT_REG, ORG_REG);
+        for (uint256 i = 0; i < targets.length; i++) {
+            if (targets[i] == ACCT_REG) {
+                assertEq(typeIds[i], ModuleTypes.UNIVERSAL_ACCOUNT_REGISTRY_ID, "acct reg type");
+            }
+            if (targets[i] == ORG_REG) assertEq(typeIds[i], ModuleTypes.ORG_REGISTRY_ID, "org reg type");
+        }
+    }
+
+    /// @notice Every typeId the deployer maps has at least one entry in the default rulebook —
+    ///         a typed module with zero sponsored selectors would be silently dead weight.
+    function testTargetTypes_allTypesCoveredByRulebook() public view {
+        (, bytes32[] memory typeIds) = harness.exposeTargetTypes(_result(EDU, ZK), ACCT_REG, ORG_REG);
+        DefaultGlobalRules.Entry[] memory entries = DefaultGlobalRules.entries();
+        for (uint256 i = 0; i < typeIds.length; i++) {
+            bool covered;
+            for (uint256 j = 0; j < entries.length; j++) {
+                if (entries[j].typeId == typeIds[i]) {
+                    covered = true;
+                    break;
+                }
+            }
+            assertTrue(covered, "typed module has no rulebook entries");
+        }
+    }
+
+    /// @notice The rulebook's zk-email entries carry the gas hints the Groth16 verify + hat mint
+    ///         actually need, keyed by compiler-derived selectors.
+    function testRulebook_zkEmailGasHints() public pure {
+        DefaultGlobalRules.Entry[] memory entries = DefaultGlobalRules.entries();
+        assertEq(_hintOf(entries, ZkEmailInvites.claimRoleByDomain.selector), 800_000);
+        assertEq(_hintOf(entries, ZkEmailInvites.claimRoleByEmail.selector), 800_000);
+        assertEq(_hintOf(entries, ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector), 1_200_000);
+        assertEq(_hintOf(entries, ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector), 1_200_000);
+
+        // Everything else is hint-free (0 = "no per-rule cap", the hub's default).
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID) {
+                assertEq(entries[i].maxCallGasHint, 0, "only zk-email entries carry gas hints");
+            }
+        }
     }
 
     /// @notice Tripwire on the four zk-email claim selectors' literal values.
-    /// @dev    Not redundant with the ABI check above: those move together if the struct changes again,
-    ///         and a silent move is dangerous — every LIVE org's existing paymaster rules would keep
-    ///         pointing at the old selectors and gasless claims would break in production. If this fails,
-    ///         the struct changed: update these constants AND migrate the deployed orgs' rules
-    ///         (PaymasterHub.setRulesBatch) in the same rollout. The stale pre-Blocker-2 values #188
-    ///         shipped were 0xc8864f92 / 0x50b2f726 / 0xcc1866ac / 0xebd847f2.
+    /// @dev    Not redundant with the ABI checks above: those move together if the struct changes
+    ///         again, and a silent move is dangerous — every LIVE org's existing paymaster rules
+    ///         (and the global rulebook) would keep pointing at the old selectors and gasless
+    ///         claims would break in production. If this fails, the struct changed: update these
+    ///         constants AND rebroadcast setGlobalRulesBatch in the same rollout. The stale
+    ///         pre-Blocker-2 values #188 shipped were 0xc8864f92 / 0x50b2f726 / 0xcc1866ac /
+    ///         0xebd847f2.
     function testZkEmailClaimSelectors_areUnchanged() public pure {
         assertEq(ZkEmailInvites.claimRoleByDomain.selector, bytes4(0x24b5e3ba), "claimRoleByDomain moved");
         assertEq(ZkEmailInvites.claimRoleByEmail.selector, bytes4(0x8c149bab), "claimRoleByEmail moved");
@@ -182,141 +197,74 @@ contract OrgDeployerPaymasterRulesTest is Test {
         r.zkEmailInvites = zkEmailInvites;
     }
 
-    /// @dev Expected (target, selector) pairs, every selector derived by the compiler from the target
-    ///      contract's ABI. Order is irrelevant — the assertion is set equality.
-    function _expected(bool educationEnabled, bool zkEmailEnabled)
+    function _expected(bool education, bool zkEmail)
         internal
         pure
-        returns (address[] memory targets, bytes4[] memory selectors)
+        returns (address[] memory targets, bytes32[] memory typeIds)
     {
-        uint256 n = 44;
-        if (educationEnabled) n += 4;
-        if (zkEmailEnabled) n += 4;
-        targets = new address[](n);
-        selectors = new bytes4[](n);
-        uint256 i;
-
-        // QuickJoin (6)
-        (targets[i], selectors[i++]) = (QJ, QuickJoin.quickJoinWithUser.selector);
-        (targets[i], selectors[i++]) = (QJ, QuickJoin.registerAndQuickJoin.selector);
-        (targets[i], selectors[i++]) = (QJ, QuickJoin.registerAndQuickJoinWithPasskey.selector);
-        (targets[i], selectors[i++]) = (QJ, QuickJoin.claimHatsWithUser.selector);
-        (targets[i], selectors[i++]) = (QJ, QuickJoin.registerAndClaimHats.selector);
-        (targets[i], selectors[i++]) = (QJ, QuickJoin.registerAndClaimHatsWithPasskey.selector);
-
-        // TaskManager (17)
-        (targets[i], selectors[i++]) = (TM, TaskManager.createTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.createTasksBatch.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.claimTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.unclaimTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.submitTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.completeTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.applyForTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.approveApplication.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.assignTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.rejectTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.cancelTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.createAndAssignTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.createProject.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.deleteProject.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.setFolders.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.updateTask.selector);
-        (targets[i], selectors[i++]) = (TM, TaskManager.updateTaskMetadata.selector);
-
-        // Voting (3 + 3)
-        (targets[i], selectors[i++]) = (HV, HybridVoting.vote.selector);
-        (targets[i], selectors[i++]) = (HV, HybridVoting.announceWinner.selector);
-        (targets[i], selectors[i++]) = (HV, HybridVoting.createProposal.selector);
-        (targets[i], selectors[i++]) = (DDV, DirectDemocracyVoting.vote.selector);
-        (targets[i], selectors[i++]) = (DDV, DirectDemocracyVoting.announceWinner.selector);
-        (targets[i], selectors[i++]) = (DDV, DirectDemocracyVoting.createProposal.selector);
-
-        // PaymentManager (5)
-        (targets[i], selectors[i++]) = (PAY, PaymentManager.claimDistribution.selector);
-        (targets[i], selectors[i++]) = (PAY, PaymentManager.claimMultiple.selector);
-        (targets[i], selectors[i++]) = (PAY, PaymentManager.optOut.selector);
-        (targets[i], selectors[i++]) = (PAY, PaymentManager.createDistribution.selector);
-        (targets[i], selectors[i++]) = (PAY, PaymentManager.finalizeDistribution.selector);
-
-        // EligibilityModule (5)
-        (targets[i], selectors[i++]) = (ELIG, EligibilityModule.claimVouchedHat.selector);
-        (targets[i], selectors[i++]) = (ELIG, EligibilityModule.vouchFor.selector);
-        (targets[i], selectors[i++]) = (ELIG, EligibilityModule.revokeVouch.selector);
-        (targets[i], selectors[i++]) = (ELIG, EligibilityModule.applyForRole.selector);
-        (targets[i], selectors[i++]) = (ELIG, EligibilityModule.withdrawApplication.selector);
-
-        // ParticipationToken (3)
-        (targets[i], selectors[i++]) = (PT, ParticipationToken.requestTokens.selector);
-        (targets[i], selectors[i++]) = (PT, ParticipationToken.approveRequest.selector);
-        (targets[i], selectors[i++]) = (PT, ParticipationToken.cancelRequest.selector);
-
-        // Registries (2) — setProfileMetadata is on the account registry, updateOrgMetaAsAdmin on
-        // OrgRegistry. These being two DIFFERENT contracts is the L-53 fix; assert it stays that way.
-        (targets[i], selectors[i++]) = (ACCT_REG, UniversalAccountRegistry.setProfileMetadata.selector);
-        (targets[i], selectors[i++]) = (ORG_REG, OrgRegistry.updateOrgMetaAsAdmin.selector);
-
-        if (educationEnabled) {
-            (targets[i], selectors[i++]) = (EDU, EducationHub.completeModule.selector);
-            (targets[i], selectors[i++]) = (EDU, EducationHub.createModule.selector);
-            (targets[i], selectors[i++]) = (EDU, EducationHub.updateModule.selector);
-            (targets[i], selectors[i++]) = (EDU, EducationHub.removeModule.selector);
+        uint256 count = 9;
+        if (education) count += 1;
+        if (zkEmail) count += 1;
+        targets = new address[](count);
+        typeIds = new bytes32[](count);
+        uint256 n;
+        (targets[n], typeIds[n]) = (QJ, ModuleTypes.QUICK_JOIN_ID);
+        n++;
+        (targets[n], typeIds[n]) = (TM, ModuleTypes.TASK_MANAGER_ID);
+        n++;
+        (targets[n], typeIds[n]) = (HV, ModuleTypes.HYBRID_VOTING_ID);
+        n++;
+        (targets[n], typeIds[n]) = (DDV, ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID);
+        n++;
+        (targets[n], typeIds[n]) = (PAY, ModuleTypes.PAYMENT_MANAGER_ID);
+        n++;
+        (targets[n], typeIds[n]) = (ELIG, ModuleTypes.ELIGIBILITY_MODULE_ID);
+        n++;
+        (targets[n], typeIds[n]) = (PT, ModuleTypes.PARTICIPATION_TOKEN_ID);
+        n++;
+        (targets[n], typeIds[n]) = (ACCT_REG, ModuleTypes.UNIVERSAL_ACCOUNT_REGISTRY_ID);
+        n++;
+        (targets[n], typeIds[n]) = (ORG_REG, ModuleTypes.ORG_REGISTRY_ID);
+        n++;
+        if (education) {
+            (targets[n], typeIds[n]) = (EDU, ModuleTypes.EDUCATION_HUB_ID);
+            n++;
         }
-
-        if (zkEmailEnabled) {
-            (targets[i], selectors[i++]) = (ZK, ZkEmailInvites.claimRoleByDomain.selector);
-            (targets[i], selectors[i++]) = (ZK, ZkEmailInvites.claimRoleByEmail.selector);
-            (targets[i], selectors[i++]) = (ZK, ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector);
-            (targets[i], selectors[i++]) = (ZK, ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector);
-        }
-
-        require(i == n, "expectation length mismatch");
-    }
-
-    /// @dev Set equality in both directions, plus a duplicate check on the actual table.
-    function _assertSameRuleSet(
-        address[] memory actualT,
-        bytes4[] memory actualS,
-        address[] memory expT,
-        bytes4[] memory expS
-    ) internal pure {
-        assertEq(actualT.length, expT.length, "rule count");
-        assertEq(actualS.length, actualT.length, "selectors array length");
-
-        for (uint256 e = 0; e < expT.length; e++) {
-            uint256 hits;
-            for (uint256 a = 0; a < actualT.length; a++) {
-                if (actualT[a] == expT[e] && actualS[a] == expS[e]) hits++;
-            }
-            assertEq(hits, 1, string.concat("expected rule missing or duplicated at index ", vm.toString(e)));
-        }
-        for (uint256 a = 0; a < actualT.length; a++) {
-            bool found;
-            for (uint256 e = 0; e < expT.length; e++) {
-                if (actualT[a] == expT[e] && actualS[a] == expS[e]) found = true;
-            }
-            assertTrue(
-                found,
-                string.concat(
-                    "unexpected rule ",
-                    vm.toString(actualT[a]),
-                    " / ",
-                    vm.toString(bytes32(actualS[a])),
-                    ": either a new rule was added without updating this test, or its selector drifted from the ABI"
-                )
-            );
+        if (zkEmail) {
+            (targets[n], typeIds[n]) = (ZK, ModuleTypes.ZKEMAIL_INVITES_ID);
+            n++;
         }
     }
 
-    function _hintOf(
+    /// @dev Set equality in BOTH directions via consume-on-match (catches drift, drops,
+    ///      additions, and duplicated slots).
+    function _assertSameTypeSet(
         address[] memory targets,
-        bytes4[] memory selectors,
-        uint32[] memory gasHints,
-        address target,
-        bytes4 selector
-    ) internal pure returns (uint256) {
+        bytes32[] memory typeIds,
+        address[] memory expT,
+        bytes32[] memory expTy
+    ) internal pure {
+        assertEq(targets.length, expT.length, "pair count");
+        assertEq(typeIds.length, targets.length, "typeIds length");
         for (uint256 i = 0; i < targets.length; i++) {
-            if (targets[i] == target && selectors[i] == selector) return gasHints[i];
+            bool found;
+            for (uint256 j = 0; j < expT.length; j++) {
+                if (expT[j] == targets[i] && expTy[j] == typeIds[i]) {
+                    expT[j] = address(0); // consume
+                    found = true;
+                    break;
+                }
+            }
+            assertTrue(found, "unexpected or duplicated (target, typeId) pair");
         }
-        revert("rule not found");
+    }
+
+    function _hintOf(DefaultGlobalRules.Entry[] memory entries, bytes4 selector) internal pure returns (uint32) {
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].typeId == ModuleTypes.ZKEMAIL_INVITES_ID && entries[i].selector == selector) {
+                return entries[i].maxCallGasHint;
+            }
+        }
+        revert("zk-email selector missing from DefaultGlobalRules");
     }
 }

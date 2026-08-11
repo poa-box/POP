@@ -42,6 +42,9 @@ import {SwitchableBeacon} from "../src/SwitchableBeacon.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {PaymasterHub} from "../src/PaymasterHub.sol";
+import {PaymasterRuleLib} from "../src/libs/PaymasterRuleLib.sol";
+import {PaymasterHubLens} from "../src/PaymasterHubLens.sol";
+import {DefaultGlobalRules} from "../script/helpers/DefaultGlobalRules.sol";
 import {PackedUserOperation, UserOpLib} from "../src/interfaces/PackedUserOperation.sol";
 import {PasskeyAccount} from "../src/PasskeyAccount.sol";
 import {PasskeyAccountFactory} from "../src/PasskeyAccountFactory.sol";
@@ -5906,99 +5909,174 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         assertEq(financials.deposited, 0.05 ether, "Org should have 0.05 ETH deposited");
     }
 
-    function _assertAutoWhitelistRules(bytes32 orgId, OrgDeployer.DeploymentResult memory result) internal view {
-        PaymasterHub.Rule memory rule;
+    /// @dev Seed the hub's global rulebook with the canonical default set (idempotent upserts),
+    ///      as Poa would once per chain. Deploy no longer writes per-org selector rules — orgs
+    ///      resolve through targetTypes + this rulebook.
+    function _seedGlobalRulebook() internal {
+        (bytes32[] memory typeIds, bytes4[] memory selectors, bool[] memory allowedFlags, uint32[] memory hints) =
+            DefaultGlobalRules.defaults();
+        vm.prank(address(poaManager));
+        paymasterHub.setGlobalRulesBatch(typeIds, selectors, allowedFlags, hints);
+    }
 
-        // Check QuickJoin quickJoinWithUser() is whitelisted
-        rule = paymasterHub.getRule(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()")));
-        assertTrue(rule.allowed, "QuickJoin quickJoinWithUser should be whitelisted");
+    PaymasterHubLens private _pmLens;
 
-        // Check TaskManager claimTask(uint256) is whitelisted
-        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("claimTask(uint256)")));
-        assertTrue(rule.allowed, "TaskManager claimTask should be whitelisted");
+    /// @dev Lazily-deployed Lens; effectiveRuleOf is the production resolution path
+    ///      (local rule → Mirror-mode global rulebook), so assertions here exercise the
+    ///      same logic the frontend preflight uses instead of a test-side reimplementation.
+    function _effectiveAllowed(bytes32 orgId, address target, bytes4 sel) internal returns (bool allowed) {
+        if (address(_pmLens) == address(0)) _pmLens = new PaymasterHubLens(address(paymasterHub));
+        (allowed,,) = _pmLens.effectiveRuleOf(orgId, target, sel);
+    }
 
-        // Check TaskManager unclaimTask(uint256) is whitelisted (v7 claim release)
-        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("unclaimTask(uint256)")));
-        assertTrue(rule.allowed, "TaskManager unclaimTask should be whitelisted");
-
-        // Check TaskManager setFolders is whitelisted (v4 bootstrap)
-        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)")));
-        assertTrue(rule.allowed, "TaskManager setFolders should be whitelisted (v4 bootstrap)");
-
-        // Check TaskManager v6 create selectors (deadline params appended) are whitelisted
-        rule = paymasterHub.getRule(
-            orgId,
-            result.taskManager,
-            bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)"))
+    function _assertAutoWhitelistRules(bytes32 orgId, OrgDeployer.DeploymentResult memory result) internal {
+        // The deployer registers module TYPE mappings + Mirror mode instead of per-selector
+        // local rules; sponsored selectors come from the Poa-managed global rulebook.
+        assertEq(paymasterHub.getRulesMode(orgId), 0, "autoUpgrade org should deploy in Mirror rules mode");
+        assertEq(paymasterHub.getTargetType(orgId, result.quickJoin), ModuleTypes.QUICK_JOIN_ID, "quickJoin type");
+        assertEq(paymasterHub.getTargetType(orgId, result.taskManager), ModuleTypes.TASK_MANAGER_ID, "taskManager type");
+        assertEq(
+            paymasterHub.getTargetType(orgId, result.hybridVoting), ModuleTypes.HYBRID_VOTING_ID, "hybridVoting type"
         );
-        assertTrue(rule.allowed, "TaskManager createTask should be whitelisted (v6 deadlines)");
-        rule = paymasterHub.getRule(
-            orgId,
-            result.taskManager,
-            bytes4(keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])"))
+        assertEq(
+            paymasterHub.getTargetType(orgId, result.directDemocracyVoting),
+            ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID,
+            "ddVoting type"
         );
-        assertTrue(rule.allowed, "TaskManager createTasksBatch should be whitelisted (v6 deadlines)");
-        rule = paymasterHub.getRule(
-            orgId,
-            result.taskManager,
-            bytes4(
-                keccak256(
-                    "createAndAssignTask(uint256,bytes,bytes32,bytes32,address,address,uint256,bool,uint48,uint32)"
-                )
-            )
+        assertEq(
+            paymasterHub.getTargetType(orgId, result.paymentManager), ModuleTypes.PAYMENT_MANAGER_ID, "paymentMgr type"
         );
-        assertTrue(rule.allowed, "TaskManager createAndAssignTask should be whitelisted (v6 deadlines)");
-
-        // Check TaskManager v5 post-claim edit functions are whitelisted (v6 updateTask signature)
-        rule = paymasterHub.getRule(
-            orgId,
-            result.taskManager,
-            bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)"))
+        assertEq(
+            paymasterHub.getTargetType(orgId, result.eligibilityModule),
+            ModuleTypes.ELIGIBILITY_MODULE_ID,
+            "eligibility type"
         );
-        assertTrue(rule.allowed, "TaskManager updateTask should be whitelisted (v5 edit)");
-        rule = paymasterHub.getRule(
-            orgId, result.taskManager, bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)"))
+        assertEq(
+            paymasterHub.getTargetType(orgId, result.participationToken),
+            ModuleTypes.PARTICIPATION_TOKEN_ID,
+            "token type"
         );
-        assertTrue(rule.allowed, "TaskManager updateTaskMetadata should be whitelisted (v5 edit)");
+        assertEq(
+            paymasterHub.getTargetType(orgId, accountRegProxy),
+            ModuleTypes.UNIVERSAL_ACCOUNT_REGISTRY_ID,
+            "account registry type"
+        );
+        assertEq(
+            paymasterHub.getTargetType(orgId, address(orgRegistry)), ModuleTypes.ORG_REGISTRY_ID, "org registry type"
+        );
+        assertEq(
+            paymasterHub.getTargetType(orgId, result.educationHub), ModuleTypes.EDUCATION_HUB_ID, "educationHub type"
+        );
 
-        // Check HybridVoting vote is whitelisted
-        bytes4 voteSel = bytes4(keccak256("vote(uint256,uint8[],uint8[])"));
-        rule = paymasterHub.getRule(orgId, result.hybridVoting, voteSel);
-        assertTrue(rule.allowed, "HybridVoting vote should be whitelisted");
+        // No per-org local rules are written at deploy anymore.
+        assertFalse(
+            paymasterHub.getRule(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()"))).allowed,
+            "deploy must not seed local rules"
+        );
 
-        // Check DDVoting vote is whitelisted
-        rule = paymasterHub.getRule(orgId, result.directDemocracyVoting, voteSel);
-        assertTrue(rule.allowed, "DDVoting vote should be whitelisted");
-
-        // Check PaymentManager optOut is whitelisted
-        rule = paymasterHub.getRule(orgId, result.paymentManager, bytes4(keccak256("optOut(bool)")));
-        assertTrue(rule.allowed, "PaymentManager optOut should be whitelisted");
-
-        // Check EducationHub completeModule is whitelisted
-        rule = paymasterHub.getRule(orgId, result.educationHub, bytes4(keccak256("completeModule(uint256,uint8)")));
-        assertTrue(rule.allowed, "EducationHub completeModule should be whitelisted");
-
-        // L-53 fix: updateOrgMetaAsAdmin lives on the OrgRegistry, NOT the
-        // UniversalAccountRegistry (account registry). The default rule must target
-        // the OrgRegistry so gasless org-metadata edits actually resolve to a
-        // contract that implements the selector.
-        bytes4 updateOrgMetaSel = bytes4(keccak256("updateOrgMetaAsAdmin(bytes32,bytes,bytes32)"));
-
-        rule = paymasterHub.getRule(orgId, address(orgRegistry), updateOrgMetaSel);
-        assertTrue(rule.allowed, "updateOrgMetaAsAdmin must be whitelisted against the OrgRegistry (L-53)");
-
-        // And it must NOT be whitelisted against the UniversalAccountRegistry (the old target).
-        rule = paymasterHub.getRule(orgId, accountRegProxy, updateOrgMetaSel);
-        assertFalse(rule.allowed, "updateOrgMetaAsAdmin must NOT target the UniversalAccountRegistry (old L-53 bug)");
-
-        // setProfileMetadata still lives on the UniversalAccountRegistry — unchanged by L-53.
-        rule = paymasterHub.getRule(orgId, accountRegProxy, bytes4(keccak256("setProfileMetadata(bytes32)")));
-        assertTrue(rule.allowed, "setProfileMetadata should be whitelisted against the account registry");
+        // Once Poa seeds the rulebook (one tx per chain), every default selector resolves.
+        _seedGlobalRulebook();
+        _assertEffectiveWhitelist(orgId, result);
 
         // C-01 wiring: after deploy the token's minters are wired through the executor.
         ParticipationToken token = ParticipationToken(result.participationToken);
         assertEq(token.taskManager(), result.taskManager, "token.taskManager should be wired to the TaskManager");
         assertEq(token.educationHub(), result.educationHub, "token.educationHub should be wired to the EducationHub");
+    }
+
+    /// @dev Effective-resolution checks for the same selector set the pre-rulebook tests
+    ///      asserted as local rules (split out for production-profile stack headroom).
+    function _assertEffectiveWhitelist(bytes32 orgId, OrgDeployer.DeploymentResult memory result) internal {
+        assertTrue(
+            _effectiveAllowed(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()"))),
+            "QuickJoin quickJoinWithUser should be whitelisted"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.taskManager, bytes4(keccak256("claimTask(uint256)"))),
+            "TaskManager claimTask should be whitelisted"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.taskManager, bytes4(keccak256("unclaimTask(uint256)"))),
+            "TaskManager unclaimTask should be whitelisted"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.taskManager, bytes4(keccak256("setFolders(bytes32,bytes32)"))),
+            "TaskManager setFolders should be whitelisted (v4 bootstrap)"
+        );
+        assertTrue(
+            _effectiveAllowed(
+                orgId,
+                result.taskManager,
+                bytes4(keccak256("createTask(uint256,bytes,bytes32,bytes32,address,uint256,bool,uint48,uint32)"))
+            ),
+            "TaskManager createTask should be whitelisted (v6 deadlines)"
+        );
+        assertTrue(
+            _effectiveAllowed(
+                orgId,
+                result.taskManager,
+                bytes4(
+                    keccak256("createTasksBatch(bytes32,(uint256,bytes,bytes32,address,uint256,bool,uint48,uint32)[])")
+                )
+            ),
+            "TaskManager createTasksBatch should be whitelisted (v6 deadlines)"
+        );
+        assertTrue(
+            _effectiveAllowed(
+                orgId,
+                result.taskManager,
+                bytes4(
+                    keccak256(
+                        "createAndAssignTask(uint256,bytes,bytes32,bytes32,address,address,uint256,bool,uint48,uint32)"
+                    )
+                )
+            ),
+            "TaskManager createAndAssignTask should be whitelisted (v6 deadlines)"
+        );
+        assertTrue(
+            _effectiveAllowed(
+                orgId,
+                result.taskManager,
+                bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)"))
+            ),
+            "TaskManager updateTask should be whitelisted (v5 edit)"
+        );
+        assertTrue(
+            _effectiveAllowed(
+                orgId, result.taskManager, bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)"))
+            ),
+            "TaskManager updateTaskMetadata should be whitelisted (v5 edit)"
+        );
+
+        bytes4 voteSel = bytes4(keccak256("vote(uint256,uint8[],uint8[])"));
+        assertTrue(_effectiveAllowed(orgId, result.hybridVoting, voteSel), "HybridVoting vote should be whitelisted");
+        assertTrue(
+            _effectiveAllowed(orgId, result.directDemocracyVoting, voteSel), "DDVoting vote should be whitelisted"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.paymentManager, bytes4(keccak256("optOut(bool)"))),
+            "PaymentManager optOut should be whitelisted"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.educationHub, bytes4(keccak256("completeModule(uint256,uint8)"))),
+            "EducationHub completeModule should be whitelisted"
+        );
+
+        // L-53: updateOrgMetaAsAdmin resolves against the OrgRegistry, NOT the account registry
+        // (distinct typeIds keep the rulebook entries from bleeding across the two registries).
+        bytes4 updateOrgMetaSel = bytes4(keccak256("updateOrgMetaAsAdmin(bytes32,bytes,bytes32)"));
+        assertTrue(
+            _effectiveAllowed(orgId, address(orgRegistry), updateOrgMetaSel),
+            "updateOrgMetaAsAdmin must be whitelisted against the OrgRegistry (L-53)"
+        );
+        assertFalse(
+            _effectiveAllowed(orgId, accountRegProxy, updateOrgMetaSel),
+            "updateOrgMetaAsAdmin must NOT target the UniversalAccountRegistry (old L-53 bug)"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, accountRegProxy, bytes4(keccak256("setProfileMetadata(bytes32)"))),
+            "setProfileMetadata should be whitelisted against the account registry"
+        );
     }
 
     function testDeployFullOrgWithPaymasterFeeCaps() public {
@@ -6268,22 +6346,25 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         vm.prank(orgOwner);
         OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
 
-        // Core contract rules should still be set
-        PaymasterHub.Rule memory rule;
-
-        rule = paymasterHub.getRule(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()")));
-        assertTrue(rule.allowed, "QuickJoin should be whitelisted");
-
-        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("claimTask(uint256)")));
-        assertTrue(rule.allowed, "TaskManager should be whitelisted");
-
-        // v7 claim release — asserted on this branch too: educationEnabled=false is a
-        // distinct rule-array sizing path from the education-enabled test above.
-        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("unclaimTask(uint256)")));
-        assertTrue(rule.allowed, "TaskManager unclaimTask should be whitelisted without education");
-
-        rule = paymasterHub.getRule(orgId, result.hybridVoting, bytes4(keccak256("vote(uint256,uint8[],uint8[])")));
-        assertTrue(rule.allowed, "HybridVoting should be whitelisted");
+        // Core contract type mappings should still be set (education disabled is a distinct
+        // array-sizing path in _buildTargetTypes from the education-enabled test above).
+        _seedGlobalRulebook();
+        assertTrue(
+            _effectiveAllowed(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()"))),
+            "QuickJoin should be whitelisted"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.taskManager, bytes4(keccak256("claimTask(uint256)"))),
+            "TaskManager should be whitelisted"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.taskManager, bytes4(keccak256("unclaimTask(uint256)"))),
+            "TaskManager unclaimTask should be whitelisted without education"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.hybridVoting, bytes4(keccak256("vote(uint256,uint8[],uint8[])"))),
+            "HybridVoting should be whitelisted"
+        );
 
         // EducationHub should NOT be whitelisted (disabled)
         // educationHub address is zero when disabled, so checking rule on address(0) is meaningless
@@ -6365,13 +6446,16 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         assertEq(feeCaps.maxPriorityFeePerGas, 1 gwei);
         assertEq(feeCaps.maxCallGas, 300_000);
 
-        // 3. Verify auto-whitelist (spot check)
-        PaymasterHub.Rule memory rule =
-            paymasterHub.getRule(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()")));
-        assertTrue(rule.allowed, "QuickJoin should be whitelisted");
-
-        rule = paymasterHub.getRule(orgId, result.taskManager, bytes4(keccak256("submitTask(uint256,bytes32)")));
-        assertTrue(rule.allowed, "TaskManager submitTask should be whitelisted");
+        // 3. Verify auto-whitelist (spot check via global-rulebook resolution)
+        _seedGlobalRulebook();
+        assertTrue(
+            _effectiveAllowed(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()"))),
+            "QuickJoin should be whitelisted"
+        );
+        assertTrue(
+            _effectiveAllowed(orgId, result.taskManager, bytes4(keccak256("submitTask(uint256,bytes32)"))),
+            "TaskManager submitTask should be whitelisted"
+        );
 
         // 4. Verify deposit
         PaymasterHub.OrgFinancials memory financials = paymasterHub.getOrgFinancials(orgId);
@@ -6380,7 +6464,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
     function testPaymasterSelectorAccuracy() public {
         // Verify ALL computed selectors match actual contract function selectors
-        // This catches selector string typos in _buildDefaultPaymasterRules
+        // This catches selector string typos in script/helpers/DefaultGlobalRules.sol
 
         // ── QuickJoin (3) ──
         assertEq(
@@ -6672,10 +6756,12 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         PaymasterHub.FeeCaps memory feeCaps = paymasterHub.getFeeCaps(orgId);
         assertEq(feeCaps.maxFeePerGas, 100 gwei, "maxFeePerGas should be set");
 
-        // Verify whitelist rules also set
-        PaymasterHub.Rule memory rule =
-            paymasterHub.getRule(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()")));
-        assertTrue(rule.allowed, "QuickJoin should be whitelisted");
+        // Verify whitelist resolution also works (target types + global rulebook)
+        _seedGlobalRulebook();
+        assertTrue(
+            _effectiveAllowed(orgId, result.quickJoin, bytes4(keccak256("quickJoinWithUser()"))),
+            "QuickJoin should be whitelisted"
+        );
 
         // Verify deposit
         PaymasterHub.OrgFinancials memory financials = paymasterHub.getOrgFinancials(orgId);
@@ -6837,7 +6923,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         uint32[] memory epochLens = new uint32[](1);
         epochLens[0] = 366 days; // Above MAX_EPOCH_LENGTH (365 days)
 
-        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        PaymasterRuleLib.DeployConfig memory config = _emptyDeployConfig();
         config.budgetSubjectKeys = keys;
         config.budgetCapsPerEpoch = caps;
         config.budgetEpochLens = epochLens;
@@ -6860,7 +6946,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         epochLens[0] = 1 days;
         epochLens[1] = 1 days;
 
-        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        PaymasterRuleLib.DeployConfig memory config = _emptyDeployConfig();
         config.budgetSubjectKeys = keys;
         config.budgetCapsPerEpoch = caps;
         config.budgetEpochLens = epochLens;
@@ -6881,7 +6967,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         uint32[] memory epochLens = new uint32[](1);
         epochLens[0] = 30 minutes; // Below MIN_EPOCH_LENGTH (1 hour)
 
-        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        PaymasterRuleLib.DeployConfig memory config = _emptyDeployConfig();
         config.budgetSubjectKeys = keys;
         config.budgetCapsPerEpoch = caps;
         config.budgetEpochLens = epochLens;
@@ -6891,11 +6977,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         paymasterHub.registerAndConfigureOrg(orgId, 1, config);
     }
 
-    /// @dev An empty PaymasterHub.DeployConfig. Extracted into its own frame so callers don't build the
+    /// @dev An empty PaymasterRuleLib.DeployConfig. Extracted into its own frame so callers don't build the
     ///      14-field struct (+ its abi-encoding) inline — that pushed `testRegisterAndConfigureOrgUnauthorized`
     ///      exactly 1 slot too deep under the production via-IR + optimizer profile.
-    function _emptyDeployConfig() internal pure returns (PaymasterHub.DeployConfig memory) {
-        return PaymasterHub.DeployConfig({
+    function _emptyDeployConfig() internal pure returns (PaymasterRuleLib.DeployConfig memory) {
+        return PaymasterRuleLib.DeployConfig({
             operatorHatId: 0,
             maxFeePerGas: 0,
             maxPriorityFeePerGas: 0,
@@ -6908,7 +6994,10 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             ruleMaxCallGasHints: new uint32[](0),
             budgetSubjectKeys: new bytes32[](0),
             budgetCapsPerEpoch: new uint128[](0),
-            budgetEpochLens: new uint32[](0)
+            budgetEpochLens: new uint32[](0),
+            typeTargets: new address[](0),
+            typeIds: new bytes32[](0),
+            rulesMode: 0
         });
     }
 
@@ -6916,7 +7005,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         // Non-registrar cannot call registerAndConfigureOrg directly
         bytes32 orgId = keccak256("UNAUTH-ORG");
 
-        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        PaymasterRuleLib.DeployConfig memory config = _emptyDeployConfig();
 
         // Random address should be rejected
         vm.prank(address(0xBEEF));
@@ -6934,7 +7023,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         bytes4[] memory sels = new bytes4[](1); // Length mismatch!
         sels[0] = bytes4(0x12345678);
 
-        PaymasterHub.DeployConfig memory config = _emptyDeployConfig();
+        PaymasterRuleLib.DeployConfig memory config = _emptyDeployConfig();
         config.ruleTargets = targets;
         config.ruleSelectors = sels;
         config.ruleAllowed = new bool[](2);
@@ -7090,18 +7179,20 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         uint256 memberHatId = orgRegistry.getRoleHat(orgId, 0);
         assertTrue(memberHatId != 0, "member hat should exist");
 
-        // Verify autowhitelist rules
+        // Verify autowhitelist resolution (global rulebook — validates the batch path below
+        // resolves BOTH inner calls through the rulebook, with zero local rules seeded)
+        _seedGlobalRulebook();
         bytes4 rqjpSel = bytes4(
             keccak256(
                 "registerAndQuickJoinWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32))"
             )
         );
-        PaymasterHub.Rule memory rule = paymasterHub.getRule(orgId, result.quickJoin, rqjpSel);
-        assertTrue(rule.allowed, "registerAndQuickJoinWithPasskey should be whitelisted");
+        assertTrue(
+            _effectiveAllowed(orgId, result.quickJoin, rqjpSel), "registerAndQuickJoinWithPasskey should be whitelisted"
+        );
 
         bytes4 cvhSel = bytes4(keccak256("claimVouchedHat(uint256)"));
-        rule = paymasterHub.getRule(orgId, result.eligibilityModule, cvhSel);
-        assertTrue(rule.allowed, "claimVouchedHat should be whitelisted");
+        assertTrue(_effectiveAllowed(orgId, result.eligibilityModule, cvhSel), "claimVouchedHat should be whitelisted");
 
         // Build executeBatch callData
         address[] memory targets = new address[](2);

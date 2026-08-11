@@ -167,10 +167,12 @@ l.orgRegistry.registerHatsTree(params.orgId, gov.topHatId, gov.roleHatIds);
 #### 7. PaymasterHub: Shared Infrastructure
 
 ```solidity
-IPaymasterHub(l.paymasterHub).registerOrg(params.orgId, gov.topHatId, 0);
+IPaymasterHub(l.paymasterHub).registerAndConfigureOrg{value: msg.value}(params.orgId, topHatId, config);
 ```
 
 Organizations share a common PaymasterHub for gas sponsorship. Infrastructure should serve all communities, not be duplicated inefficiently.
+
+When `paymasterConfig.autoWhitelistContracts` is set, the deployer no longer seeds a hardcoded selector whitelist. Instead it registers each deployed module (and the shared registries) with its module typeId (`_buildTargetTypes`), and the org's sponsored selectors resolve through the PaymasterHub's Poa-managed **global rulebook** (see `docs/PAYMASTER_HUB.md` → Rules Engine). Orgs deployed with `autoUpgrade = true` start in Mirror mode (rules follow the rulebook automatically); `autoUpgrade = false` would start Static with a local snapshot of the current rulebook. Adding a new sponsored function no longer requires touching OrgDeployer — one `setGlobalRulesBatch` covers all Mirror orgs, current and future.
 
 #### 8-9. Access and Modules: The Living Organization
 

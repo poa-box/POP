@@ -27,6 +27,7 @@ import {PoaManager} from "../../src/PoaManager.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {OrgDeployer} from "../../src/OrgDeployer.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
+import {DefaultGlobalRules} from "../helpers/DefaultGlobalRules.sol";
 
 // Factories
 import {GovernanceFactory} from "../../src/factories/GovernanceFactory.sol";
@@ -201,6 +202,30 @@ contract DeployInfrastructure is Script {
         // Authorize OrgDeployer to register orgs with PaymasterHub
         PoaManager(poaManager).adminCall(paymasterHub, abi.encodeWithSignature("setOrgRegistrar(address)", orgDeployer));
         console.log("OrgDeployer authorized as orgRegistrar on PaymasterHub");
+
+        // Seed the global rulebook — without this, orgs deployed with autoWhitelistContracts
+        // resolve ZERO sponsored selectors (the deployer registers target types only; all
+        // sponsored selectors come from this type-keyed rulebook).
+        {
+            (
+                bytes32[] memory grTypeIds,
+                bytes4[] memory grSelectors,
+                bool[] memory grAllowed,
+                uint32[] memory grHints
+            ) = DefaultGlobalRules.defaults();
+            PoaManager(poaManager)
+                .adminCall(
+                    paymasterHub,
+                    abi.encodeWithSignature(
+                        "setGlobalRulesBatch(bytes32[],bytes4[],bool[],uint32[])",
+                        grTypeIds,
+                        grSelectors,
+                        grAllowed,
+                        grHints
+                    )
+                );
+            console.log("Global rulebook seeded with entries:", grTypeIds.length);
+        }
 
         // Register all contract types
         PoaManager pm = PoaManager(poaManager);

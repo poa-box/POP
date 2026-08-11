@@ -35,6 +35,7 @@ import {EligibilityModule} from "../src/EligibilityModule.sol";
 import {RoleConfigStructs} from "../src/libs/RoleConfigStructs.sol";
 import {IHybridVotingInit} from "../src/libs/ModuleDeploymentLib.sol";
 import {PaymasterHub} from "../src/PaymasterHub.sol";
+import {PaymasterHubLens} from "../src/PaymasterHubLens.sol";
 
 /*──────────────────────────────  Mocks  ──────────────────────────────*/
 
@@ -432,36 +433,48 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         _wireZkInfra();
 
         // Deploy with autoWhitelistContracts = true and assert that all FOUR ZkEmailInvites claim
-        // selectors are now allowed rules on PaymasterHub for our org.
-        //
-        // These selectors are derived from the ABI by the compiler — NOT copied from
-        // OrgDeployer._appendZkEmailInvitesRules. That independence is the whole point: this test is what
-        // pins the deployer's auto-whitelist to the live ZkEmailInvites struct. The previous version copied
-        // the deployer's hand-hashed signature strings verbatim, so it stayed green through the Blocker-2
-        // domain-binding change that moved every claim selector (issue #188). Never reintroduce a literal here.
+        // selectors resolve as allowed for our org via the global rulebook (the module gets the
+        // ZKEMAIL_INVITES_ID target type at deploy; selector entries live in DefaultGlobalRules).
         OrgDeployer.DeploymentResult memory result = _deployZkOrgWithPaymaster(ZK_ORG_ID);
+        assertEq(
+            paymasterHub.getTargetType(ZK_ORG_ID, result.zkEmailInvites),
+            ModuleTypes.ZKEMAIL_INVITES_ID,
+            "zkEmailInvites target type registered at deploy"
+        );
+        _seedGlobalRulebook();
 
+        // These selectors are derived from the ABI by the compiler — NOT hand-hashed strings.
+        // That independence is the whole point: the previous version copied the deployer's
+        // signature strings verbatim, so it stayed green through the Blocker-2 domain-binding
+        // change that moved every claim selector (issue #188). Never reintroduce a literal here.
         bytes4 selClaimDomain = ZkEmailInvites.claimRoleByDomain.selector;
         bytes4 selClaimEmail = ZkEmailInvites.claimRoleByEmail.selector;
         bytes4 selRegisterClaimDomain = ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector;
         bytes4 selRegisterClaimEmail = ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector;
 
-        PaymasterHub.Rule memory rClaimDomain = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaimDomain);
-        PaymasterHub.Rule memory rClaimEmail = paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selClaimEmail);
-        PaymasterHub.Rule memory rRegisterDomain =
-            paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimDomain);
-        PaymasterHub.Rule memory rRegisterEmail =
-            paymasterHub.getRule(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimEmail);
+        (bool aDomain, uint32 hDomain,) = _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.zkEmailInvites, selClaimDomain);
+        (bool aEmail, uint32 hEmail,) = _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.zkEmailInvites, selClaimEmail);
+        (bool aRegDomain, uint32 hRegDomain,) =
+            _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimDomain);
+        (bool aRegEmail, uint32 hRegEmail,) =
+            _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.zkEmailInvites, selRegisterClaimEmail);
 
-        assertTrue(rClaimDomain.allowed, "claimRoleByDomain allowed");
-        assertTrue(rClaimEmail.allowed, "claimRoleByEmail allowed");
-        assertTrue(rRegisterDomain.allowed, "registerAndClaimByDomainWithPasskey allowed");
-        assertTrue(rRegisterEmail.allowed, "registerAndClaimByEmailWithPasskey allowed");
+        assertTrue(aDomain, "claimRoleByDomain allowed");
+        assertTrue(aEmail, "claimRoleByEmail allowed");
+        assertTrue(aRegDomain, "registerAndClaimByDomainWithPasskey allowed");
+        assertTrue(aRegEmail, "registerAndClaimByEmailWithPasskey allowed");
 
-        assertEq(uint256(rClaimDomain.maxCallGasHint), 800_000, "domain claim gas hint");
-        assertEq(uint256(rClaimEmail.maxCallGasHint), 800_000, "email claim gas hint");
-        assertEq(uint256(rRegisterDomain.maxCallGasHint), 1_200_000, "combined domain claim gas hint");
-        assertEq(uint256(rRegisterEmail.maxCallGasHint), 1_200_000, "combined email claim gas hint");
+        assertEq(uint256(hDomain), 800_000, "domain claim gas hint");
+        assertEq(uint256(hEmail), 800_000, "email claim gas hint");
+        assertEq(uint256(hRegDomain), 1_200_000, "combined domain claim gas hint");
+        assertEq(uint256(hRegEmail), 1_200_000, "combined email claim gas hint");
+    }
+
+    PaymasterHubLens private _zkLens;
+
+    function _pmLensZk() internal returns (PaymasterHubLens) {
+        if (address(_zkLens) == address(0)) _zkLens = new PaymasterHubLens(address(paymasterHub));
+        return _zkLens;
     }
 
     function testPaymasterRules_unaffected_whenInfraNotWired() public {
@@ -469,9 +482,9 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         OrgDeployer.DeploymentResult memory result = _deployZkOrgWithPaymaster(ZK_ORG_ID);
         assertEq(result.zkEmailInvites, address(0), "ZkEmailInvites not deployed");
 
-        // The claim selectors must not be whitelisted anywhere. Probing address(0) proves nothing (a rule can
-        // never exist there — _setRulesBatch reverts on a zero target), so probe the modules that WERE
-        // deployed and got real rules.
+        // The claim selectors must not be sponsored anywhere. Probing address(0) proves nothing
+        // (a rule can never exist there), so probe the modules that WERE deployed — including via
+        // effective resolution, which covers the global-rulebook tier too.
         bytes4 selClaimDomain = ZkEmailInvites.claimRoleByDomain.selector;
         assertFalse(
             paymasterHub.getRule(ZK_ORG_ID, result.quickJoin, selClaimDomain).allowed, "no zk rule on QuickJoin"
@@ -479,10 +492,8 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         assertFalse(
             paymasterHub.getRule(ZK_ORG_ID, result.taskManager, selClaimDomain).allowed, "no zk rule on TaskManager"
         );
-
-        PaymasterHub.Rule memory rClaim = paymasterHub.getRule(ZK_ORG_ID, address(0), selClaimDomain);
-        assertFalse(rClaim.allowed, "no rule for address(0)");
-        assertEq(uint256(rClaim.maxCallGasHint), 0, "no gas hint");
+        (bool zkAllowed,,) = _pmLensZk().effectiveRuleOf(ZK_ORG_ID, result.quickJoin, selClaimDomain);
+        assertFalse(zkAllowed, "no effective zk rule on QuickJoin");
     }
 
     /*──────────── Helpers ────────────*/
