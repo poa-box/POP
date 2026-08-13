@@ -25,6 +25,7 @@ import {OrgDeployer} from "../src/OrgDeployer.sol";
 import {ModuleTypes} from "../src/libs/ModuleTypes.sol";
 import {DefaultGlobalRules} from "../script/helpers/DefaultGlobalRules.sol";
 import {ZkEmailInvites} from "../src/ZkEmailInvites.sol";
+import {EligibilityModule} from "../src/EligibilityModule.sol";
 
 /// @dev `_buildTargetTypes` is `internal pure`, so a derived contract can expose it with no
 ///      initialization, no proxy and no infra. Deploying an over-EIP-170 contract is fine in tests.
@@ -147,10 +148,20 @@ contract OrgDeployerPaymasterRulesTest is Test {
         assertEq(_hintOf(entries, ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector), 1_200_000);
         assertEq(_hintOf(entries, ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector), 1_200_000);
 
+        // The EligibilityModule claim entries carry hints too (RoleManager rollout): claimHat is a
+        // single guarded mint, claimHats loops up to 20 mints (identity + group markers).
+        assertEq(_hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.claimHat.selector), 300_000);
+        assertEq(
+            _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.claimHats.selector), 3_000_000
+        );
+
         // Everything else is hint-free (0 = "no per-rule cap", the hub's default).
         for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID) {
-                assertEq(entries[i].maxCallGasHint, 0, "only zk-email entries carry gas hints");
+            bool isEmClaim = entries[i].typeId == ModuleTypes.ELIGIBILITY_MODULE_ID
+                && (entries[i].selector == EligibilityModule.claimHat.selector
+                    || entries[i].selector == EligibilityModule.claimHats.selector);
+            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID && !isEmClaim) {
+                assertEq(entries[i].maxCallGasHint, 0, "only zk-email + EM claim entries carry gas hints");
             }
         }
     }
@@ -260,11 +271,19 @@ contract OrgDeployerPaymasterRulesTest is Test {
     }
 
     function _hintOf(DefaultGlobalRules.Entry[] memory entries, bytes4 selector) internal pure returns (uint32) {
+        return _hintOfType(entries, ModuleTypes.ZKEMAIL_INVITES_ID, selector);
+    }
+
+    function _hintOfType(DefaultGlobalRules.Entry[] memory entries, bytes32 typeId, bytes4 selector)
+        internal
+        pure
+        returns (uint32)
+    {
         for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].typeId == ModuleTypes.ZKEMAIL_INVITES_ID && entries[i].selector == selector) {
+            if (entries[i].typeId == typeId && entries[i].selector == selector) {
                 return entries[i].maxCallGasHint;
             }
         }
-        revert("zk-email selector missing from DefaultGlobalRules");
+        revert("selector missing from DefaultGlobalRules");
     }
 }
