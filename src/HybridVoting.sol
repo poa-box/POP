@@ -77,6 +77,14 @@ contract HybridVoting is Initializable {
         bool _paused; // Inline pausable state
         uint256 _lock; // Inline reentrancy guard state
         uint32 quorum; // minimum number of voters required (0 = disabled)
+        // ─── RoleManager Phase 2 (V2) append-only tail ───
+        // NOTE: this Layout is the single source of truth; HybridVotingCore/Config/Proposals all
+        // re-derive the SAME ERC-7201 slot and import this struct, so appends here propagate to the
+        // three libs automatically. Per-proposal override lives in a SIDE mapping keyed by
+        // proposalId — NEVER a field on the Proposal struct (stride corruption). equalWeight needs
+        // no field: it is realised by snapshotting a synthetic DIRECT class at proposal creation.
+        mapping(uint256 => uint32) proposalQuorumOverride; // proposalId => override (0 = none)
+        address configAdmin; // scoped secondary admin (RoleManager) for hat/class wiring; 0 = none
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.hybridvoting.v2.storage");
@@ -122,6 +130,9 @@ contract HybridVoting is Initializable {
     event ExecutorUpdated(address newExec);
     event ThresholdPctSet(uint8 pct);
     event QuorumSet(uint32 quorum);
+    // V2 (RoleManager Phase 2): scoped config admin set/cleared. ProposalConfigV2 + ClassHatSet are
+    // declared/emitted in the libraries that own the mutation (HybridVotingProposals / -Config).
+    event ConfigAdminSet(address indexed admin);
 
     /* ─────── Initialiser ─────── */
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -187,6 +198,27 @@ contract HybridVoting is Initializable {
         if (_msgSender() != address(_layout().executor)) revert VotingErrors.Unauthorized();
     }
 
+    // V2: hat/class wiring setters accept executor OR the scoped configAdmin (RoleManager). Every
+    // other setter (threshold/executor/quorum/pause) stays executor-only.
+    modifier onlyConfigAdmin() {
+        _checkConfigAdmin();
+        _;
+    }
+
+    function _checkConfigAdmin() private view {
+        Layout storage l = _layout();
+        if (_msgSender() != address(l.executor) && _msgSender() != l.configAdmin) {
+            revert VotingErrors.Unauthorized();
+        }
+    }
+
+    /// @notice Set the scoped config admin (RoleManager) permitted to wire creator hats and classes.
+    /// @dev Executor-only. Does not widen any other setter's auth.
+    function setConfigAdmin(address admin) external onlyExecutor {
+        _layout().configAdmin = admin;
+        emit ConfigAdminSet(admin);
+    }
+
     function pause() external onlyExecutor {
         _pause();
     }
@@ -196,7 +228,7 @@ contract HybridVoting is Initializable {
     }
 
     /* ─────── Hat Management ─────── */
-    function setCreatorHatAllowed(uint256 h, bool ok) external onlyExecutor {
+    function setCreatorHatAllowed(uint256 h, bool ok) external onlyConfigAdmin {
         Layout storage l = _layout();
         HatManager.setHatInArray(l.creatorHatIds, h, ok);
         emit HatSet(HatType.CREATOR, h, ok);
@@ -207,8 +239,20 @@ contract HybridVoting is Initializable {
     }
 
     /* ─────── N-Class Configuration ─────── */
-    function setClasses(ClassConfig[] calldata newClasses) external onlyExecutor {
+    function setClasses(ClassConfig[] calldata newClasses) external onlyConfigAdmin {
         HybridVotingConfig.setClasses(newClasses);
+    }
+
+    /// @notice Add a single hat to class `classIdx`'s voter set (incremental; slices untouched).
+    /// @dev executor || configAdmin. Kills the read-modify-write of a full setClasses for one hat.
+    function addHatToClass(uint8 classIdx, uint256 hatId) external onlyConfigAdmin {
+        HybridVotingConfig.addHatToClass(classIdx, hatId);
+    }
+
+    /// @notice Remove a single hat from class `classIdx`'s voter set (incremental; slices untouched).
+    /// @dev executor || configAdmin.
+    function removeHatFromClass(uint8 classIdx, uint256 hatId) external onlyConfigAdmin {
+        HybridVotingConfig.removeHatFromClass(classIdx, hatId);
     }
 
     function getClasses() external view returns (ClassConfig[] memory) {
@@ -291,6 +335,30 @@ contract HybridVoting is Initializable {
         HybridVotingProposals.createProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds);
     }
 
+    /// @notice Create a proposal with a per-proposal quorum override and/or equalWeight tally.
+    /// @dev Additive to createProposal (legacy selector/behaviour untouched). Rules (PLAN §1.5, H-2):
+    ///      - `quorumOverride`/`equalWeight` are only allowed on RESTRICTED polls (`hatIds.length > 0`);
+    ///        an unrestricted proposal MUST pass 0/false or it reverts (InvalidQuorum).
+    ///      - Executable proposals raise-only: effective quorum = max(globalQuorum, override).
+    ///      - Non-executable signal polls: effective quorum = override.
+    ///      - `equalWeight` snapshots a single synthetic DIRECT class {slicePct:100, hatIds: pollHatIds}
+    ///        so every eligible voter counts once regardless of token balances; vote()/announceWinner()
+    ///        machinery is unchanged.
+    function createProposalV2(
+        bytes calldata title,
+        bytes32 descriptionHash,
+        uint32 minutesDuration,
+        uint8 numOptions,
+        IExecutor.Call[][] calldata batches,
+        uint256[] calldata hatIds,
+        uint32 quorumOverride,
+        bool equalWeight
+    ) external onlyCreator whenNotPaused {
+        HybridVotingProposals.createProposalV2(
+            title, descriptionHash, minutesDuration, numOptions, batches, hatIds, quorumOverride, equalWeight
+        );
+    }
+
     /* ─────── Voting ─────── */
     function vote(uint256 id, uint8[] calldata idxs, uint8[] calldata weights) external exists(id) whenNotPaused {
         HybridVotingCore.vote(id, idxs, weights);
@@ -337,6 +405,16 @@ contract HybridVoting is Initializable {
 
     function pollHatAllowed(uint256 id, uint256 hat) external view exists(id) returns (bool) {
         return _layout()._proposals[id].pollHatAllowed[hat];
+    }
+
+    /// @notice Per-proposal quorum override (0 = none / legacy proposal). See createProposalV2.
+    function proposalQuorumOverride(uint256 id) external view exists(id) returns (uint32) {
+        return _layout().proposalQuorumOverride[id];
+    }
+
+    /// @notice The scoped config admin (RoleManager) allowed to wire creator hats and classes.
+    function configAdmin() external view returns (address) {
+        return _layout().configAdmin;
     }
 
     function executor() external view returns (address) {

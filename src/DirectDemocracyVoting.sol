@@ -68,6 +68,14 @@ contract DirectDemocracyVoting is Initializable {
         bool _paused; // Inline pausable state
         uint256 _lock; // Inline reentrancy guard state
         uint32 quorum; // minimum number of voters required (0 = disabled)
+        // ─── RoleManager Phase 2 (V2) append-only tail ───
+        // Per-proposal quorum override lives in a SIDE mapping keyed by proposalId — NEVER a field
+        // on the Proposal struct (it lives in a storage array; widening its stride corrupts every
+        // existing proposal). 0 = no override (V1 proposals + V2 proposals that pass 0).
+        mapping(uint256 => uint32) proposalQuorumOverride;
+        // Scoped secondary admin (RoleManager) allowed to toggle voting/creator hats via
+        // setConfig(HAT_ALLOWED) — every other ConfigKey stays executor-only. 0 = none.
+        address configAdmin;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.directdemocracy.storage");
@@ -133,6 +141,11 @@ contract DirectDemocracyVoting is Initializable {
     event ProposalCleaned(uint256 id, uint256 cleaned);
     event ThresholdPctSet(uint8 pct);
     event QuorumSet(uint32 quorum);
+    // V2 (RoleManager Phase 2): additive event carrying per-proposal config that is NOT present on
+    // the legacy NewProposal/NewHatProposal ABIs. `equalWeight` is always false on DD (HV-only knob);
+    // the field is kept for a uniform cross-module event shape the subgraph can index.
+    event ProposalConfigV2(uint256 indexed id, uint32 quorumOverride, bool equalWeight);
+    event ConfigAdminSet(address indexed admin);
 
     /* ─────────── Initialiser ─────────── */
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -205,8 +218,24 @@ contract DirectDemocracyVoting is Initializable {
         _unpause();
     }
 
-    function setConfig(ConfigKey key, bytes calldata value) external onlyExecutor {
+    /// @notice Set the scoped config admin (RoleManager) permitted to toggle voting/creator hats.
+    /// @dev Executor-only. Every ConfigKey other than HAT_ALLOWED stays executor-only regardless.
+    function setConfigAdmin(address admin) external onlyExecutor {
+        _layout().configAdmin = admin;
+        emit ConfigAdminSet(admin);
+    }
+
+    function setConfig(ConfigKey key, bytes calldata value) external {
         Layout storage l = _layout();
+        // HAT_ALLOWED (voting/creator hat wiring) accepts executor OR configAdmin (RoleManager);
+        // every other key is executor-only — matches the frozen auth surface (auth-surfaces §1).
+        if (key == ConfigKey.HAT_ALLOWED) {
+            if (_msgSender() != address(l.executor) && _msgSender() != l.configAdmin) {
+                revert VotingErrors.Unauthorized();
+            }
+        } else if (_msgSender() != address(l.executor)) {
+            revert VotingErrors.Unauthorized();
+        }
         if (key == ConfigKey.THRESHOLD) {
             uint8 q = abi.decode(value, (uint8));
             VotingMath.validateThreshold(q);
@@ -376,6 +405,42 @@ contract DirectDemocracyVoting is Initializable {
         }
     }
 
+    /// @notice Create a proposal with a per-proposal quorum override (additive to createProposal).
+    /// @dev The legacy createProposal selector/behaviour is untouched. Rules (PLAN §1.5, H-2):
+    ///      - `quorumOverride` is only allowed on RESTRICTED polls (`hatIds.length > 0`); an
+    ///        unrestricted proposal MUST pass 0 or it reverts (InvalidQuorum).
+    ///      - Executable proposals (any non-empty batch) can only RAISE quorum: the effective
+    ///        quorum is `max(globalQuorum, override)` — a captured micro-electorate cannot lower
+    ///        the bar and push through an arbitrary Executor batch.
+    ///      - Non-executable signal polls may LOWER quorum: effective quorum = override.
+    ///      The override is stored in a side mapping keyed by proposalId and read at winner calc.
+    function createProposalV2(
+        bytes calldata title,
+        bytes32 descriptionHash,
+        uint32 minutesDuration,
+        uint8 numOptions,
+        IExecutor.Call[][] calldata batches,
+        uint256[] calldata hatIds,
+        uint32 quorumOverride
+    ) external onlyCreator whenNotPaused {
+        if (hatIds.length == 0 && quorumOverride != 0) revert VotingErrors.InvalidQuorum();
+
+        uint256 id = _initProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds);
+
+        Layout storage l = _layout();
+        if (quorumOverride != 0) {
+            l.proposalQuorumOverride[id] = quorumOverride;
+        }
+
+        uint64 endTs = l._proposals[id].endTimestamp;
+        if (hatIds.length > 0) {
+            emit NewHatProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp), hatIds);
+        } else {
+            emit NewProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp));
+        }
+        emit ProposalConfigV2(id, quorumOverride, false);
+    }
+
     /* ─────────── Voting ─────────── */
     function vote(uint256 id, uint8[] calldata idxs, uint8[] calldata weights)
         external
@@ -472,12 +537,35 @@ contract DirectDemocracyVoting is Initializable {
     }
 
     /* ─────────── View helpers ─────────── */
+    /// @dev Effective voter-count quorum for a proposal, honouring any V2 override (H-2):
+    ///      - no override (0) → global quorum (V1 path, byte-identical).
+    ///      - override set + executable (any non-empty batch) → max(global, override) (raise-only).
+    ///      - override set + non-executable poll → override (may lower for small-group signals).
+    function _effectiveQuorum(Layout storage l, Proposal storage p, uint256 id) internal view returns (uint32) {
+        uint32 ov = l.proposalQuorumOverride[id];
+        if (ov == 0) return l.quorum;
+        uint256 n = p.batches.length;
+        for (uint256 i; i < n;) {
+            if (p.batches[i].length > 0) {
+                // executable: override can only raise the bar
+                return ov > l.quorum ? ov : l.quorum;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        // non-executable signal poll: override replaces the global quorum
+        return ov;
+    }
+
     function _calcWinner(uint256 id) internal view returns (uint256 win, bool ok) {
         Layout storage l = _layout();
         Proposal storage p = l._proposals[id];
 
-        // Check quorum: minimum number of voters required
-        if (l.quorum > 0 && p.totalWeight / 100 < l.quorum) {
+        // Check quorum: minimum number of voters required (V2 override honoured, raise-only for
+        // executable proposals — see _effectiveQuorum).
+        uint32 eq = _effectiveQuorum(l, p, id);
+        if (eq > 0 && p.totalWeight / 100 < eq) {
             return (0, false);
         }
 
@@ -554,5 +642,15 @@ contract DirectDemocracyVoting is Initializable {
 
     function pollHatAllowed(uint256 id, uint256 hat) external view exists(id) returns (bool) {
         return _layout()._proposals[id].pollHatAllowed[hat];
+    }
+
+    /// @notice Per-proposal quorum override (0 = none / legacy proposal). See createProposalV2.
+    function proposalQuorumOverride(uint256 id) external view exists(id) returns (uint32) {
+        return _layout().proposalQuorumOverride[id];
+    }
+
+    /// @notice The scoped config admin (RoleManager) allowed to toggle voting/creator hats.
+    function configAdmin() external view returns (address) {
+        return _layout().configAdmin;
     }
 }
