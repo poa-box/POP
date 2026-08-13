@@ -66,6 +66,10 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         mapping(uint256 => Request) requests;
         uint256[] memberHatIds; // enumeration array for member hats
         uint256[] approverHatIds; // enumeration array for approver hats
+        // ─── Role customization (configAdmin) ───
+        // Optional secondary admin (e.g. RoleManager) permitted to set member/approver hat
+        // allowlists alongside the executor. address(0) = none.
+        address configAdmin;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.participationtoken.storage");
@@ -87,6 +91,8 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     event ApproverHatSet(uint256 hat, bool allowed);
     event NameSet(string newName);
     event SymbolSet(string newSymbol);
+    /// @notice The secondary config admin (may set member/approver hat allowlists) changed.
+    event ConfigAdminSet(address indexed admin);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -181,6 +187,16 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         }
     }
 
+    /// @dev Caller must be the executor or the configured configAdmin; reverts Unauthorized otherwise.
+    ///      Used only by the member/approver hat setters so a RoleManager can fan out role wiring.
+    function _checkExecutorOrConfigAdmin() private view {
+        Layout storage l = _layout();
+        address s = _msgSender();
+        if (s == l.executor) return;
+        if (s != address(0) && s == l.configAdmin) return;
+        revert Unauthorized();
+    }
+
     /*──────── Admin setters ───────*/
     /// @notice Set the TaskManager authorized to mint tokens. Executor-only.
     /// @dev C-01 fix: previously the first set (while `taskManager == 0`) was open
@@ -207,13 +223,24 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         emit EducationHubSet(eh);
     }
 
-    function setMemberHatAllowed(uint256 h, bool ok) external onlyExecutor {
+    /// @notice Set the secondary config admin permitted to set member/approver hat allowlists.
+    /// @dev Executor-only. `admin` may be address(0) to clear.
+    function setConfigAdmin(address admin) external onlyExecutor {
+        _layout().configAdmin = admin;
+        emit ConfigAdminSet(admin);
+    }
+
+    /// @notice Add or remove a member hat. Executor or configAdmin.
+    function setMemberHatAllowed(uint256 h, bool ok) external {
+        _checkExecutorOrConfigAdmin();
         Layout storage l = _layout();
         HatManager.setHatInArray(l.memberHatIds, h, ok);
         emit MemberHatSet(h, ok);
     }
 
-    function setApproverHatAllowed(uint256 h, bool ok) external onlyExecutor {
+    /// @notice Add or remove an approver hat. Executor or configAdmin.
+    function setApproverHatAllowed(uint256 h, bool ok) external {
+        _checkExecutorOrConfigAdmin();
         Layout storage l = _layout();
         HatManager.setHatInArray(l.approverHatIds, h, ok);
         emit ApproverHatSet(h, ok);

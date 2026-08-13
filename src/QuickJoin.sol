@@ -78,6 +78,10 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         address executor;
         uint256[] memberHatIds; // hat IDs to mint when users join
         IUniversalPasskeyAccountFactory universalFactory; // Universal factory for passkey accounts
+        // ─── Role customization (configAdmin) ───
+        // Optional secondary admin (e.g. RoleManager) permitted to update the member-hat
+        // auto-mint list alongside the executor. address(0) = none.
+        address configAdmin;
     }
 
     /* ───────── Passkey Enrollment Struct ──────── */
@@ -101,6 +105,8 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     event AddressesUpdated(address hats, address registry, address master);
     event ExecutorUpdated(address newExecutor);
     event MemberHatIdsUpdated(uint256[] hatIds);
+    /// @notice The secondary config admin (may update the member-hat auto-mint list) changed.
+    event ConfigAdminSet(address indexed admin);
     event QuickJoined(address indexed user, uint256[] hatIds);
     event QuickJoinedByMaster(address indexed master, address indexed user, uint256[] hatIds);
     event UniversalFactoryUpdated(address indexed universalFactory);
@@ -169,6 +175,16 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         _;
     }
 
+    /// @dev Caller must be the executor or the configured configAdmin; reverts Unauthorized otherwise.
+    ///      Used only by updateMemberHatIds so a RoleManager can fan out the auto-mint list.
+    function _requireExecutorOrConfigAdmin() private view {
+        Layout storage l = _layout();
+        address s = _msgSender();
+        if (s == l.executor) return;
+        if (s != address(0) && s == l.configAdmin) return;
+        revert Unauthorized();
+    }
+
     /* ─────── Admin / DAO setters (executor-gated) ─────── */
     function updateAddresses(address hats_, address accountRegistry_, address masterDeploy_) external onlyExecutor {
         if (hats_ == address(0) || accountRegistry_ == address(0) || masterDeploy_ == address(0)) {
@@ -183,7 +199,9 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         emit AddressesUpdated(hats_, accountRegistry_, masterDeploy_);
     }
 
-    function updateMemberHatIds(uint256[] calldata memberHatIds_) external onlyExecutor {
+    /// @notice Replace the member-hat auto-mint list. Executor or configAdmin.
+    function updateMemberHatIds(uint256[] calldata memberHatIds_) external {
+        _requireExecutorOrConfigAdmin();
         Layout storage l = _layout();
 
         // Clear existing hat IDs using HatManager
@@ -201,6 +219,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         if (newExec == address(0)) revert InvalidAddress();
         _layout().executor = newExec;
         emit ExecutorUpdated(newExec);
+    }
+
+    /// @notice Set the secondary config admin permitted to update the member-hat auto-mint list.
+    /// @dev Executor-only. `admin` may be address(0) to clear.
+    function setConfigAdmin(address admin) external onlyExecutor {
+        _layout().configAdmin = admin;
+        emit ConfigAdminSet(admin);
     }
 
     function setUniversalFactory(address factory) external onlyMasterDeploy {

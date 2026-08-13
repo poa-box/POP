@@ -56,6 +56,10 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         IParticipationToken token;
         uint256[] creatorHatIds; // enumeration array for creator hats
         uint256[] memberHatIds; // enumeration array for member hats
+        // ─── Role customization (configAdmin) ───
+        // Optional secondary admin (e.g. RoleManager) permitted to set creator/member hat
+        // allowlists alongside the executor. address(0) = none.
+        address configAdmin;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.educationhub.storage");
@@ -78,6 +82,8 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     event ExecutorSet(address indexed newExecutor);
     event TokenSet(address indexed newToken);
     event HatsSet(address indexed newHats);
+    /// @notice The secondary config admin (may set creator/member hat allowlists) changed.
+    event ConfigAdminSet(address indexed admin);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -127,13 +133,17 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     }
 
     /*────────── Hat Management ─────*/
-    function setCreatorHatAllowed(uint256 h, bool ok) external onlyExecutor {
+    /// @notice Add or remove a creator hat. Executor or configAdmin.
+    function setCreatorHatAllowed(uint256 h, bool ok) external {
+        _requireExecutorOrConfigAdmin();
         Layout storage l = _layout();
         HatManager.setHatInArray(l.creatorHatIds, h, ok);
         emit CreatorHatSet(h, ok);
     }
 
-    function setMemberHatAllowed(uint256 h, bool ok) external onlyExecutor {
+    /// @notice Add or remove a member hat. Executor or configAdmin.
+    function setMemberHatAllowed(uint256 h, bool ok) external {
+        _requireExecutorOrConfigAdmin();
         Layout storage l = _layout();
         HatManager.setHatInArray(l.memberHatIds, h, ok);
         emit MemberHatSet(h, ok);
@@ -155,6 +165,16 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     modifier onlyExecutor() {
         if (_msgSender() != _layout().executor) revert NotExecutor();
         _;
+    }
+
+    /// @dev Caller must be the executor or the configured configAdmin; reverts NotExecutor otherwise.
+    ///      Used only by the creator/member hat setters so a RoleManager can fan out role wiring.
+    function _requireExecutorOrConfigAdmin() private view {
+        Layout storage l = _layout();
+        address s = _msgSender();
+        if (s == l.executor) return;
+        if (s != address(0) && s == l.configAdmin) return;
+        revert NotExecutor();
     }
 
     /*────────── DAO / Admin Setters ───────*/
@@ -183,6 +203,13 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         if (newHats == address(0)) revert ZeroAddress();
         _layout().hats = IHats(newHats);
         emit HatsSet(newHats);
+    }
+
+    /// @notice Set the secondary config admin permitted to set creator/member hat allowlists.
+    /// @dev Executor-only. `admin` may be address(0) to clear.
+    function setConfigAdmin(address admin) external onlyExecutor {
+        _layout().configAdmin = admin;
+        emit ConfigAdminSet(admin);
     }
 
     /*────────── Pause Control (executor) ───────*/
