@@ -53,7 +53,7 @@ library DefaultGlobalRules {
 
     /// @notice All default rulebook entries (selector strings match the deployed module ABIs).
     function entries() internal pure returns (Entry[] memory e) {
-        e = new Entry[](52);
+        e = new Entry[](54);
         uint256 i;
 
         // ── QuickJoin (6) ──
@@ -144,13 +144,19 @@ library DefaultGlobalRules {
         e[i++] = Entry(t, bytes4(keccak256("createDistribution(address,uint256,bytes32,uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("finalizeDistribution(uint256,uint256)")), 0);
 
-        // ── EligibilityModule (5) ──
+        // ── EligibilityModule (7) — vouch + role-application + RoleManager self-claim paths ──
         t = ModuleTypes.ELIGIBILITY_MODULE_ID;
         e[i++] = Entry(t, bytes4(keccak256("claimVouchedHat(uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("vouchFor(address,uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("revokeVouch(address,uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("applyForRole(uint256,bytes32)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("withdrawApplication(uint256)")), 0);
+        // Permissionless self-claim of a hat the caller is derived/vouched/email/rule-eligible for
+        // (RoleManager offer acceptance). claimHat = single mint; claimHats loops up to MAX_CLAIM_BATCH
+        // (20) mints in one call, so it carries a batch-sized gas hint (single mint ~200-250k; the cap
+        // bounds a full 20-hat accept while still covering legitimate offers).
+        e[i++] = Entry(t, bytes4(keccak256("claimHat(uint256)")), 300_000);
+        e[i++] = Entry(t, bytes4(keccak256("claimHats(uint256[])")), 3_000_000);
 
         // ── ParticipationToken (3) ──
         t = ModuleTypes.PARTICIPATION_TOKEN_ID;

@@ -877,7 +877,7 @@ contract PaymasterGlobalRulesTest is Test {
     }
 
     function _expectedRulebookPairs() internal pure returns (bytes32[] memory p) {
-        p = new bytes32[](52);
+        p = new bytes32[](54);
         uint256 n;
         bytes32 t = ModuleTypes.QUICK_JOIN_ID;
         p[n++] = _pair(t, QuickJoin.quickJoinWithUser.selector);
@@ -922,6 +922,8 @@ contract PaymasterGlobalRulesTest is Test {
         p[n++] = _pair(t, EligibilityModule.revokeVouch.selector);
         p[n++] = _pair(t, EligibilityModule.applyForRole.selector);
         p[n++] = _pair(t, EligibilityModule.withdrawApplication.selector);
+        p[n++] = _pair(t, EligibilityModule.claimHat.selector);
+        p[n++] = _pair(t, EligibilityModule.claimHats.selector);
         t = ModuleTypes.PARTICIPATION_TOKEN_ID;
         p[n++] = _pair(t, ParticipationToken.requestTokens.selector);
         p[n++] = _pair(t, ParticipationToken.approveRequest.selector);
