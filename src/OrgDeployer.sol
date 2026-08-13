@@ -12,11 +12,13 @@ import {AccessFactory} from "./factories/AccessFactory.sol";
 import {ModulesFactory} from "./factories/ModulesFactory.sol";
 import {RoleConfigStructs} from "./libs/RoleConfigStructs.sol";
 import {ModuleTypes} from "./libs/ModuleTypes.sol";
+import {IRoleManager} from "./interfaces/IRoleManager.sol";
 
 /*────────────────────── Module‑specific hooks ──────────────────────────*/
 interface IExecutorAdmin {
     function setCaller(address) external;
     function setHatMinterAuthorization(address minter, bool authorized) external;
+    function configureModule(address target, bytes calldata data) external returns (bytes memory);
     function acceptBeaconOwnership(address beacon) external;
     function configureParticipationToken(address token, address taskManager, address educationHub) external;
     function configureVouching(
@@ -282,6 +284,10 @@ contract OrgDeployer is Initializable {
         // address(0) on chains where ZK Email protocol infra (verifier + DKIM registry)
         // has not been wired into the OrgDeployer yet — the module is skipped.
         address zkEmailInvites;
+        // address(0) unless the deploy opted into RoleManager AND the protocol beacon is registered
+        // on this chain (deployFullOrgWithRoleManager). Deployed uninitialized by ModulesFactory,
+        // then initialized + wired (EM.setRoleManager + sibling setConfigAdmin) here before renounce.
+        address roleManager;
     }
 
     struct RoleAssignments {
@@ -418,9 +424,26 @@ contract OrgDeployer is Initializable {
 
     /// @notice Deploy a full org without ZK Email invites (backwards-compatible entrypoint).
     function deployFullOrg(DeploymentParams calldata params) external payable returns (DeploymentResult memory result) {
-        // Empty (disabled) ZK Email config — module is skipped.
+        // Empty (disabled) ZK Email + RoleManager configs — both modules are skipped.
         ModulesFactory.ZkEmailConfig memory emptyZk;
-        result = _deployFullOrgGuarded(params, emptyZk);
+        ModulesFactory.RoleManagerConfig memory emptyRm;
+        result = _deployFullOrgGuarded(params, emptyZk, emptyRm);
+    }
+
+    /// @notice Deploy a full org and opt into the RoleManager orchestrator module.
+    /// @dev Sibling entrypoint mirroring {deployFullOrgWithZkEmail}: the `DeploymentParams` tuple is
+    ///      left untouched (26 flat fields — the frontend hand-encodes it and production hits
+    ///      stack-too-deep if it grows), and the opt-in rides in a small separate config struct.
+    ///      The RoleManager proxy deploys only if `rmConfig.enabled` AND the chain has the
+    ///      RoleManager beacon registered; otherwise the module is skipped and the rest of the org
+    ///      deploys unchanged. When deployed it is initialized (after voting) and wired via the
+    ///      Executor: EligibilityModule.setRoleManager + setConfigAdmin on DD/HV/TM/PT/EduHub/QuickJoin.
+    function deployFullOrgWithRoleManager(
+        DeploymentParams calldata params,
+        ModulesFactory.RoleManagerConfig calldata rmConfig
+    ) external payable returns (DeploymentResult memory result) {
+        ModulesFactory.ZkEmailConfig memory emptyZk;
+        result = _deployFullOrgGuarded(params, emptyZk, rmConfig);
     }
 
     /// @notice Deploy a full org and opt into ZK Email role invitations with an initial allowlist.
@@ -433,19 +456,21 @@ contract OrgDeployer is Initializable {
         payable
         returns (DeploymentResult memory result)
     {
-        result = _deployFullOrgGuarded(params, zkConfig);
+        ModulesFactory.RoleManagerConfig memory emptyRm;
+        result = _deployFullOrgGuarded(params, zkConfig, emptyRm);
     }
 
-    function _deployFullOrgGuarded(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig memory zkConfig)
-        internal
-        returns (DeploymentResult memory result)
-    {
+    function _deployFullOrgGuarded(
+        DeploymentParams calldata params,
+        ModulesFactory.ZkEmailConfig memory zkConfig,
+        ModulesFactory.RoleManagerConfig memory rmConfig
+    ) internal returns (DeploymentResult memory result) {
         // Manual reentrancy guard
         Layout storage l = _layout();
         if (l._status == 2) revert Reentrant();
         l._status = 2;
 
-        result = _deployFullOrgInternal(params, zkConfig);
+        result = _deployFullOrgInternal(params, zkConfig, rmConfig);
 
         // Reset reentrancy guard
         l._status = 1;
@@ -455,10 +480,11 @@ contract OrgDeployer is Initializable {
 
     /*════════════════  INTERNAL ORCHESTRATION  ════════════════*/
 
-    function _deployFullOrgInternal(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig memory zkConfig)
-        internal
-        returns (DeploymentResult memory result)
-    {
+    function _deployFullOrgInternal(
+        DeploymentParams calldata params,
+        ModulesFactory.ZkEmailConfig memory zkConfig,
+        ModulesFactory.RoleManagerConfig memory rmConfig
+    ) internal returns (DeploymentResult memory result) {
         Layout storage l = _layout();
 
         /* 1. Validate role configurations */
@@ -559,7 +585,8 @@ contract OrgDeployer is Initializable {
                 zkEmailDkimRegistry: l.zkEmailDkimRegistry,
                 accountRegistry: params.registryAddr,
                 universalFactory: l.universalPasskeyFactory,
-                zkEmailConfig: zkConfig
+                zkEmailConfig: zkConfig,
+                roleManagerConfig: rmConfig
             });
 
             modules = l.modulesFactory.deployModules(moduleParams);
@@ -567,6 +594,7 @@ contract OrgDeployer is Initializable {
             result.educationHub = modules.educationHub;
             result.paymentManager = modules.paymentManager;
             result.zkEmailInvites = modules.zkEmailInvites;
+            result.roleManager = modules.roleManager;
         }
 
         /* 7. Deploy Voting Mechanisms (HybridVoting, DirectDemocracyVoting) */
@@ -655,6 +683,11 @@ contract OrgDeployer is Initializable {
             }
         }
 
+        /* 10.6. Initialize + wire the RoleManager orchestrator (opt-in; no-op if not deployed).
+                 Runs AFTER voting so RoleManager.initialize receives the DD/HV addresses, and BEFORE
+                 renounce so the Executor.configureModule owner-relay is still reachable. */
+        _configureRoleManager(l, params, result, gov.roleHatIds);
+
         /* 11. Renounce executor ownership - now only governed by voting */
         OwnableUpgradeable(result.executor).renounceOwnership();
 
@@ -722,10 +755,12 @@ contract OrgDeployer is Initializable {
         uint256[] memory roleHatIds,
         address deployerAddress
     ) internal pure returns (address[] memory wearers, uint256[] memory hatIds) {
-        // First pass: count total wearers
+        // First pass: count total wearers.
+        // Deploy-time minting is decoupled from `canVote` (HatsTreeSetup mints regardless), so the
+        // emitted wearer set must include mint-to-deployer / additional-wearer assignments on
+        // non-voting roles too — otherwise the subgraph misses those Users.
         uint256 totalCount = 0;
         for (uint256 i = 0; i < roles.length; i++) {
-            if (!roles[i].canVote) continue;
             if (roles[i].distribution.mintToDeployer) totalCount++;
             totalCount += roles[i].distribution.additionalWearers.length;
         }
@@ -736,7 +771,6 @@ contract OrgDeployer is Initializable {
         uint256 idx = 0;
 
         for (uint256 i = 0; i < roles.length; i++) {
-            if (!roles[i].canVote) continue;
             uint256 hatId = roleHatIds[i];
 
             if (roles[i].distribution.mintToDeployer) {
@@ -750,6 +784,68 @@ contract OrgDeployer is Initializable {
                 idx++;
             }
         }
+    }
+
+    /**
+     * @notice Initialize the (already deployed + registered) RoleManager and wire its scoped authority.
+     * @dev No-op when RoleManager was not deployed (opt-out or beacon unregistered). Initialization is
+     *      done here — not in ModulesFactory — because RoleManager.initialize needs the DD/HV voting
+     *      addresses, which are only deployed after ModulesFactory returns. All wiring routes THROUGH
+     *      the Executor (owner == this OrgDeployer, pre-renounce) via {IExecutorAdmin.configureModule}:
+     *        - EligibilityModule.setRoleManager (the Executor is the EM superAdmin by now), and
+     *        - setConfigAdmin(roleManager) on DD, HV, TaskManager, ParticipationToken, EducationHub
+     *          (skipped when disabled) and QuickJoin — each an executor-gated setter.
+     *      Genesis roles are seeded from the org's role hats + their names (index-aligned with
+     *      `params.roles`), matching RoleManager's `existingOrgHats`/`existingOrgHatNames` contract.
+     */
+    function _configureRoleManager(
+        Layout storage l,
+        DeploymentParams calldata params,
+        DeploymentResult memory result,
+        uint256[] memory roleHatIds
+    ) internal {
+        if (result.roleManager == address(0)) return;
+
+        // Seed genesis roles: the org's role hats + their names (index-aligned with params.roles).
+        uint256 rc = params.roles.length;
+        string[] memory names = new string[](rc);
+        for (uint256 i = 0; i < rc; i++) {
+            names[i] = params.roles[i].name;
+        }
+
+        IRoleManager(result.roleManager)
+            .initialize(
+                IRoleManager.InitConfig({
+                executor: result.executor,
+                eligibilityModule: result.eligibilityModule,
+                hats: address(_getHats()),
+                ddVoting: result.directDemocracyVoting,
+                hybridVoting: result.hybridVoting,
+                taskManager: result.taskManager,
+                participationToken: result.participationToken,
+                educationHub: result.educationHub,
+                quickJoin: result.quickJoin,
+                paymasterHub: l.paymasterHub,
+                orgId: params.orgId,
+                existingOrgHats: roleHatIds,
+                existingOrgHatNames: names
+            })
+            );
+
+        // Wire scoped authority THROUGH the Executor (owner-relay, pre-renounce).
+        address rm = result.roleManager;
+        IExecutorAdmin exec = IExecutorAdmin(result.executor);
+        bytes memory setConfigAdminData = abi.encodeWithSignature("setConfigAdmin(address)", rm);
+
+        exec.configureModule(result.eligibilityModule, abi.encodeWithSignature("setRoleManager(address)", rm));
+        exec.configureModule(result.directDemocracyVoting, setConfigAdminData);
+        exec.configureModule(result.hybridVoting, setConfigAdminData);
+        exec.configureModule(result.taskManager, setConfigAdminData);
+        exec.configureModule(result.participationToken, setConfigAdminData);
+        if (result.educationHub != address(0)) {
+            exec.configureModule(result.educationHub, setConfigAdminData);
+        }
+        exec.configureModule(result.quickJoin, setConfigAdminData);
     }
 
     /**

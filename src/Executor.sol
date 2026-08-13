@@ -75,6 +75,7 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     event HatsSet(address indexed hats);
     event HatMinterAuthorized(address indexed minter, bool authorized);
     event HatsMinted(address indexed user, uint256[] hatIds);
+    event ModuleConfigured(address indexed target, bytes4 indexed selector);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -218,6 +219,29 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     }
 
     /* ─────────── Module Configuration ─────────── */
+    /**
+     * @notice Generic owner-gated bootstrap relay: perform an arbitrary call THROUGH the Executor.
+     * @dev Bootstrap-only lifecycle (precedent: {configureParticipationToken}/{configureVouching},
+     *      the C-01 pattern). During org deployment the owner is the OrgDeployer, so this lets the
+     *      deployer invoke executor-gated setters on freshly deployed modules — e.g.
+     *      `EligibilityModule.setRoleManager` (where this Executor is the superAdmin) and the sibling
+     *      modules' `setConfigAdmin` (executor-gated) — with `msg.sender == executor`, exactly as a
+     *      governance batch would. It is DEAD on live orgs: immediately after deployment OrgDeployer
+     *      calls `renounceOwnership()`, so `owner() == address(0)` and this reverts for everyone.
+     *      Live-org adoption instead drives these same setters through governance batches
+     *      ({execute}). Bubbles the callee's revert data on failure via {CallFailed}.
+     * @param target Module to call (non-zero).
+     * @param data ABI-encoded call (selector + args).
+     * @return The raw return data of the call.
+     */
+    function configureModule(address target, bytes calldata data) external onlyOwner returns (bytes memory) {
+        if (target == address(0)) revert ZeroAddress();
+        (bool ok, bytes memory ret) = target.call(data);
+        if (!ok) revert CallFailed(0, ret);
+        emit ModuleConfigured(target, bytes4(data));
+        return ret;
+    }
+
     /**
      * @notice One-shot wiring of the org's ParticipationToken during initial setup.
      * @dev C-01 fix: the token's `setTaskManager` / `setEducationHub` are now

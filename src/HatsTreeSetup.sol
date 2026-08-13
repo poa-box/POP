@@ -194,8 +194,10 @@ contract HatsTreeSetup {
         // Count total eligibility entries needed: deployer (only if minting) + additional wearers
         uint256 eligibilityCount = 0;
         for (uint256 i = 0; i < len; i++) {
-            // Deployer only eligible if they're receiving the hat (matches minting conditions)
-            if (params.roles[i].canVote && params.roles[i].distribution.mintToDeployer) {
+            // Deployer only eligible if they're receiving the hat (matches minting conditions).
+            // Deploy-time minting is decoupled from `canVote`: a role may mint to the deployer /
+            // additional wearers even when it grants no vote (e.g. a title/marker role).
+            if (params.roles[i].distribution.mintToDeployer) {
                 eligibilityCount += 1;
             }
             eligibilityCount += params.roles[i].distribution.additionalWearers.length;
@@ -219,8 +221,9 @@ contract HatsTreeSetup {
             uint256 hatId = result.roleHatIds[i];
             RoleConfigStructs.RoleConfig memory role = params.roles[i];
 
-            // Deployer only eligible if they're receiving the hat (matches minting conditions)
-            if (role.canVote && role.distribution.mintToDeployer) {
+            // Deployer only eligible if they're receiving the hat (matches minting conditions;
+            // decoupled from `canVote` — see the eligibility-count loop above).
+            if (role.distribution.mintToDeployer) {
                 eligWearers[eligIndex] = params.deployerAddress;
                 eligHatIds[eligIndex] = hatId;
                 eligIndex++;
@@ -254,8 +257,7 @@ contract HatsTreeSetup {
         uint256 mintCount = 0;
         for (uint256 i = 0; i < len; i++) {
             RoleConfigStructs.RoleConfig memory role = params.roles[i];
-            if (!role.canVote) continue;
-
+            // Deploy-time minting is decoupled from `canVote`.
             if (role.distribution.mintToDeployer) mintCount++;
             mintCount += role.distribution.additionalWearers.length;
         }
@@ -267,8 +269,6 @@ contract HatsTreeSetup {
 
             for (uint256 i = 0; i < len; i++) {
                 RoleConfigStructs.RoleConfig memory role = params.roles[i];
-                if (!role.canVote) continue;
-
                 uint256 hatId = result.roleHatIds[i];
 
                 if (role.distribution.mintToDeployer) {

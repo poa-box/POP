@@ -31,6 +31,7 @@ library ModuleTypes {
     bytes32 constant PASSKEY_ACCOUNT_ID = keccak256("PasskeyAccount");
     bytes32 constant PASSKEY_ACCOUNT_FACTORY_ID = keccak256("PasskeyAccountFactory");
     bytes32 constant ZKEMAIL_INVITES_ID = keccak256("ZkEmailInvites");
+    bytes32 constant ROLE_MANAGER_ID = keccak256("RoleManager");
     // Protocol singletons (not per-org modules) — used as PaymasterHub global-rulebook typeIds
     // so gasless calls to shared registries resolve through the same type-keyed whitelist.
     bytes32 constant UNIVERSAL_ACCOUNT_REGISTRY_ID = keccak256("UniversalAccountRegistry");

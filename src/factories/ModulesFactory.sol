@@ -56,6 +56,18 @@ contract ModulesFactory {
         bytes32 initialCid; // IPFS CID digest of the allowlist file `initialRoot` commits to (0 if dormant)
     }
 
+    /*──────────────────── RoleManager Configuration ────────────────────*/
+    /// @notice Per-org opt-in for the RoleManager orchestrator module.
+    /// @dev Mirrors ZkEmailConfig's opt-in gate. The proxy deploys UNINITIALIZED here and is included
+    ///      in this factory's registration batch (register-before-initialize). Unlike ZkEmailInvites,
+    ///      initialization is DEFERRED to OrgDeployer: RoleManager.initialize needs the DirectDemocracy
+    ///      and HybridVoting addresses, which are deployed AFTER this factory returns. The module still
+    ///      only deploys if the chain has the RoleManager beacon registered (non-reverting
+    ///      `beaconRegistered` probe → the org deploy skips it instead of reverting with `TypeUnknown`).
+    struct RoleManagerConfig {
+        bool enabled; // Whether to deploy RoleManager for this org
+    }
+
     /*──────────────────── Modules Deployment Params ────────────────────*/
     struct ModulesParams {
         bytes32 orgId;
@@ -80,6 +92,7 @@ contract ModulesFactory {
         address accountRegistry; // UniversalAccountRegistry used by ZkEmailInvites combined-claim flow
         address universalFactory; // UniversalPasskeyAccountFactory used by combined-claim flow (may be 0)
         ZkEmailConfig zkEmailConfig; // Per-org opt-in + initial allowlist
+        RoleManagerConfig roleManagerConfig; // Per-org opt-in for the RoleManager orchestrator
     }
 
     /*──────────────────── Modules Deployment Result ────────────────────*/
@@ -89,6 +102,9 @@ contract ModulesFactory {
         address paymentManager;
         // address(0) when ZK Email infra is not wired on this chain — caller MUST handle this.
         address zkEmailInvites;
+        // address(0) when RoleManager is not opted in or its beacon is unregistered on this chain.
+        // Deployed UNINITIALIZED here; OrgDeployer initializes it after the voting modules exist.
+        address roleManager;
     }
 
     /*══════════════  MAIN DEPLOYMENT FUNCTION  ═════════════=*/
@@ -224,11 +240,41 @@ contract ModulesFactory {
             );
         }
 
-        /* 5. Batch register contracts (variable count: TaskManager + PaymentManager + opt. EducationHub + opt. ZkEmailInvites) */
+        /* 4b. Deploy RoleManager if opted in and the protocol beacon is registered (UNINITIALIZED). */
+        // Two prerequisites must hold: (a) the deployer opted in (roleManagerConfig.enabled), and
+        // (b) PoaManager has a RoleManager beacon registered on THIS chain — checked with the
+        // non-reverting `beaconRegistered` probe so an unregistered protocol type silently skips
+        // the module instead of reverting the whole org deploy. Initialization is DEFERRED to
+        // OrgDeployer (RoleManager.initialize needs the DD/HV voting addresses, deployed after this
+        // factory returns). Registering the proxy here keeps register-before-initialize intact.
+        address roleManagerBeacon;
+        bool roleManagerEnabled = params.roleManagerConfig.enabled
+            && BeaconDeploymentLib.beaconRegistered(ModuleTypes.ROLE_MANAGER_ID, params.poaManager);
+        if (roleManagerEnabled) {
+            roleManagerBeacon = BeaconDeploymentLib.createBeacon(
+                ModuleTypes.ROLE_MANAGER_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)
+            );
+
+            ModuleDeploymentLib.DeployConfig memory config = ModuleDeploymentLib.DeployConfig({
+                poaManager: IPoaManager(params.poaManager),
+                orgRegistry: OrgRegistry(params.orgRegistry),
+                hats: params.hats,
+                orgId: params.orgId,
+                moduleOwner: params.executor,
+                autoUpgrade: params.autoUpgrade,
+                customImpl: address(0)
+            });
+
+            result.roleManager =
+                ModuleDeploymentLib.deployUninitializedProxy(config, ModuleTypes.ROLE_MANAGER_ID, roleManagerBeacon);
+        }
+
+        /* 5. Batch register contracts (variable count: TaskManager + PaymentManager + opt. EducationHub + opt. ZkEmailInvites + opt. RoleManager) */
         {
             uint256 registrationCount = 2; // TaskManager + PaymentManager always
             if (params.educationHubConfig.enabled) registrationCount++;
             if (zkEmailEnabled) registrationCount++;
+            if (roleManagerEnabled) registrationCount++;
 
             OrgRegistry.ContractRegistration[] memory registrations =
                 new OrgRegistry.ContractRegistration[](registrationCount);
@@ -262,6 +308,15 @@ contract ModulesFactory {
                     typeId: ModuleTypes.ZKEMAIL_INVITES_ID,
                     proxy: result.zkEmailInvites,
                     beacon: zkEmailInvitesBeacon,
+                    owner: params.executor
+                });
+            }
+
+            if (roleManagerEnabled) {
+                registrations[idx++] = OrgRegistry.ContractRegistration({
+                    typeId: ModuleTypes.ROLE_MANAGER_ID,
+                    proxy: result.roleManager,
+                    beacon: roleManagerBeacon,
                     owner: params.executor
                 });
             }
