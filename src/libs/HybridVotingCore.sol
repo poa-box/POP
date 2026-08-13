@@ -29,6 +29,31 @@ library HybridVotingCore {
         }
     }
 
+    /// @dev Effective voter-count quorum honouring any V2 override (H-2):
+    ///      - no override (0) → global quorum (legacy path, byte-identical).
+    ///      - override + executable (any non-empty batch) → max(global, override) (raise-only).
+    ///      - override + non-executable poll → override (may lower for small-group signals).
+    function _effectiveQuorum(HybridVoting.Layout storage l, HybridVoting.Proposal storage p, uint256 id)
+        internal
+        view
+        returns (uint32)
+    {
+        uint32 ov = l.proposalQuorumOverride[id];
+        if (ov == 0) return l.quorum;
+        uint256 n = p.batches.length;
+        for (uint256 i; i < n;) {
+            if (p.batches[i].length > 0) {
+                // executable: override can only raise the bar
+                return ov > l.quorum ? ov : l.quorum;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        // non-executable signal poll: override replaces the global quorum
+        return ov;
+    }
+
     function vote(uint256 id, uint8[] calldata idxs, uint8[] calldata weights) external {
         if (idxs.length != weights.length) revert VotingErrors.LengthMismatch();
         if (block.timestamp > _layout()._proposals[id].endTimestamp) revert VotingErrors.VotingExpired();
@@ -191,8 +216,10 @@ library HybridVotingCore {
             return (0, false);
         }
 
-        // Check quorum: minimum number of voters required
-        if (l.quorum > 0 && p.voterCount < l.quorum) {
+        // Check quorum: minimum number of voters required (V2 override honoured, raise-only for
+        // executable proposals — see _effectiveQuorum).
+        uint32 eq = _effectiveQuorum(l, p, id);
+        if (eq > 0 && p.voterCount < eq) {
             emit Winner(id, 0, false, false, uint64(block.timestamp));
             return (0, false);
         }
