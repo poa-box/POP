@@ -295,9 +295,7 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         g.exists = true;
 
         l.orgHats.push(markerHatId);
-        emit GroupCreated(groupId, markerHatId, name);
-        // metadataCID is emitted only via the subgraph's GroupCreated join; no on-chain storage need.
-        metadataCID; // silence unused-parameter (kept for ABI/subgraph symmetry)
+        emit GroupCreated(groupId, markerHatId, name, metadataCID);
 
         // Attach member roles + derive eligibility.
         uint256 len = memberRoleIds.length;
@@ -332,7 +330,8 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         g.exists = true;
 
         l.orgHats.push(markerHatId);
-        emit GroupCreated(groupId, markerHatId, name);
+        // Adopted pre-existing hats have no metadata registration path here; subgraph reads bytes32(0).
+        emit GroupCreated(groupId, markerHatId, name, bytes32(0));
 
         uint256 len = memberRoleIds.length;
         for (uint256 i; i < len;) {

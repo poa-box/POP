@@ -252,7 +252,7 @@ contract RoleManagerTest is Test {
         (uint256 r2, uint256 h2) = rm.createRole(_roleParams("VP"));
 
         vm.expectEmit(false, false, false, false);
-        emit IRoleManager.GroupCreated(1, 0, "");
+        emit IRoleManager.GroupCreated(1, 0, "", bytes32(0));
         (uint256 groupId, uint256 markerHat) =
             rm.createGroup("Executives", bytes32(0), "img", _arr2(r1, r2), _emptyWiring());
 

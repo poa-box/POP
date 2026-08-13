@@ -81,7 +81,7 @@ interface IRoleManager {
 
     event RoleManagerInitialized(address indexed executor, bytes32 indexed orgId, address eligibilityModule);
     event RoleCreated(uint256 indexed roleId, uint256 indexed hatId, string name, bytes32 metadataCID, bool isExisting);
-    event GroupCreated(uint256 indexed groupId, uint256 indexed markerHatId, string name);
+    event GroupCreated(uint256 indexed groupId, uint256 indexed markerHatId, string name, bytes32 metadataCID);
     event RoleGroupMembershipChanged(uint256 indexed roleId, uint256 indexed groupId, bool added);
     event RoleWiringApplied(uint256 indexed id, uint256 indexed hatId, bool isGroup);
     event RoleOffered(uint256 indexed roleId, address indexed user, uint256 indexed hatId);
