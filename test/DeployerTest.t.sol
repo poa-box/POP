@@ -2273,7 +2273,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // Test 6: Only super admin can configure vouching
         vm.prank(voter1);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdminOrRoleManager.selector));
         EligibilityModule(eligibilityModuleAddr).configureVouching(defaultRoleHat, 3, memberRoleHat, true);
     }
 
@@ -3802,7 +3802,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
 
         // Test that only the super admin can create hats — even the marketing executive fails now
         vm.prank(marketingExecutive);
-        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdmin.selector));
+        vm.expectRevert(abi.encodeWithSelector(EligibilityModule.NotSuperAdminOrRoleManager.selector));
         EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -4569,7 +4569,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         address hierarchyAdmin = _hierarchyAdmin(setup);
 
         vm.prank(hierarchyAdmin);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         EligibilityModule(setup.eligibilityModule).setDefaultEligibility(setup.defaultRoleHat, false, false);
     }
 
@@ -4582,7 +4582,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(address(0x55), setup.defaultRoleHat, true, true);
 
         vm.prank(hierarchyAdmin);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         EligibilityModule(setup.eligibilityModule).clearWearerEligibility(address(0x55), setup.defaultRoleHat);
     }
 
@@ -4618,7 +4618,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         address hierarchyAdmin = _hierarchyAdmin(setup);
 
         vm.prank(hierarchyAdmin);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         EligibilityModule(setup.eligibilityModule)
             .createHatWithEligibility(
                 EligibilityModule.CreateHatParams({
@@ -4641,7 +4641,7 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         address hierarchyAdmin = _hierarchyAdmin(setup);
 
         vm.prank(hierarchyAdmin);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         EligibilityModule(setup.eligibilityModule).updateHatMetadata(setup.defaultRoleHat, "Renamed", bytes32(0));
     }
 
@@ -4763,11 +4763,11 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(stranger, setup.defaultRoleHat, true, true);
 
         vm.prank(stranger);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         EligibilityModule(setup.eligibilityModule).setDefaultEligibility(setup.defaultRoleHat, true, true);
 
         vm.prank(stranger);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         EligibilityModule(setup.eligibilityModule).updateHatMetadata(setup.defaultRoleHat, "X", bytes32(0));
     }
 
