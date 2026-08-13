@@ -53,6 +53,17 @@ contract MockHatsRM {
         }
     }
 
+    /// @dev Mirrors Hats.checkHatWearerStatus: burns (clears) the STATIC balance when the wearer
+    ///      holds the token but the eligibility module now reports ineligible. Permissionless no-op
+    ///      otherwise — RoleManager.revokeRole relies on this to free supply on capped hats.
+    function checkHatWearerStatus(uint256 hatId, address wearer) external returns (bool updated) {
+        if (minted[hatId][wearer] && !_eligible(wearer, hatId)) {
+            minted[hatId][wearer] = false;
+            return true;
+        }
+        return false;
+    }
+
     function _eligible(address wearer, uint256 hatId) internal view returns (bool) {
         if (_forced[hatId][wearer]) return true;
         if (address(eligibility) == address(0)) return false;

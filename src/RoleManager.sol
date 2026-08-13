@@ -31,6 +31,7 @@ interface IEligibilityModuleRM {
 
     function createHatWithEligibility(CreateHatParams calldata params) external returns (uint256);
     function eligibilityModuleAdminHat() external view returns (uint256);
+    function getDefaultRules(uint256 hatId) external view returns (bool eligible, bool standing);
     function clearWearerEligibility(address wearer, uint256 hatId) external;
     function grantWearerEligibility(address wearer, uint256 hatId) external;
     function mintHatToAddress(uint256 hatId, address wearer) external;
@@ -117,6 +118,8 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
     error UnknownGroup();
     error AlreadyInGroup();
     error NotInGroup();
+    error RevokeIneffective();
+    error WiringIncompatible();
 
     /*────────── ERC-7201 Storage ─────────*/
     /// @custom:storage-location erc7201:poa.rolemanager.storage
@@ -192,6 +195,18 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         l.orgId = cfg.orgId;
 
         emit RoleManagerInitialized(cfg.executor, cfg.orgId, cfg.eligibilityModule);
+        // Fan-out targets must be reconstructable from logs (subgraph rule: no eth_calls) — and on
+        // the hand-composed adoption path a mis-pasted module address should be visible immediately.
+        emit ModulesWired(
+            cfg.ddVoting,
+            cfg.hybridVoting,
+            cfg.taskManager,
+            cfg.participationToken,
+            cfg.educationHub,
+            cfg.quickJoin,
+            cfg.paymasterHub,
+            cfg.hats
+        );
 
         // Seed existing org hats as registered (existing) roles.
         uint256 len = cfg.existingOrgHats.length;
@@ -258,10 +273,19 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         _grantRole(_layout(), roleId, user);
     }
 
-    /// @notice Revoke `roleId` from `user`. Clears the explicit eligibility rule on the identity hat;
-    ///         because identity hats are `defaultEligible=false` this dynamically zeroes the balance,
-    ///         and any group markers auto-follow via derived eligibility when this was the wearer's
-    ///         last member role. Also revokes an unclaimed offer (the explicit rule IS the offer).
+    /// @notice Revoke `roleId` from `user`. Clears the explicit eligibility rule on the identity hat
+    ///         (also revoking an unclaimed offer — the explicit rule IS the offer), then reconciles
+    ///         Hats static balances (`checkHatWearerStatus`) so the identity token is BURNED and its
+    ///         supply slot freed (elections on capped hats), with group markers reconciled the same
+    ///         way when this was the wearer's last member role.
+    /// @dev    Reverts `RevokeIneffective` when clearing the explicit rule does not actually remove
+    ///         the wearer — i.e. the hat is default-eligible (genesis-seeded / adopted roles) or the
+    ///         wearer stays eligible via a vouch quorum or email verification. Those sources are
+    ///         outside RoleManager's authority BY DESIGN (it can grant, never ban): governance must
+    ///         pair the appropriate EligibilityModule call in the same batch
+    ///         (`setWearerEligibility(user, hat, false, false)`, `clearWearerVouches`, or
+    ///         `clearEmailVerified`). An honest revert here beats emitting a RoleRevoked event for a
+    ///         removal that did not happen.
     function revokeRole(uint256 roleId, address user) external onlyExecutor {
         Layout storage l = _layout();
         RoleInfo storage r = l.roles[roleId];
@@ -269,6 +293,23 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
 
         bool wasWearing = l.hats.isWearerOfHat(user, r.hatId);
         IEligibilityModuleRM(l.eligibilityModule).clearWearerEligibility(user, r.hatId);
+
+        // Burn the now-ineligible identity token (frees hat.supply — a dynamic zero alone leaks
+        // supply and bricks successor mints on maxSupply-capped roles), then reconcile each group
+        // marker whose derived eligibility may have lapsed with the identity hat. Permissionless
+        // no-ops when there is nothing to burn.
+        l.hats.checkHatWearerStatus(r.hatId, user);
+        uint256[] storage groupIds = l.roleGroupIds[roleId];
+        uint256 gLen = groupIds.length;
+        for (uint256 i; i < gLen;) {
+            l.hats.checkHatWearerStatus(l.groups[groupIds[i]].markerHatId, user);
+            unchecked {
+                ++i;
+            }
+        }
+
+        if (l.hats.isWearerOfHat(user, r.hatId)) revert RevokeIneffective();
+
         emit RoleRevoked(roleId, user, wasWearing);
     }
 
@@ -409,6 +450,34 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
     }
 
     /// @notice The full org membership hat set.
+    /// @notice The wired sibling-module addresses this RoleManager fans permissions out to.
+    function modules()
+        external
+        view
+        returns (
+            address ddVoting,
+            address hybridVoting,
+            address taskManager,
+            address participationToken,
+            address educationHub,
+            address quickJoin,
+            address paymasterHub,
+            address hats_
+        )
+    {
+        Layout storage l = _layout();
+        return (
+            l.ddVoting,
+            l.hybridVoting,
+            l.taskManager,
+            l.participationToken,
+            l.educationHub,
+            l.quickJoin,
+            l.paymasterHub,
+            address(l.hats)
+        );
+    }
+
     function orgHats() external view returns (uint256[] memory) {
         return _layout().orgHats;
     }
@@ -543,6 +612,17 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
             emit RoleGranted(roleId, user, true);
         } else {
             // OFFER: explicit eligibility rule is the offer state; user accepts via EM.claimHats.
+            // Clear stale explicit rules on the group markers too — an old kick would otherwise
+            // shadow the derived path and make the one-tx claimHats([identity, markers]) acceptance
+            // revert on the marker entry. (grantWearerEligibility overwrites the identity rule, so
+            // no separate clear is needed there; a governance grant vote implies the un-ban.)
+            uint256 gLen = groupIds.length;
+            for (uint256 i; i < gLen;) {
+                em.clearWearerEligibility(user, l.groups[groupIds[i]].markerHatId);
+                unchecked {
+                    ++i;
+                }
+            }
             em.grantWearerEligibility(user, identityHat);
             emit RoleOffered(roleId, user, identityHat);
             emit RoleGranted(roleId, user, false);
@@ -552,6 +632,26 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
     /// @dev Typed permission fan-out. Applies the target state idempotently (no diff); a cleared
     ///      boolean re-applies the permission as `false`. `id` is a roleId or groupId (per isGroup).
     function _applyWiring(Layout storage l, uint256 id, uint256 hatId, bool isGroup, RoleWiring memory w) private {
+        // Guard incompatible wiring up-front (cheap honest reverts beat silently-broken state):
+        // 1. Vouching with combineWithHierarchy=false makes getWearerStatus IGNORE the explicit
+        //    per-wearer rules that RoleManager's entire grant/offer/consent model rests on — every
+        //    grant would revert NotEligible and every offer would be permanently unclaimable.
+        //    Vouch-gated RM roles must keep combine=true (vouching as an ADDITIONAL path).
+        if (w.vouchingEnabled && !w.vouchCombine) revert WiringIncompatible();
+        // 2. Markers must keep the derived-eligibility path free: vouching on a marker either
+        //    reverts in EM (derived<->vouch guard) or — for a still-empty group — sneaks in and
+        //    permanently blocks every later addRoleToGroup. Reject at the source.
+        if (isGroup && w.vouchingEnabled) revert WiringIncompatible();
+        // 3. QuickJoin auto-mint requires an OPEN (default-eligible) hat: joins mint via
+        //    Executor.mintHatsForUser -> Hats.mintHat, which reverts NotEligible for the
+        //    default-closed hats RoleManager creates — wiring one in would brick every
+        //    subsequent join org-wide. Only pre-existing open hats (e.g. a genesis MEMBER
+        //    role) may be auto-minted on join.
+        if (w.quickJoinAutoMint) {
+            (bool defaultEligible,) = IEligibilityModuleRM(l.eligibilityModule).getDefaultRules(hatId);
+            if (!defaultEligible) revert WiringIncompatible();
+        }
+
         // TaskManager global ROLE_PERM (mask==0 removes all perms — gated by the explicit flag).
         if (w.setTaskPerm && l.taskManager != address(0)) {
             ITaskManagerRM(l.taskManager)

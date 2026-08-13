@@ -91,6 +91,10 @@ contract MockEligibilityModuleRM {
         lastMaxSupply[hatId] = newMaxSupply;
     }
 
+    function getDefaultRules(uint256 hatId) external view returns (bool eligible, bool standing) {
+        return (defaultEligible[hatId], true);
+    }
+
     /// @notice Eligibility resolution: explicit per-wearer rule wins; else default; else derived.
     function isEligible(address wearer, uint256 hatId) public view returns (bool) {
         if (hasExplicit[hatId][wearer]) return explicitEligible[hatId][wearer];

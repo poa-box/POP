@@ -221,6 +221,20 @@ contract MockEduPT is IEduPT {
             pt.setMemberHatAllowed(HAT_A, false);
         }
 
+        /// configAdmin is scoped to the two hat-wiring setters only — module wiring stays executor-only.
+        function testPTNonWidenedSettersRejectConfigAdmin() public {
+            ParticipationToken pt = _deployPT();
+            vm.prank(executor);
+            pt.setConfigAdmin(configAdmin);
+
+            vm.startPrank(configAdmin);
+            vm.expectRevert(ParticipationToken.Unauthorized.selector);
+            pt.setTaskManager(rando);
+            vm.expectRevert(ParticipationToken.Unauthorized.selector);
+            pt.setEducationHub(rando);
+            vm.stopPrank();
+        }
+
         /*──────────── EducationHub ───────────*/
 
         function _deployEdu() internal returns (EducationHub hub) {
@@ -230,6 +244,17 @@ contract MockEduPT is IEduPT {
             hub = EducationHub(address(new BeaconProxy(address(beacon), "")));
             uint256[] memory empty = new uint256[](0);
             hub.initialize(address(token), address(hats), executor, empty, empty);
+        }
+
+        /// configAdmin is scoped to the two hat-wiring setters only — module wiring stays executor-only.
+        function testEduNonWidenedSettersRejectConfigAdmin() public {
+            EducationHub hub = _deployEdu();
+            vm.prank(executor);
+            hub.setConfigAdmin(configAdmin);
+
+            vm.prank(configAdmin);
+            vm.expectRevert(EducationHub.NotExecutor.selector);
+            hub.setHats(address(0xBEEF));
         }
 
         function testEduSetConfigAdminOnlyExecutor() public {
@@ -285,6 +310,17 @@ contract MockEduPT is IEduPT {
             qj = QuickJoin(address(new BeaconProxy(address(beacon), "")));
             uint256[] memory empty = new uint256[](0);
             qj.initialize(executor, address(hats), address(0xBEEF), address(0xF00D), empty);
+        }
+
+        /// configAdmin is scoped to updateMemberHatIds only — address wiring stays executor-only.
+        function testQJNonWidenedSettersRejectConfigAdmin() public {
+            QuickJoin qj = _deployQJ();
+            vm.prank(executor);
+            qj.setConfigAdmin(configAdmin);
+
+            vm.prank(configAdmin);
+            vm.expectRevert(QuickJoin.Unauthorized.selector);
+            qj.updateAddresses(address(hats), address(0xBEEF), address(0xF00D));
         }
 
         function testQJSetConfigAdminOnlyExecutor() public {

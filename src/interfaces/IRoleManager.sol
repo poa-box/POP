@@ -26,8 +26,14 @@ interface IRoleManager {
     }
 
     /// @notice Typed permission fan-out applied to a role's identity hat or a group's marker hat.
-    /// @dev Applied idempotently; the struct expresses the target state, it does NOT diff — a
-    ///      cleared boolean flag re-applies the permission as `false` (an explicit removal).
+    /// @dev Applied idempotently; boolean module flags express the target state (a cleared flag
+    ///      re-applies the permission as `false` — an explicit removal). TWO FIELDS ARE APPLY-ONLY,
+    ///      not target-state: `hvClassIndexes` only ADDS class memberships (remove via a governance
+    ///      call to HybridVoting.removeHatFromClass), and `vouchingEnabled=false` leaves an existing
+    ///      vouch config untouched (disable via EligibilityModule.configureVouching(hat, 0, 0, false)).
+    ///      Incompatible combinations revert `WiringIncompatible`: vouching with combine=false
+    ///      (breaks the grant/offer consent model), vouching on a group marker (blocks the derived
+    ///      path), and quickJoinAutoMint on a non-default-eligible hat (bricks QuickJoin joins).
     struct RoleWiring {
         bool setTaskPerm;
         uint8 taskPermMask;
@@ -80,6 +86,16 @@ interface IRoleManager {
     /*────────────────── Events ──────────────────*/
 
     event RoleManagerInitialized(address indexed executor, bytes32 indexed orgId, address eligibilityModule);
+    event ModulesWired(
+        address ddVoting,
+        address hybridVoting,
+        address taskManager,
+        address participationToken,
+        address educationHub,
+        address quickJoin,
+        address paymasterHub,
+        address hats
+    );
     event RoleCreated(uint256 indexed roleId, uint256 indexed hatId, string name, bytes32 metadataCID, bool isExisting);
     event GroupCreated(uint256 indexed groupId, uint256 indexed markerHatId, string name, bytes32 metadataCID);
     event RoleGroupMembershipChanged(uint256 indexed roleId, uint256 indexed groupId, bool added);

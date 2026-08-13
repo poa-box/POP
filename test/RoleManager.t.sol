@@ -185,9 +185,11 @@ contract RoleManagerTest is Test {
         p.wiring.ptApprover = true;
         p.wiring.eduCreator = true;
         p.wiring.eduMember = true;
-        p.wiring.quickJoinAutoMint = true;
+        // quickJoinAutoMint deliberately absent: identity hats are defaultEligible=false, and the
+        // WiringIncompatible guard rejects auto-mint wiring for closed hats (see the guard tests).
         p.wiring.vouchingEnabled = true;
         p.wiring.vouchQuorum = 3;
+        p.wiring.vouchCombine = true; // combine=false is rejected (breaks the grant/offer model)
         p.wiring.budgetCapPerEpoch = 1 ether;
         p.wiring.budgetEpochLen = 86400;
 
@@ -224,10 +226,8 @@ contract RoleManagerTest is Test {
         assertTrue(edu.creatorAllowed(hatId));
         assertTrue(edu.memberAllowed(hatId));
 
-        // QuickJoin list now contains the hat
-        uint256[] memory qjHats = qj.memberHatIds();
-        assertEq(qjHats.length, 1);
-        assertEq(qjHats[0], hatId);
+        // QuickJoin untouched (auto-mint wiring is invalid for default-closed identity hats)
+        assertEq(qj.memberHatIds().length, 0);
 
         // Vouching configured
         assertTrue(em.vouchConfigured(hatId));
@@ -251,8 +251,9 @@ contract RoleManagerTest is Test {
         (uint256 r1, uint256 h1) = rm.createRole(_roleParams("President"));
         (uint256 r2, uint256 h2) = rm.createRole(_roleParams("VP"));
 
-        vm.expectEmit(false, false, false, false);
-        emit IRoleManager.GroupCreated(1, 0, "", bytes32(0));
+        // groupId topic + data (name, metadataCID) are asserted; markerHatId topic is unknown pre-call.
+        vm.expectEmit(true, false, false, true);
+        emit IRoleManager.GroupCreated(1, 0, "Executives", bytes32(0));
         (uint256 groupId, uint256 markerHat) =
             rm.createGroup("Executives", bytes32(0), "img", _arr2(r1, r2), _emptyWiring());
 

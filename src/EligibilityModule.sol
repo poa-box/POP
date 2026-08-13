@@ -188,6 +188,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     event WearerEligibilityUpdated(
         address indexed wearer, uint256 indexed hatId, bool eligible, bool standing, address indexed admin
     );
+    event WearerEligibilityCleared(address indexed wearer, uint256 indexed hatId, address indexed admin);
     event DefaultEligibilityUpdated(uint256 indexed hatId, bool eligible, bool standing, address indexed admin);
     event EmailVerifiedSet(address indexed wearer, uint256 indexed hatId, address indexed verifier);
     event EmailVerifiedCleared(address indexed wearer, uint256 indexed hatId, address indexed admin);
@@ -312,7 +313,10 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         Layout storage l = _layout();
         delete l.wearerRules[wearer][hatId];
         delete l.hasSpecificWearerRules[wearer][hatId];
-        emit WearerEligibilityUpdated(wearer, hatId, false, false, msg.sender);
+        // Distinct event: a CLEAR falls back to the hat's default rules — emitting
+        // WearerEligibilityUpdated(false,false) here (the old behavior) was log-indistinguishable
+        // from an explicit ban and made indexers show routine grant-path cleanups as kicks.
+        emit WearerEligibilityCleared(wearer, hatId, msg.sender);
     }
 
     /*═══════════════════════════════ EMAIL-VERIFIED ELIGIBILITY ═══════════════════════════════════*/

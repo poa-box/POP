@@ -401,14 +401,16 @@ contract RoleManagerIntegrationTest is Test {
     /// Bidirectional derived<->vouch guard, via both RoleManager wiring AND a direct EM call.
     function testScenario5a_GroupWiringVouchOnMarkerReverts() public {
         (uint256 groupId,,,,,) = _setupExecutives();
-        // Turn on vouching in the group's shared wiring -> _applyWiring calls EM.configureVouching on
-        // the marker, which already carries derived config -> revert.
+        // Turn on vouching in the group's shared wiring -> rejected up-front by RoleManager's
+        // WiringIncompatible guard (markers must keep the derived path free; the EM-level
+        // DerivedConflictsWithVouch guard behind it is exercised directly in Scenario 5b).
         IRoleManager.RoleWiring memory w = _zeroWiring();
         w.vouchingEnabled = true;
         w.vouchQuorum = 2;
         w.vouchMembershipHatId = memberHat;
+        w.vouchCombine = true; // valid combine mode — the isGroup guard must be what rejects this
         vm.prank(address(executor));
-        vm.expectRevert(EligibilityModule.DerivedConflictsWithVouch.selector);
+        vm.expectRevert(RoleManager.WiringIncompatible.selector);
         rm.setGroupWiring(groupId, w);
     }
 
@@ -515,6 +517,77 @@ contract RoleManagerIntegrationTest is Test {
         (bool eligible,) = em.getWearerStatus(alice, marker);
         assertFalse(eligible, "explicit kick overrides derived membership");
         assertEq(hats.balanceOf(alice, marker), 0, "marker balance forced to zero by the kick");
+    }
+
+    /*──────────────── Review-fix regressions (Wave 3) ────────────────*/
+
+    /// Adopted/genesis roles on DEFAULT-ELIGIBLE hats cannot be removed by rule-clearing alone:
+    /// revokeRole must revert RevokeIneffective (honest failure) instead of emitting a removal that
+    /// did not happen. The correct removal for such hats is an explicit governance ban.
+    function testRevokeOnDefaultEligibleAdoptedRoleReverts() public {
+        uint256 legacyHat = _execCreateHat("Legacy", 10, true, true); // default-eligible (KUBI shape)
+        vm.startPrank(address(executor));
+        uint256 legacyRole = rm.registerExistingRole(legacyHat, "Legacy");
+        em.mintHatToAddress(legacyHat, alice);
+        vm.stopPrank();
+        assertTrue(hats.isWearerOfHat(alice, legacyHat), "alice wears the adopted role");
+
+        vm.prank(address(executor));
+        vm.expectRevert(RoleManager.RevokeIneffective.selector);
+        rm.revokeRole(legacyRole, alice);
+        assertTrue(hats.isWearerOfHat(alice, legacyHat), "still wearing - nothing silently lied");
+
+        // Correct removal: explicit ban (superAdmin) + permissionless Hats reconciliation.
+        vm.prank(address(executor));
+        em.setWearerEligibility(alice, legacyHat, false, false);
+        hats.checkHatWearerStatus(legacyHat, alice);
+        assertEq(hats.balanceOf(alice, legacyHat), 0, "explicit ban removes the wearer");
+    }
+
+    /// Elections on capped roles: revokeRole BURNS the loser's token (checkHatWearerStatus) so the
+    /// successor's mint does not revert AllHatsWorn — the Hats supply-leak found in review.
+    function testCappedRoleElectionFreesSupply() public {
+        vm.startPrank(address(executor));
+        (uint256 presRole, uint256 presHat) = rm.createRole(
+            IRoleManager.RoleParams({
+                name: "SoloPresident",
+                metadataCID: bytes32(0),
+                imageURI: "",
+                maxSupply: 1,
+                mutableHat: true,
+                groupIds: _arr(),
+                wiring: _zeroWiring(),
+                initialGrants: _addrArr()
+            })
+        );
+        rm.grantRole(presRole, alice);
+        vm.stopPrank();
+        assertTrue(hats.isWearerOfHat(alice, presHat), "alice holds the single seat");
+
+        vm.startPrank(address(executor));
+        rm.revokeRole(presRole, alice); // burns the token -> frees the only supply slot
+        rm.grantRole(presRole, bob); // would revert AllHatsWorn without the burn
+        vm.stopPrank();
+        assertEq(hats.balanceOf(alice, presHat), 0, "loser fully out");
+        assertTrue(hats.isWearerOfHat(bob, presHat), "successor seated");
+    }
+
+    /// A stale explicit marker ban must not block the one-tx offer acceptance: the offer branch
+    /// clears explicit rules on the group markers so claimHats([identity, marker]) succeeds.
+    function testOfferAfterMarkerKickIsClaimable() public {
+        (, uint256 marker, uint256 presRole, uint256 presHat,,) = _setupExecutives();
+
+        // Dave (never in the org) carries a stale explicit marker ban from an earlier era.
+        vm.prank(address(executor));
+        em.setWearerEligibility(dave, marker, false, false);
+
+        vm.prank(address(executor));
+        rm.grantRole(presRole, dave); // offer branch: clears the stale marker ban + identity offer
+
+        vm.prank(dave);
+        em.claimHats(_arr2(presHat, marker));
+        assertTrue(hats.isWearerOfHat(dave, presHat), "identity claimed");
+        assertTrue(hats.isWearerOfHat(dave, marker), "marker claimable despite old ban");
     }
 
     /*═════════════════════════════ Helpers ═════════════════════════════*/
