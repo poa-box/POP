@@ -176,6 +176,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
         // Only the root hash is on-chain; reorganization = swap the hash via setFolders.
         bytes32 foldersRoot;
         uint256[] organizerHatIds; // hats authorized to reorganize the folder tree
+        // ─── Role customization (configAdmin) ───
+        // Optional secondary admin (e.g. RoleManager) permitted to set global ROLE_PERM masks
+        // alongside the executor. address(0) = none. Does NOT widen any other config branch.
+        address configAdmin;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.taskmanager.storage");
@@ -212,6 +216,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
     event FoldersUpdated(bytes32 indexed newRoot, bytes32 indexed oldRoot, address indexed sender);
     /// @notice A hat was added to or removed from the organizer-hat array.
     event OrganizerHatAllowed(uint256 indexed hatId, bool allowed);
+    /// @notice The secondary config admin (may set global ROLE_PERM masks) changed.
+    event ConfigAdminSet(address indexed admin);
 
     /// @notice A new task was created under `project`.
     event TaskCreated(
@@ -325,6 +331,16 @@ contract TaskManager is Initializable, ContextUpgradeable {
     /// @dev Reverts NotExecutor if the caller is not the configured executor.
     function _requireExecutor() internal view {
         if (_msgSender() != _layout().executor) revert NotExecutor();
+    }
+
+    /// @dev Caller must be the executor or the configured configAdmin; reverts NotExecutor otherwise.
+    ///      Used only by the ROLE_PERM config branch so a RoleManager can fan out role masks.
+    function _requireExecutorOrConfigAdmin() internal view {
+        Layout storage l = _layout();
+        address s = _msgSender();
+        if (s == l.executor) return;
+        if (s != address(0) && s == l.configAdmin) return;
+        revert NotExecutor();
     }
 
     /// @dev Caller must be the executor or wear any hat in `organizerHatIds`; reverts NotOrganizer otherwise.
@@ -1296,7 +1312,7 @@ contract TaskManager is Initializable, ContextUpgradeable {
         }
 
         if (key == ConfigKey.ROLE_PERM) {
-            _requireExecutor();
+            _requireExecutorOrConfigAdmin();
             (uint256 hatId, uint8 mask) = abi.decode(value, (uint256, uint8));
             l.rolePermGlobal[hatId] = mask;
             _syncPermissionHat(hatId);
@@ -1345,6 +1361,14 @@ contract TaskManager is Initializable, ContextUpgradeable {
                 emit ProjectCapUpdated(pid, old, newCap);
             }
         }
+    }
+
+    /// @notice Set the secondary config admin permitted to set global ROLE_PERM masks.
+    /// @dev Executor-only. `admin` may be address(0) to clear. Does not widen any other config branch.
+    function setConfigAdmin(address admin) external {
+        _requireExecutor();
+        _layout().configAdmin = admin;
+        emit ConfigAdminSet(admin);
     }
 
     /**
