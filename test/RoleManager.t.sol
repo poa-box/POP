@@ -503,4 +503,49 @@ contract RoleManagerTest is Test {
         vm.expectRevert(RoleManager.UnknownRole.selector);
         rm.grantRole(99, alice);
     }
+
+    /*──────────── Registration/wiring guards (review round 2) ────────────*/
+
+    function testCreateRoleZeroMaxSupplyMeansUnlimited() public {
+        IRoleManager.RoleParams memory p = _roleParams("Open");
+        p.maxSupply = 0; // repo convention: 0 = unlimited; raw 0 would make the hat unmintable
+        (, uint256 hatId) = rm.createRole(p);
+        assertEq(em.lastMaxSupply(hatId), type(uint32).max);
+    }
+
+    function testCreateGroupDuplicateInitialMembersRevert() public {
+        (uint256 r1,) = rm.createRole(_roleParams("President"));
+        vm.expectRevert(RoleManager.AlreadyInGroup.selector);
+        rm.createGroup("Executives", bytes32(0), "img", _arr2(r1, r1), _emptyWiring());
+    }
+
+    function testRegisterExistingGroupDuplicateMembersRevert() public {
+        (uint256 r1,) = rm.createRole(_roleParams("President"));
+        vm.expectRevert(RoleManager.AlreadyInGroup.selector);
+        rm.registerExistingGroup(999, "Exec", _arr2(r1, r1));
+    }
+
+    function testRegisterExistingRoleTwiceReverts() public {
+        rm.registerExistingRole(777, "Legacy");
+        vm.expectRevert(RoleManager.HatAlreadyRegistered.selector);
+        rm.registerExistingRole(777, "LegacyAgain");
+    }
+
+    function testRegisterExistingGroupMarkerReuseReverts() public {
+        (uint256 r1,) = rm.createRole(_roleParams("President"));
+        rm.registerExistingGroup(888, "ExecA", _arr1(r1));
+        vm.expectRevert(RoleManager.MarkerAlreadyRegistered.selector);
+        rm.registerExistingGroup(888, "ExecB", _arr1(r1));
+    }
+
+    function testMarkerAndRoleHatsAreMutuallyExclusive() public {
+        (uint256 r1, uint256 roleHat) = rm.createRole(_roleParams("President"));
+        // a registered role hat cannot double as a group marker
+        vm.expectRevert(RoleManager.MarkerAlreadyRegistered.selector);
+        rm.registerExistingGroup(roleHat, "Bad", _arr1(r1));
+        // a marker hat cannot double as an identity role
+        (, uint256 markerHat) = rm.createGroup("Executives", bytes32(0), "img", _arr1(r1), _emptyWiring());
+        vm.expectRevert(RoleManager.HatAlreadyRegistered.selector);
+        rm.registerExistingRole(markerHat, "BadRole");
+    }
 }

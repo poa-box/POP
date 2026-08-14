@@ -877,7 +877,7 @@ contract PaymasterGlobalRulesTest is Test {
     }
 
     function _expectedRulebookPairs() internal pure returns (bytes32[] memory p) {
-        p = new bytes32[](54);
+        p = new bytes32[](56);
         uint256 n;
         bytes32 t = ModuleTypes.QUICK_JOIN_ID;
         p[n++] = _pair(t, QuickJoin.quickJoinWithUser.selector);
@@ -907,9 +907,11 @@ contract PaymasterGlobalRulesTest is Test {
         p[n++] = _pair(ModuleTypes.HYBRID_VOTING_ID, HybridVoting.vote.selector);
         p[n++] = _pair(ModuleTypes.HYBRID_VOTING_ID, HybridVoting.announceWinner.selector);
         p[n++] = _pair(ModuleTypes.HYBRID_VOTING_ID, HybridVoting.createProposal.selector);
+        p[n++] = _pair(ModuleTypes.HYBRID_VOTING_ID, HybridVoting.createProposalV2.selector);
         p[n++] = _pair(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, DirectDemocracyVoting.vote.selector);
         p[n++] = _pair(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, DirectDemocracyVoting.announceWinner.selector);
         p[n++] = _pair(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, DirectDemocracyVoting.createProposal.selector);
+        p[n++] = _pair(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, DirectDemocracyVoting.createProposalV2.selector);
         t = ModuleTypes.PAYMENT_MANAGER_ID;
         p[n++] = _pair(t, PaymentManager.claimDistribution.selector);
         p[n++] = _pair(t, PaymentManager.claimMultiple.selector);

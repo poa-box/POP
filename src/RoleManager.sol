@@ -120,6 +120,8 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
     error NotInGroup();
     error RevokeIneffective();
     error WiringIncompatible();
+    error HatAlreadyRegistered();
+    error MarkerAlreadyRegistered();
 
     /*────────── ERC-7201 Storage ─────────*/
     /// @custom:storage-location erc7201:poa.rolemanager.storage
@@ -146,6 +148,7 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         // groups
         uint256 groupCount;
         mapping(uint256 => GroupInfo) groups; // groupId (1-based) => group
+        mapping(uint256 => uint256) groupIdOfMarker; // marker hatId => groupId (one-to-one with groups)
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.rolemanager.storage");
@@ -335,6 +338,7 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         g.name = name;
         g.exists = true;
 
+        l.groupIdOfMarker[markerHatId] = groupId;
         l.orgHats.push(markerHatId);
         emit GroupCreated(groupId, markerHatId, name, metadataCID);
 
@@ -343,6 +347,9 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         for (uint256 i; i < len;) {
             uint256 roleId = memberRoleIds[i];
             if (!l.roles[roleId].exists) revert UnknownRole();
+            // Duplicate inputs would create double membership records: removal then pops one copy
+            // and emits a removal event while eligibility persists through the other.
+            if (_arrayContains(g.memberRoleIds, roleId)) revert AlreadyInGroup();
             g.memberRoleIds.push(roleId);
             l.roleGroupIds[roleId].push(groupId);
             emit RoleGroupMembershipChanged(roleId, groupId, true);
@@ -364,12 +371,18 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
     {
         Layout storage l = _layout();
 
+        // One group per marker, and never a hat already registered as an identity role: a second
+        // group on the same marker would overwrite the EligibilityModule's single derived member
+        // list while the first group's stored membership silently diverges.
+        if (l.groupIdOfMarker[markerHatId] != 0 || l.roleIdOfHat[markerHatId] != 0) revert MarkerAlreadyRegistered();
+
         groupId = ++l.groupCount;
         GroupInfo storage g = l.groups[groupId];
         g.markerHatId = markerHatId;
         g.name = name;
         g.exists = true;
 
+        l.groupIdOfMarker[markerHatId] = groupId;
         l.orgHats.push(markerHatId);
         // Adopted pre-existing hats have no metadata registration path here; subgraph reads bytes32(0).
         emit GroupCreated(groupId, markerHatId, name, bytes32(0));
@@ -378,6 +391,7 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         for (uint256 i; i < len;) {
             uint256 roleId = memberRoleIds[i];
             if (!l.roles[roleId].exists) revert UnknownRole();
+            if (_arrayContains(g.memberRoleIds, roleId)) revert AlreadyInGroup();
             g.memberRoleIds.push(roleId);
             l.roleGroupIds[roleId].push(groupId);
             emit RoleGroupMembershipChanged(roleId, groupId, true);
@@ -495,7 +509,9 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         IEligibilityModuleRM.CreateHatParams memory params = IEligibilityModuleRM.CreateHatParams({
             parentHatId: em.eligibilityModuleAdminHat(),
             details: name,
-            maxSupply: maxSupply,
+            // 0 = unlimited (repo convention, mirrors HatsTreeSetup): Hats treats a raw 0 cap as
+            // an unmintable hat — every grant/claim would revert AllHatsWorn.
+            maxSupply: maxSupply == 0 ? type(uint32).max : maxSupply,
             _mutable: mutableHat,
             imageURI: imageURI,
             defaultEligible: false, // LOCKED: enables dynamic revocation via clearWearerEligibility
@@ -531,6 +547,10 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         private
         returns (uint256 roleId)
     {
+        // One role per hat, and never a hat that already serves as a group marker: a duplicate
+        // registration would leave two live roles steering the same hat with the reverse lookup
+        // exposing only the newest — contradictory group/grant state.
+        if (l.roleIdOfHat[hatId] != 0 || l.groupIdOfMarker[hatId] != 0) revert HatAlreadyRegistered();
         roleId = ++l.roleCount;
         RoleInfo storage r = l.roles[roleId];
         r.hatId = hatId;

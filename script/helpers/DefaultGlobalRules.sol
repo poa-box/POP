@@ -53,7 +53,7 @@ library DefaultGlobalRules {
 
     /// @notice All default rulebook entries (selector strings match the deployed module ABIs).
     function entries() internal pure returns (Entry[] memory e) {
-        e = new Entry[](54);
+        e = new Entry[](56);
         uint256 i;
 
         // ── QuickJoin (6) ──
@@ -124,17 +124,27 @@ library DefaultGlobalRules {
             Entry(t, bytes4(keccak256("updateTask(uint256,uint256,bytes,bytes32,address,uint256,uint48,uint32)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("updateTaskMetadata(uint256,bytes,bytes32)")), 0);
 
-        // ── HybridVoting (3) + DirectDemocracyVoting (3) ──
+        // ── HybridVoting (4) + DirectDemocracyVoting (4) ──
         bytes4 voteSel = bytes4(keccak256("vote(uint256,uint8[],uint8[])"));
         bytes4 announceSel = bytes4(keccak256("announceWinner(uint256)"));
         bytes4 proposalSel =
             bytes4(keccak256("createProposal(bytes,bytes32,uint32,uint8,(address,uint256,bytes)[][],uint256[])"));
+        // V2 signatures differ per contract: DD carries quorumOverride, HV adds equalWeight — both
+        // must be sponsored or passkey users lose gasless restricted-poll creation (RoleManager wave).
+        bytes4 proposalV2DDSel = bytes4(
+            keccak256("createProposalV2(bytes,bytes32,uint32,uint8,(address,uint256,bytes)[][],uint256[],uint32)")
+        );
+        bytes4 proposalV2HVSel = bytes4(
+            keccak256("createProposalV2(bytes,bytes32,uint32,uint8,(address,uint256,bytes)[][],uint256[],uint32,bool)")
+        );
         e[i++] = Entry(ModuleTypes.HYBRID_VOTING_ID, voteSel, 0);
         e[i++] = Entry(ModuleTypes.HYBRID_VOTING_ID, announceSel, 0);
         e[i++] = Entry(ModuleTypes.HYBRID_VOTING_ID, proposalSel, 0);
+        e[i++] = Entry(ModuleTypes.HYBRID_VOTING_ID, proposalV2HVSel, 0);
         e[i++] = Entry(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, voteSel, 0);
         e[i++] = Entry(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, announceSel, 0);
         e[i++] = Entry(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, proposalSel, 0);
+        e[i++] = Entry(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, proposalV2DDSel, 0);
 
         // ── PaymentManager (5) ──
         t = ModuleTypes.PAYMENT_MANAGER_ID;

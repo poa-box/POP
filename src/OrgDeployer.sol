@@ -133,6 +133,12 @@ contract OrgDeployer is Initializable {
         bytes32 indexed orgId, uint256[] hatIds, string[] names, string[] images, bytes32[] metadataCIDs, bool[] canVote
     );
 
+    /// @notice Whether the RoleManager was minted the org's paymaster operator hat at deploy —
+    ///         required for its wiring fan-out to set per-hat gas budgets (PaymasterHub.setBudget
+    ///         is onlyOrgOperator). `granted=false` means budgets in RoleWiring will be
+    ///         BudgetSkipped until governance grants the hat.
+    event RoleManagerOperatorHat(bytes32 indexed orgId, uint256 indexed operatorHatId, bool granted);
+
     /// @notice Emitted after OrgDeployed to provide initial wearer assignments for subgraph indexing
     event InitialWearersAssigned(
         bytes32 indexed orgId, address indexed eligibilityModule, address[] wearers, uint256[] hatIds
@@ -846,6 +852,37 @@ contract OrgDeployer is Initializable {
             exec.configureModule(result.educationHub, setConfigAdminData);
         }
         exec.configureModule(result.quickJoin, setConfigAdminData);
+
+        _grantOperatorHatToRoleManager(params, result, roleHatIds, exec);
+    }
+
+    /// @dev PaymasterHub.setBudget is `onlyOrgOperator` (admin/operator HAT wearer) — the RoleManager
+    ///      contract wears neither by default, so its RoleWiring budget fan-out would always land in
+    ///      BudgetSkipped. When the org configured a paymaster operator role, grant + mint that hat
+    ///      to the RoleManager (contracts can wear hats). Best-effort: a capped/full operator hat
+    ///      must not brick the whole org deploy — budgets degrade to BudgetSkipped, and the event
+    ///      records the outcome for the subgraph.
+    function _grantOperatorHatToRoleManager(
+        DeploymentParams calldata params,
+        DeploymentResult memory result,
+        uint256[] memory roleHatIds,
+        IExecutorAdmin exec
+    ) internal {
+        if (params.paymasterConfig.operatorRoleIndex >= params.roles.length) return;
+        uint256 operatorHatId = roleHatIds[params.paymasterConfig.operatorRoleIndex];
+
+        exec.configureModule(
+            result.eligibilityModule,
+            abi.encodeWithSignature("grantWearerEligibility(address,uint256)", result.roleManager, operatorHatId)
+        );
+        try exec.configureModule(
+            result.eligibilityModule,
+            abi.encodeWithSignature("mintHatToAddress(uint256,address)", operatorHatId, result.roleManager)
+        ) {
+            emit RoleManagerOperatorHat(params.orgId, operatorHatId, true);
+        } catch {
+            emit RoleManagerOperatorHat(params.orgId, operatorHatId, false);
+        }
     }
 
     /**

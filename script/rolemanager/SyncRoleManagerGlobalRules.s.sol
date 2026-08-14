@@ -7,6 +7,8 @@ import "forge-std/console.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
 import {ModuleTypes} from "../../src/libs/ModuleTypes.sol";
 import {EligibilityModule} from "../../src/EligibilityModule.sol";
+import {DirectDemocracyVoting} from "../../src/DirectDemocracyVoting.sol";
+import {HybridVoting} from "../../src/HybridVoting.sol";
 import {DefaultGlobalRules} from "../helpers/DefaultGlobalRules.sol";
 
 /*
@@ -14,11 +16,13 @@ import {DefaultGlobalRules} from "../helpers/DefaultGlobalRules.sol";
  * Sync the paymaster GLOBAL RULEBOOK with the RoleManager self-claim selectors
  * ============================================================================
  *
- * Adds the two user-facing EligibilityModule claim selectors — the RoleManager
- * "accept a role offer" path — to the type-keyed global rulebook so they're gasless:
+ * Adds the four RoleManager-wave user-facing selectors to the type-keyed global rulebook
+ * so they're gasless for passkey users:
  *
- *   (ELIGIBILITY_MODULE_ID, claimHat(uint256))    hint 300_000   — single self-mint
- *   (ELIGIBILITY_MODULE_ID, claimHats(uint256[]))  hint 3_000_000 — up to MAX_CLAIM_BATCH (20) mints
+ *   (ELIGIBILITY_MODULE_ID, claimHat(uint256))     hint 300_000   — single self-mint
+ *   (ELIGIBILITY_MODULE_ID, claimHats(uint256[]))   hint 3_000_000 — up to MAX_CLAIM_BATCH (20) mints
+ *   (DIRECT_DEMOCRACY_VOTING_ID, createProposalV2(...,uint32))       hint 0 — quorum-override polls
+ *   (HYBRID_VOTING_ID,           createProposalV2(...,uint32,bool))  hint 0 — + equalWeight proposals
  *
  * The delta is READ FROM DefaultGlobalRules.entries() (the single source of truth — hints and
  * selectors are derived there from the real ABI and cross-checked by
@@ -71,24 +75,38 @@ abstract contract SyncBase is Script {
     // Throwaway registry version for the sim-only PaymasterHub v20 beacon upgrade (see _ensureRulebook).
     string internal constant SIM_HUB_VERSION = "rm-w7-sim";
 
-    /// @dev The RoleManager claim-rule delta, filtered out of the canonical DefaultGlobalRules seed
-    ///      so hints/selectors stay single-sourced. Asserts exactly the two ELIGIBILITY claim rules.
+    /// @dev A rulebook entry belongs to THIS rollout's delta iff it is one of: the two EM claim
+    ///      selectors, DD createProposalV2, or HV createProposalV2. Filtered from the canonical
+    ///      DefaultGlobalRules seed so hints/selectors stay single-sourced.
+    function _isDeltaEntry(DefaultGlobalRules.Entry memory entry) internal pure returns (bool) {
+        if (entry.typeId == ModuleTypes.ELIGIBILITY_MODULE_ID) {
+            return entry.selector == EligibilityModule.claimHat.selector
+                || entry.selector == EligibilityModule.claimHats.selector;
+        }
+        if (entry.typeId == ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID) {
+            return entry.selector == DirectDemocracyVoting.createProposalV2.selector;
+        }
+        if (entry.typeId == ModuleTypes.HYBRID_VOTING_ID) {
+            return entry.selector == HybridVoting.createProposalV2.selector;
+        }
+        return false;
+    }
+
+    /// @dev The RoleManager-wave rule delta (2 EM claims + DD/HV createProposalV2).
     function _delta()
         internal
         pure
         returns (bytes32[] memory typeIds, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory hints)
     {
-        bytes4 s1 = EligibilityModule.claimHat.selector;
-        bytes4 s2 = EligibilityModule.claimHats.selector;
         DefaultGlobalRules.Entry[] memory e = DefaultGlobalRules.entries();
 
-        typeIds = new bytes32[](2);
-        selectors = new bytes4[](2);
-        allowed = new bool[](2);
-        hints = new uint32[](2);
+        typeIds = new bytes32[](4);
+        selectors = new bytes4[](4);
+        allowed = new bool[](4);
+        hints = new uint32[](4);
         uint256 n;
         for (uint256 i; i < e.length; i++) {
-            if (e[i].typeId == ModuleTypes.ELIGIBILITY_MODULE_ID && (e[i].selector == s1 || e[i].selector == s2)) {
+            if (_isDeltaEntry(e[i])) {
                 typeIds[n] = e[i].typeId;
                 selectors[n] = e[i].selector;
                 allowed[n] = true;
@@ -96,37 +114,33 @@ abstract contract SyncBase is Script {
                 n++;
             }
         }
-        require(n == 2, "delta: expected exactly 2 RoleManager claim rules in DefaultGlobalRules");
+        require(n == 4, "delta: expected exactly 4 RoleManager-wave rules in DefaultGlobalRules");
     }
 
-    /// @dev Assert the rulebook carries both claim rules with the CORRECT Rule field order
+    /// @dev Assert the rulebook carries every delta rule with the CORRECT Rule field order
     ///      (Rule { uint32 maxCallGasHint; bool allowed }). Decoding these swapped would silently
     ///      pass a zero-hint/false rule — the exact bug class CLAUDE.md warns about.
     function _assertApplied(PaymasterHub pm) internal view {
-        (, bytes4[] memory selectors,, uint32[] memory hints) = _delta();
+        (bytes32[] memory typeIds, bytes4[] memory selectors,, uint32[] memory hints) = _delta();
         for (uint256 i; i < selectors.length; i++) {
-            PaymasterHub.Rule memory r = pm.getGlobalRule(ModuleTypes.ELIGIBILITY_MODULE_ID, selectors[i]);
-            require(r.allowed, "claim rule not allowed after sync");
-            require(r.maxCallGasHint == hints[i], "claim rule gas hint mismatch after sync");
+            PaymasterHub.Rule memory r = pm.getGlobalRule(typeIds[i], selectors[i]);
+            require(r.allowed, "delta rule not allowed after sync");
+            require(r.maxCallGasHint == hints[i], "delta rule gas hint mismatch after sync");
         }
     }
 
-    /// @dev The canonical seed MINUS the two RoleManager claim rules — i.e. the rulebook exactly as
-    ///      the v20 rollout (UpgradePaymasterGlobalRules) seeded it, before this W7 change. Used by
-    ///      the sims to reconstruct the pre-W7 baseline so the before/after delta is honest.
+    /// @dev The canonical seed MINUS the delta — i.e. the rulebook exactly as the v20 rollout
+    ///      (UpgradePaymasterGlobalRules) seeded it, before this W7 change. Used by the sims to
+    ///      reconstruct the pre-W7 baseline so the before/after delta is honest.
     function _baseMinusDelta()
         internal
         pure
         returns (bytes32[] memory typeIds, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory hints)
     {
-        bytes4 c1 = EligibilityModule.claimHat.selector;
-        bytes4 c2 = EligibilityModule.claimHats.selector;
         DefaultGlobalRules.Entry[] memory e = DefaultGlobalRules.entries();
         uint256 m;
         for (uint256 i; i < e.length; i++) {
-            if (!(e[i].typeId == ModuleTypes.ELIGIBILITY_MODULE_ID && (e[i].selector == c1 || e[i].selector == c2))) {
-                m++;
-            }
+            if (!_isDeltaEntry(e[i])) m++;
         }
         typeIds = new bytes32[](m);
         selectors = new bytes4[](m);
@@ -134,9 +148,7 @@ abstract contract SyncBase is Script {
         hints = new uint32[](m);
         uint256 n;
         for (uint256 i; i < e.length; i++) {
-            if (e[i].typeId == ModuleTypes.ELIGIBILITY_MODULE_ID && (e[i].selector == c1 || e[i].selector == c2)) {
-                continue;
-            }
+            if (_isDeltaEntry(e[i])) continue;
             typeIds[n] = e[i].typeId;
             selectors[n] = e[i].selector;
             allowed[n] = true;
@@ -220,12 +232,12 @@ contract SimGnosis is SyncBase {
         PaymasterHub pm = PaymasterHub(payable(GNOSIS_PAYMASTER));
         (bytes32[] memory typeIds, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory hints) = _delta();
 
-        console.log("\n=== SIM: sync RoleManager claim rules (Gnosis fork) ===");
+        console.log("\n=== SIM: sync RoleManager-wave rules (Gnosis fork) ===");
         _ensureRulebook(pm, true);
         uint256 countBefore = pm.getGlobalRuleCount();
         for (uint256 i; i < selectors.length; i++) {
-            PaymasterHub.Rule memory r = pm.getGlobalRule(ModuleTypes.ELIGIBILITY_MODULE_ID, selectors[i]);
-            require(!r.allowed, "sim: claim rule already present (unexpected)");
+            PaymasterHub.Rule memory r = pm.getGlobalRule(typeIds[i], selectors[i]);
+            require(!r.allowed, "sim: delta rule already present (unexpected)");
         }
         console.log("  rulebook entries before:", countBefore);
 
@@ -237,15 +249,14 @@ contract SimGnosis is SyncBase {
 
         _assertApplied(pm);
         uint256 countAfter = pm.getGlobalRuleCount();
-        require(countAfter == countBefore + 2, "sim: rulebook did not grow by exactly 2");
+        require(countAfter == countBefore + typeIds.length, "sim: rulebook did not grow by the delta size");
         console.log("  rulebook entries after: ", countAfter);
+        for (uint256 i; i < selectors.length; i++) {
+            console.log("  delta rule hint:", pm.getGlobalRule(typeIds[i], selectors[i]).maxCallGasHint);
+        }
         console.log(
-            "  claimHat  hint:", pm.getGlobalRule(ModuleTypes.ELIGIBILITY_MODULE_ID, selectors[0]).maxCallGasHint
+            "PASS: SimGnosis - claimHat/claimHats + DD/HV createProposalV2 added to the global rulebook (correct field order)."
         );
-        console.log(
-            "  claimHats hint:", pm.getGlobalRule(ModuleTypes.ELIGIBILITY_MODULE_ID, selectors[1]).maxCallGasHint
-        );
-        console.log("PASS: SimGnosis - claimHat/claimHats added to the global rulebook (correct field order).");
     }
 }
 
@@ -254,12 +265,12 @@ contract SimArbitrum is SyncBase {
         PaymasterHub pm = PaymasterHub(payable(ARB_PAYMASTER));
         (bytes32[] memory typeIds, bytes4[] memory selectors, bool[] memory allowed, uint32[] memory hints) = _delta();
 
-        console.log("\n=== SIM: sync RoleManager claim rules (Arbitrum fork) ===");
+        console.log("\n=== SIM: sync RoleManager-wave rules (Arbitrum fork) ===");
         _ensureRulebook(pm, false);
         uint256 countBefore = pm.getGlobalRuleCount();
         for (uint256 i; i < selectors.length; i++) {
-            PaymasterHub.Rule memory r = pm.getGlobalRule(ModuleTypes.ELIGIBILITY_MODULE_ID, selectors[i]);
-            require(!r.allowed, "sim: claim rule already present (unexpected)");
+            PaymasterHub.Rule memory r = pm.getGlobalRule(typeIds[i], selectors[i]);
+            require(!r.allowed, "sim: delta rule already present (unexpected)");
         }
         console.log("  rulebook entries before:", countBefore);
 
@@ -269,14 +280,13 @@ contract SimArbitrum is SyncBase {
 
         _assertApplied(pm);
         uint256 countAfter = pm.getGlobalRuleCount();
-        require(countAfter == countBefore + 2, "sim: rulebook did not grow by exactly 2");
+        require(countAfter == countBefore + typeIds.length, "sim: rulebook did not grow by the delta size");
         console.log("  rulebook entries after: ", countAfter);
+        for (uint256 i; i < selectors.length; i++) {
+            console.log("  delta rule hint:", pm.getGlobalRule(typeIds[i], selectors[i]).maxCallGasHint);
+        }
         console.log(
-            "  claimHat  hint:", pm.getGlobalRule(ModuleTypes.ELIGIBILITY_MODULE_ID, selectors[0]).maxCallGasHint
+            "PASS: SimArbitrum - claimHat/claimHats + DD/HV createProposalV2 added to the global rulebook (correct field order)."
         );
-        console.log(
-            "  claimHats hint:", pm.getGlobalRule(ModuleTypes.ELIGIBILITY_MODULE_ID, selectors[1]).maxCallGasHint
-        );
-        console.log("PASS: SimArbitrum - claimHat/claimHats added to the global rulebook (correct field order).");
     }
 }
