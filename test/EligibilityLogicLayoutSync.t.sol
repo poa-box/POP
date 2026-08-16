@@ -93,7 +93,8 @@ contract EligibilityLogicLayoutSyncTest is Test {
         em.grantWearerEligibility(bob, H_RULES); // executes in EligibilityLogic
 
         EligibilityModule.WearerRules memory r = em.wearerRules(bob, H_RULES); // module-native slot read
-        assertEq(r.flags, 0x03, "lib-written wearer flags must land in the module's wearerRules slot");
+        // FIX 1: an RM-mediated grant carries the DELEGATION_MANAGED provenance bit => (true,true|0x04).
+        assertEq(r.flags, 0x07, "lib-written wearer flags must land in the module's wearerRules slot");
         assertTrue(em.hasSpecificWearerRules(bob, H_RULES), "lib-written specific-rules flag visible to module");
         (bool e, bool s) = em.getWearerRules(bob, H_RULES);
         assertTrue(e && s, "decoded eligible+standing");
@@ -205,6 +206,40 @@ contract EligibilityLogicLayoutSyncTest is Test {
         vm.prank(roleManagerAddr);
         em.setGroupEligibility(MEMBER, _one(MEMBER2)); // no revert => refcount decremented in the same slot
         assertEq(em.getGroupMemberHats(MEMBER).length, 1, "MEMBER usable as a group after refcount release");
+    }
+
+    /*═══════════ kickConfigs + pendingKicks (delegated-kick primitive) ═══════════*/
+
+    /// LIB-write (configureKick body) -> MODULE-read (getKickConfig), and LIB-write (kickWearer pending)
+    /// -> MODULE-read (getPendingKick): both new Layout-tail fields must resolve to the same slots across
+    /// the module/lib execution contexts.
+    function testKickFields_LibWriteModuleRead() public {
+        uint256 KICKER = 60;
+        uint256 TARGET = 61;
+
+        // superAdmin configures a delayed kick — the body runs in the lib and writes kickConfigs.
+        vm.prank(superAdmin);
+        em.configureKick(TARGET, KICKER, 1000, true);
+
+        EligibilityModule.KickConfig memory cfg = em.getKickConfig(TARGET); // module-native slot read
+        assertEq(cfg.kickerHatId, KICKER, "module reads lib-written kickConfigs.kickerHatId");
+        assertEq(cfg.delaySecs, 1000, "module reads lib-written kickConfigs.delaySecs");
+        assertTrue(cfg.enabled, "module reads lib-written kickConfigs.enabled");
+
+        // Seat a kicker (bob) and a target (alice), then pend a kick (lib writes pendingKicks).
+        vm.startPrank(superAdmin);
+        em.setWearerEligibility(bob, KICKER, true, true);
+        em.setWearerEligibility(alice, TARGET, true, true);
+        vm.stopPrank();
+        hats.mintHat(KICKER, bob);
+        hats.mintHat(TARGET, alice);
+
+        vm.prank(bob);
+        em.kickWearer(alice, TARGET); // delay>0 => pends
+
+        (uint64 at, address k) = em.getPendingKick(TARGET, alice); // module-native slot read
+        assertEq(at, uint64(block.timestamp) + 1000, "module reads lib-written pendingKicks.effectiveAt");
+        assertEq(k, bob, "module reads lib-written pendingKicks.kicker");
     }
 
     /*═══════════ roleManager ═══════════*/

@@ -2142,19 +2142,22 @@ contract DeployerTest is Test, IEligibilityModuleEvents {
             setup.eligibilityModule, candidate2, setup.defaultRoleHat, true, true, "Candidate2 via vouching"
         );
 
-        // Test 3: Super admin attempts to revoke per-wearer eligibility, but vouching still keeps candidate eligible
+        // Test 3: Super admin revokes per-wearer eligibility. FIX 0 (explicit-ban supremacy): an explicit
+        // (false,false) rule now BEATS a met vouch quorum on every path (previously the OR combine let the
+        // quorum keep the candidate eligible — the KUBI runbook's clearWearerVouches pairing was an
+        // unwitting workaround). The governance ban sticks WITHOUT clearing vouches.
         vm.prank(setup.exec);
         EligibilityModule(setup.eligibilityModule).setWearerEligibility(candidate2, setup.defaultRoleHat, false, false);
         _assertEligibilityStatus(
             setup.eligibilityModule,
             candidate2,
             setup.defaultRoleHat,
-            true,
-            true,
-            "Candidate2 after super-admin revocation"
+            false,
+            false,
+            "Candidate2 after super-admin revocation (supremacy: ban beats vouch quorum)"
         );
 
-        // Test 4: If vouching is revoked, the per-wearer setting takes over
+        // Test 4: The ban still holds after the vouch is revoked (vouch records survive, ban wins either way).
         _revokeVouch(voter2, setup.eligibilityModule, candidate2, setup.defaultRoleHat);
         _assertEligibilityStatus(
             setup.eligibilityModule, candidate2, setup.defaultRoleHat, false, false, "Candidate2 after vouch revocation"

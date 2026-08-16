@@ -59,6 +59,13 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     error AlreadyWearingHat(); // claimHat/claimHats: caller already wears the hat (single-claim variant)
     error TooManyClaims(); // claimHats: batch length exceeds MAX_CLAIM_BATCH
     error UnexpectedHatId(); // createHatWithEligibilityChecked: created id != expectedHatId
+    error CannotKickGovernanceRuled(); // kick/finalize: target has a governance-owned non-(true,true) rule
+    error KickIneffective(); // kick reconcile: wearer still holds the hat after the ban (honest revert)
+    error NoPendingKick(); // finalize/cancel: no pending kick recorded for (wearer, hat)
+    error KickNotReady(); // finalize: called before effectiveAt
+    error NotAuthorizedToKick(); // kick/finalize/cancel/unkick: caller/kicker lacks the kicker hat (or auth)
+    error KickNotEnabled(); // kick/unkick: no enabled kick config for the hat
+    error NotDelegatedKick(); // unkick: current rule is not exactly a delegated-kick ban (0x04)
 
     /*═════════════════════════════════════════ STRUCTS ═════════════════════════════════════════*/
 
@@ -72,6 +79,21 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         uint32 quorum; // Number of vouches required
         uint256 membershipHatId; // Hat ID whose wearers can vouch
         uint8 flags; // Packed flags: bit 0 = enabled, bit 1 = combineWithHierarchy
+    }
+
+    /// @notice Per-hat delegated-kick configuration (Primitive B). MUST stay byte-identical to
+    ///         {EligibilityLogic.KickConfig}.
+    struct KickConfig {
+        uint256 kickerHatId; // wearers of this hat may kick/unkick wearers of the target hat
+        uint32 delaySecs; // 0 = kick applies immediately; else the pending-kick effect delay
+        bool enabled;
+    }
+
+    /// @notice A pending (delayed) kick awaiting finalize. MUST stay byte-identical to
+    ///         {EligibilityLogic.PendingKick}.
+    struct PendingKick {
+        uint64 effectiveAt; // 0 = no pending kick
+        address kicker; // the original kicker (re-checked at finalize)
     }
 
     /// @notice Parameters for creating a hat with eligibility configuration
@@ -132,6 +154,10 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         address roleManager; // scoped secondary admin (0 = none)
         mapping(uint256 => uint256[]) groupMemberHats; // group hat => member identity hats (derived eligibility)
         mapping(uint256 => uint256) groupMembershipRefCount; // hat => number of groups listing it as a member
+        // Delegated-kick primitive (Primitive B). Appended for upgrade safety (ERC-7201 append-only) —
+        // MUST mirror {EligibilityLogic.Layout} byte-for-byte.
+        mapping(uint256 => KickConfig) kickConfigs; // hatId => kick config
+        mapping(uint256 => mapping(address => PendingKick)) pendingKicks; // hatId => wearer => pending kick
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.eligibilitymodule.storage");
@@ -171,6 +197,8 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     uint8 private constant ENABLED_FLAG = 0x01; // bit 0
     uint8 private constant COMBINE_HIERARCHY_FLAG = 0x02; // bit 1
+    /// @dev WearerRules.flags bit 2: DELEGATION_MANAGED provenance (delegated kick / RM-mediated write).
+    uint8 private constant DELEGATION_MANAGED = 0x04;
 
     /*═══════════════════════════════════ METADATA CONSTANTS ═══════════════════════════════════════*/
 
@@ -226,6 +254,11 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     event RoleManagerSet(address indexed roleManager);
     event GroupEligibilitySet(uint256 indexed groupHatId, uint256[] memberHats);
     event HatConfigUpdated(uint256 indexed hatId, uint32 newMaxSupply);
+    event KickConfigSet(uint256 indexed hatId, uint256 indexed kickerHatId, uint32 delaySecs, bool enabled);
+    event KickPending(uint256 indexed hatId, address indexed wearer, address indexed kicker, uint64 effectiveAt);
+    event KickCancelled(uint256 indexed hatId, address indexed wearer, address indexed by);
+    event WearerKicked(uint256 indexed hatId, address indexed wearer, address indexed kicker);
+    event WearerUnkicked(uint256 indexed hatId, address indexed wearer, address indexed by);
 
     /*═════════════════════════════════════════ MODIFIERS ═════════════════════════════════════════*/
 
@@ -313,6 +346,9 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         Layout storage l = _layout();
         delete l.wearerRules[wearer][hatId];
         delete l.hasSpecificWearerRules[wearer][hatId];
+        // A rule write voids any pending delegated kick for this (wearer, hat) — governance/RM actions
+        // always reset provenance so a stale pending kick cannot re-ban after a reinstatement.
+        delete l.pendingKicks[hatId][wearer];
         // Distinct event: a CLEAR falls back to the hat's default rules — emitting
         // WearerEligibilityUpdated(false,false) here (the old behavior) was log-indistinguishable
         // from an explicit ban and made indexers show routine grant-path cleanups as kicks.
@@ -384,6 +420,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
             if (wearer == address(0)) revert ZeroAddress();
             l.wearerRules[wearer][hatId] = WearerRules(packedFlags);
             l.hasSpecificWearerRules[wearer][hatId] = true;
+            delete l.pendingKicks[hatId][wearer]; // rule write voids any pending delegated kick
             unchecked {
                 ++i;
             }
@@ -396,6 +433,9 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         Layout storage l = _layout();
         l.wearerRules[wearer][hatId] = WearerRules(_packWearerFlags(_eligible, _standing));
         l.hasSpecificWearerRules[wearer][hatId] = true;
+        // Direct superAdmin write => governance-owned (provenance bit clear, correct-by-construction via
+        // _packWearerFlags), and voids any pending delegated kick for this (wearer, hat).
+        delete l.pendingKicks[hatId][wearer];
         emit WearerEligibilityUpdated(wearer, hatId, _eligible, _standing, msg.sender);
     }
 
@@ -457,6 +497,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
                 address wearer = wearers[i];
                 l.wearerRules[wearer][hatId] = WearerRules(_packWearerFlags(eligibleFlags[i], standingFlags[i]));
                 l.hasSpecificWearerRules[wearer][hatId] = true;
+                delete l.pendingKicks[hatId][wearer]; // rule write voids any pending delegated kick
                 emit WearerEligibilityUpdated(wearer, hatId, eligibleFlags[i], standingFlags[i], msg.sender);
             }
         }
@@ -488,6 +529,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
                 uint256 hatId = hatIds[i];
                 l.wearerRules[wearer][hatId] = WearerRules(packedFlags);
                 l.hasSpecificWearerRules[wearer][hatId] = true;
+                delete l.pendingKicks[hatId][wearer]; // rule write voids any pending delegated kick
                 emit WearerEligibilityUpdated(wearer, hatId, eligible, standing, msg.sender);
             }
         }
@@ -916,107 +958,16 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         }
     }
 
+    /// @notice Vouch for `wearer` on `hatId` (Nth-vouch eligibility). Body in {EligibilityLogic}
+    ///         (EIP-170 offload); behaviour identical to the pre-offload implementation.
     function vouchFor(address wearer, uint256 hatId) external whenNotPaused {
-        if (wearer == address(0)) revert ZeroAddress();
-        if (wearer == msg.sender) revert CannotVouchForSelf();
-
-        Layout storage l = _layout();
-        VouchConfig memory config = l.vouchConfigs[hatId];
-        if (!_isVouchingEnabled(config.flags)) revert VouchingNotEnabled();
-
-        // Check vouching authorization
-        bool isAuthorized = l.hats.isWearerOfHat(msg.sender, config.membershipHatId);
-
-        // If combineWithHierarchy is enabled, also check if voucher has admin privileges for this hat
-        if (!isAuthorized && _shouldCombineWithHierarchy(config.flags)) {
-            isAuthorized = l.hats.isAdminOfHat(msg.sender, hatId);
-        }
-
-        if (!isAuthorized) revert NotAuthorizedToVouch();
-
-        // Epoch-aware stale data handling:
-        // If the wearer's count is from a prior epoch, reset it lazily.
-        uint256 currentEpoch = l.vouchConfigEpoch[hatId];
-        if (l.wearerVouchEpoch[hatId][wearer] != currentEpoch) {
-            l.currentVouchCount[hatId][wearer] = 0;
-            l.wearerVouchEpoch[hatId][wearer] = currentEpoch;
-        }
-
-        // AlreadyVouched: only if this specific voucher's record is from the current epoch
-        if (l.vouchers[hatId][wearer][msg.sender] && l.voucherRecordEpoch[hatId][wearer][msg.sender] == currentEpoch) {
-            revert AlreadyVouched();
-        }
-
-        // SECURITY: Rate limiting checks
-        _checkVouchingRateLimit(msg.sender);
-
-        // Record the vouch with its epoch
-        l.vouchers[hatId][wearer][msg.sender] = true;
-        l.voucherRecordEpoch[hatId][wearer][msg.sender] = currentEpoch;
-        uint32 newCount = l.currentVouchCount[hatId][wearer] + 1;
-        l.currentVouchCount[hatId][wearer] = newCount;
-
-        // Update daily vouch count
-        uint256 currentDay = block.timestamp / SECONDS_PER_DAY;
-        uint32 dailyCount = l.dailyVouchCount[msg.sender][currentDay] + 1;
-        l.dailyVouchCount[msg.sender][currentDay] = dailyCount;
-
-        emit Vouched(msg.sender, wearer, hatId, newCount);
+        EligibilityLogic.vouchFor(wearer, hatId);
     }
 
-    function _checkVouchingRateLimit(address user) internal view {
-        Layout storage l = _layout();
-
-        // Check if user has been around long enough to vouch
-        // NEW_USER_RESTRICTION_DAYS = 0, so anyone can vouch immediately
-        uint256 joinTime = l.userJoinTime[user];
-        if (joinTime != 0) {
-            // Only check if join time is set
-            uint256 daysSinceJoined = (block.timestamp - joinTime) / SECONDS_PER_DAY;
-            if (daysSinceJoined < NEW_USER_RESTRICTION_DAYS) {
-                revert NewUserVouchingRestricted();
-            }
-        }
-        // If joinTime is 0 (never set), allow vouching since NEW_USER_RESTRICTION_DAYS = 0
-
-        // Check daily vouch limit
-        uint256 currentDay = block.timestamp / SECONDS_PER_DAY;
-        if (l.dailyVouchCount[user][currentDay] >= _getMaxDailyVouches()) {
-            revert VouchingRateLimitExceeded();
-        }
-    }
-
+    /// @notice Revoke a prior vouch for `wearer` on `hatId`. Body in {EligibilityLogic} (EIP-170 offload);
+    ///         behaviour identical to the pre-offload implementation.
     function revokeVouch(address wearer, uint256 hatId) external whenNotPaused {
-        if (wearer == address(0)) revert ZeroAddress();
-
-        Layout storage l = _layout();
-        VouchConfig memory config = l.vouchConfigs[hatId];
-        if (!_isVouchingEnabled(config.flags)) revert VouchingNotEnabled();
-
-        // Only current-epoch vouch records can be revoked
-        uint256 currentEpoch = l.vouchConfigEpoch[hatId];
-        if (l.wearerVouchEpoch[hatId][wearer] != currentEpoch) revert HasNotVouched();
-        if (!l.vouchers[hatId][wearer][msg.sender] || l.voucherRecordEpoch[hatId][wearer][msg.sender] != currentEpoch) {
-            revert HasNotVouched();
-        }
-
-        // Remove the vouch
-        l.vouchers[hatId][wearer][msg.sender] = false;
-        uint32 newCount = l.currentVouchCount[hatId][wearer] - 1;
-        l.currentVouchCount[hatId][wearer] = newCount;
-
-        // Note: dailyVouchCount is NOT decremented on revocation.
-        // It's a rate limiter only — revoking doesn't give back vouch slots.
-
-        emit VouchRevoked(msg.sender, wearer, hatId, newCount);
-
-        // Handle hat revocation if needed
-        if (
-            !_shouldCombineWithHierarchy(config.flags) && newCount < config.quorum
-                && l.hats.isWearerOfHat(wearer, hatId) && !l.hasSpecificWearerRules[wearer][hatId]
-        ) {
-            l.hats.setHatWearerStatus(hatId, wearer, false, false);
-        }
+        EligibilityLogic.revokeVouch(wearer, hatId);
     }
 
     function resetVouches(uint256 hatId) external onlySuperAdmin {
@@ -1060,23 +1011,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
      * @param hatId The ID of the hat to claim
      */
     function claimVouchedHat(uint256 hatId) external whenNotPaused nonReentrant {
-        Layout storage l = _layout();
-
-        // Check if caller is eligible to claim this hat
-        (bool eligible, bool standing) = this.getWearerStatus(msg.sender, hatId);
-        require(eligible && standing, "Not eligible to claim hat");
-
-        // Check if already wearing the hat
-        require(!l.hats.isWearerOfHat(msg.sender, hatId), "Already wearing hat");
-
-        // State change BEFORE external call (CEI pattern)
-        delete l.roleApplications[hatId][msg.sender];
-
-        // Mint the hat to the caller using EligibilityModule's admin powers
-        bool success = l.hats.mintHat(hatId, msg.sender);
-        require(success, "Hat minting failed");
-
-        emit HatClaimed(msg.sender, hatId);
+        EligibilityLogic.claimVouchedHat(hatId);
     }
 
     /*═══════════════════════════ ROLE MANAGER + DERIVED (GROUP) ELIGIBILITY ═══════════════════════════*/
@@ -1166,6 +1101,76 @@ contract EligibilityModule is Initializable, IHatsEligibility {
                 ++i;
             }
         }
+    }
+
+    /*═══════════════════════════════════ KICK DELEGATION (Primitive B) ═══════════════════════════════════*/
+
+    /// @notice Configure (or disable) delegated-kick authority for `hatId`: wearers of `kickerHatId` may
+    ///         kick/unkick wearers of `hatId`. `delaySecs == 0` applies kicks immediately; a positive
+    ///         delay records a pending kick that anyone may {finalizeKick} after it elapses (giving
+    ///         governance a window to counter a purge). `enabled == false` disables the delegation.
+    /// @dev onlySuperAdmin (governance). UI guidance: set `delaySecs >= the org's max voting duration`
+    ///      for hats wired into voting classes so a delegated kick cannot change the electorate of a
+    ///      proposal created before it. Body in {EligibilityLogic}.
+    function configureKick(uint256 hatId, uint256 kickerHatId, uint32 delaySecs, bool enabled)
+        external
+        onlySuperAdmin
+        whenNotPaused
+    {
+        EligibilityLogic.configureKick(hatId, kickerHatId, delaySecs, enabled);
+    }
+
+    /// @notice Kick `wearer` from `hatId` (writes an explicit (false,false|0x04) delegated-ban rule and
+    ///         reconciles the hat). Caller must wear the config's kicker hat. If the config has a delay,
+    ///         records a pending kick instead of applying immediately.
+    /// @dev Reverts CannotKickGovernanceRuled if a governance-owned non-(true,true) rule exists (never
+    ///      flip provenance on a governance ban). CEI + nonReentrant + whenNotPaused. Body in
+    ///      {EligibilityLogic}.
+    function kickWearer(address wearer, uint256 hatId) external whenNotPaused nonReentrant {
+        EligibilityLogic.kickWearer(wearer, hatId);
+    }
+
+    /// @notice Finalize a pending (delayed) kick after its effectiveAt. Permissionless.
+    /// @dev Re-checks that the config is still enabled AND the original kicker still wears the kicker hat
+    ///      (pending kicks die with the delegation) and that no governance ban was written during the
+    ///      delay. CEI + nonReentrant + whenNotPaused. Body in {EligibilityLogic}.
+    function finalizeKick(address wearer, uint256 hatId) external whenNotPaused nonReentrant {
+        EligibilityLogic.finalizeKick(wearer, hatId);
+    }
+
+    /// @notice Cancel a pending kick. The original kicker or the superAdmin (governance) may cancel.
+    /// @dev whenNotPaused. Body in {EligibilityLogic}.
+    function cancelKick(address wearer, uint256 hatId) external whenNotPaused {
+        EligibilityLogic.cancelKick(wearer, hatId);
+    }
+
+    /// @notice Reverse a delegated kick: restores (true,true|0x04) so the un-kicked wearer can re-mint via
+    ///         {claimHat}. Caller must wear the kicker hat. Requires the current rule to be EXACTLY a
+    ///         delegated-kick ban (flags == 0x04) — never a governance ban or a grant.
+    /// @dev Reverts NotDelegatedKick otherwise (delegates cannot lift governance bans). CEI +
+    ///      nonReentrant + whenNotPaused. Body in {EligibilityLogic}.
+    function unkickWearer(address wearer, uint256 hatId) external whenNotPaused nonReentrant {
+        EligibilityLogic.unkickWearer(wearer, hatId);
+    }
+
+    /// @notice The delegated-kick config for `hatId` (enabled == false => no delegation).
+    function getKickConfig(uint256 hatId) external view returns (KickConfig memory) {
+        return _layout().kickConfigs[hatId];
+    }
+
+    /// @notice The pending kick for (`hatId`, `wearer`) — effectiveAt == 0 means none.
+    function getPendingKick(uint256 hatId, address wearer) external view returns (uint64 effectiveAt, address kicker) {
+        PendingKick memory pk = _layout().pendingKicks[hatId][wearer];
+        return (pk.effectiveAt, pk.kicker);
+    }
+
+    /// @notice Raw explicit-rule flags for (`wearer`, `hatId`): bit0 eligible, bit1 standing, bit2 (0x04)
+    ///         DELEGATION_MANAGED provenance. `hasRule` is false when no explicit per-wearer rule exists
+    ///         (flags is then 0). Consumed by RoleManager for delegated-grant provenance checks.
+    function getWearerRuleFlags(address wearer, uint256 hatId) external view returns (bool hasRule, uint8 flags) {
+        Layout storage l = _layout();
+        hasRule = l.hasSpecificWearerRules[wearer][hatId];
+        if (hasRule) flags = l.wearerRules[wearer][hatId].flags;
     }
 
     /*═══════════════════════════════════ ROLE APPLICATION SYSTEM ═══════════════════════════════════════*/
