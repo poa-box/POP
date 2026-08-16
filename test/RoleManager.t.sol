@@ -276,7 +276,7 @@ contract RoleManagerTest is Test {
         (uint256 roleId, uint256 hatId) = rm.createRole(_roleParams("President"));
 
         vm.expectEmit(true, true, false, true);
-        emit IRoleManager.RoleGranted(roleId, alice, true);
+        emit IRoleManager.RoleGranted(roleId, alice, true, address(this), false);
         rm.grantRole(roleId, alice);
 
         assertTrue(hats.isWearerOfHat(alice, hatId));
@@ -286,10 +286,10 @@ contract RoleManagerTest is Test {
     function testGrantOutOfOrgOffersAndMintsNothing() public {
         (uint256 roleId, uint256 hatId) = rm.createRole(_roleParams("President"));
 
-        vm.expectEmit(true, true, true, false);
-        emit IRoleManager.RoleOffered(roleId, bob, hatId);
+        vm.expectEmit(true, true, true, true);
+        emit IRoleManager.RoleOffered(roleId, bob, hatId, address(this), false);
         vm.expectEmit(true, true, false, true);
-        emit IRoleManager.RoleGranted(roleId, bob, false);
+        emit IRoleManager.RoleGranted(roleId, bob, false, address(this), false);
         rm.grantRole(roleId, bob); // bob NOT in org
 
         // eligible via explicit rule, but NOT a wearer — nothing minted
@@ -333,7 +333,7 @@ contract RoleManagerTest is Test {
         assertEq(hats.balanceOf(alice, markerHat), 1);
 
         vm.expectEmit(true, true, false, true);
-        emit IRoleManager.RoleRevoked(roleId, alice, true);
+        emit IRoleManager.RoleRevoked(roleId, alice, true, address(this), false);
         rm.revokeRole(roleId, alice);
 
         assertEq(hats.balanceOf(alice, hatId), 0); // identity eligibility cleared
@@ -346,7 +346,7 @@ contract RoleManagerTest is Test {
         assertTrue(em.isEligible(bob, hatId));
 
         vm.expectEmit(true, true, false, true);
-        emit IRoleManager.RoleRevoked(roleId, bob, false); // never wearing
+        emit IRoleManager.RoleRevoked(roleId, bob, false, address(this), false); // never wearing
         rm.revokeRole(roleId, bob);
 
         assertFalse(em.isEligible(bob, hatId)); // offer withdrawn
@@ -472,10 +472,12 @@ contract RoleManagerTest is Test {
         vm.expectRevert(RoleManager.NotExecutor.selector);
         rm.createGroup("Y", bytes32(0), "img", new uint256[](0), _emptyWiring());
 
-        vm.expectRevert(RoleManager.NotExecutor.selector);
+        // grant/revoke are no longer onlyExecutor — a non-executor, non-manager reverts as an
+        // unauthorized manager (W13 delegated lifecycle).
+        vm.expectRevert(RoleManager.NotAuthorizedManager.selector);
         rm.grantRole(roleId, alice);
 
-        vm.expectRevert(RoleManager.NotExecutor.selector);
+        vm.expectRevert(RoleManager.NotAuthorizedManager.selector);
         rm.revokeRole(roleId, alice);
 
         vm.expectRevert(RoleManager.NotExecutor.selector);

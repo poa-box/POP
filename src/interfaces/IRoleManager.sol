@@ -83,6 +83,15 @@ interface IRoleManager {
         bool exists;
     }
 
+    /// @notice Manager-hat delegation config for a role or group (W13 delegated lifecycle).
+    /// @dev `caps` is a bitmask of {CAP_GRANT} (1) / {CAP_REVOKE} (2); the two are separable. A
+    ///      wearer of `managerHatId` may perform the capped lifecycle action WITHOUT a governance
+    ///      vote. `managerHatId == 0` means no delegation (executor-only).
+    struct ManagerConfig {
+        uint256 managerHatId;
+        uint8 caps;
+    }
+
     /*────────────────── Events ──────────────────*/
 
     event RoleManagerInitialized(address indexed executor, bytes32 indexed orgId, address eligibilityModule);
@@ -100,9 +109,16 @@ interface IRoleManager {
     event GroupCreated(uint256 indexed groupId, uint256 indexed markerHatId, string name, bytes32 metadataCID);
     event RoleGroupMembershipChanged(uint256 indexed roleId, uint256 indexed groupId, bool added);
     event RoleWiringApplied(uint256 indexed id, uint256 indexed hatId, bool isGroup);
-    event RoleOffered(uint256 indexed roleId, address indexed user, uint256 indexed hatId);
-    event RoleGranted(uint256 indexed roleId, address indexed user, bool minted);
-    event RoleRevoked(uint256 indexed roleId, address indexed user, bool wasWearing);
+    // Lifecycle events carry `actor` (the caller that performed the action) + `delegated` (true when a
+    // manager-hat wearer acted instead of the executor) so the subgraph feed reads truthfully under
+    // W13 delegation. Signatures REPLACED pre-broadcast (INTERFACES.md W13, 2026-08-16).
+    event RoleOffered(
+        uint256 indexed roleId, address indexed user, uint256 indexed hatId, address actor, bool delegated
+    );
+    event RoleGranted(uint256 indexed roleId, address indexed user, bool minted, address actor, bool delegated);
+    event RoleRevoked(uint256 indexed roleId, address indexed user, bool wasWearing, address actor, bool delegated);
+    event RoleManagerConfigSet(uint256 indexed roleId, uint256 indexed managerHatId, uint8 caps);
+    event GroupManagerConfigSet(uint256 indexed groupId, uint256 indexed managerHatId, uint8 caps);
     event BudgetSkipped(uint256 indexed hatId);
 
     /*────────────────── Mutations (onlyExecutor) ──────────────────*/
@@ -127,6 +143,10 @@ interface IRoleManager {
 
     function setRoleWiring(uint256 roleId, RoleWiring calldata w) external;
 
+    function setRoleManagerConfig(uint256 roleId, uint256 managerHatId, uint8 caps) external;
+
+    function setGroupManagerConfig(uint256 groupId, uint256 managerHatId, uint8 caps) external;
+
     function grantRole(uint256 roleId, address user) external;
 
     function revokeRole(uint256 roleId, address user) external;
@@ -142,6 +162,8 @@ interface IRoleManager {
     function isInOrg(address user) external view returns (bool);
     function getRole(uint256 roleId) external view returns (RoleInfo memory);
     function getGroup(uint256 groupId) external view returns (GroupInfo memory);
+    function getRoleManagerConfig(uint256 roleId) external view returns (ManagerConfig memory);
+    function getGroupManagerConfig(uint256 groupId) external view returns (ManagerConfig memory);
     function roleIdOfHat(uint256 hatId) external view returns (uint256);
     function roleCount() external view returns (uint256);
     function groupCount() external view returns (uint256);
