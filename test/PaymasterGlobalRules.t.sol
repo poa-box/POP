@@ -22,6 +22,7 @@ import {EducationHub} from "../src/EducationHub.sol";
 import {ZkEmailInvites} from "../src/ZkEmailInvites.sol";
 import {UniversalAccountRegistry} from "../src/UniversalAccountRegistry.sol";
 import {OrgRegistry} from "../src/OrgRegistry.sol";
+import {RoleManager} from "../src/RoleManager.sol";
 
 /// @title PaymasterGlobalRulesTest
 /// @notice Coverage for the type-keyed GLOBAL RULEBOOK (PaymasterRuleLib): rulebook admin +
@@ -877,7 +878,7 @@ contract PaymasterGlobalRulesTest is Test {
     }
 
     function _expectedRulebookPairs() internal pure returns (bytes32[] memory p) {
-        p = new bytes32[](56);
+        p = new bytes32[](61);
         uint256 n;
         bytes32 t = ModuleTypes.QUICK_JOIN_ID;
         p[n++] = _pair(t, QuickJoin.quickJoinWithUser.selector);
@@ -926,6 +927,12 @@ contract PaymasterGlobalRulesTest is Test {
         p[n++] = _pair(t, EligibilityModule.withdrawApplication.selector);
         p[n++] = _pair(t, EligibilityModule.claimHat.selector);
         p[n++] = _pair(t, EligibilityModule.claimHats.selector);
+        p[n++] = _pair(t, EligibilityModule.kickWearer.selector);
+        p[n++] = _pair(t, EligibilityModule.finalizeKick.selector);
+        p[n++] = _pair(t, EligibilityModule.unkickWearer.selector);
+        t = ModuleTypes.ROLE_MANAGER_ID;
+        p[n++] = _pair(t, RoleManager.grantRole.selector);
+        p[n++] = _pair(t, RoleManager.revokeRole.selector);
         t = ModuleTypes.PARTICIPATION_TOKEN_ID;
         p[n++] = _pair(t, ParticipationToken.requestTokens.selector);
         p[n++] = _pair(t, ParticipationToken.approveRequest.selector);

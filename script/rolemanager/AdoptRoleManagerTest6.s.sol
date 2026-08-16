@@ -16,6 +16,7 @@ import {IRoleManager} from "../../src/interfaces/IRoleManager.sol";
 // Mirror-mode proxies pick up the RoleManager-feature code (setConfigAdmin / setRoleManager /
 // derived eligibility / addHatToClass). NOT used by the broadcast contracts.
 import {EligibilityModule} from "../../src/EligibilityModule.sol";
+import {PaymasterHub} from "../../src/PaymasterHub.sol";
 import {TaskManager} from "../../src/TaskManager.sol";
 import {ParticipationToken} from "../../src/ParticipationToken.sol";
 import {EducationHub} from "../../src/EducationHub.sol";
@@ -202,9 +203,9 @@ abstract contract Test6RMBase is Script {
         });
     }
 
-    /// @dev The 9-call adoption governance batch (deploy-flow §3 / PLAN §2.3 ordering).
+    /// @dev The 10-call adoption governance batch (deploy-flow §3 / PLAN §2.3 ordering).
     function _adoptionBatch(address proxy, address beacon) internal view returns (IExecutor.Call[] memory batch) {
-        batch = new IExecutor.Call[](9);
+        batch = new IExecutor.Call[](10);
         // ① register the proxy (ContractRegistered -> subgraph per-org template)
         batch[0] = IExecutor.Call({
             target: ORG_REGISTRY,
@@ -243,6 +244,21 @@ abstract contract Test6RMBase is Script {
         });
         batch[8] = IExecutor.Call({
             target: TEST6_QJ, value: 0, data: abi.encodeCall(IConfigAdminSetter.setConfigAdmin, (proxy))
+        });
+        // ⑤ map the proxy to ROLE_MANAGER_ID in the paymaster's type registry — delegated
+        //    grantRole/revokeRole are user-facing (delegation wave), so sponsored userOps must
+        //    resolve through the global rulebook. Executor wears the org's admin hat (topHat),
+        //    satisfying onlyOrgOperator.
+        address[] memory rmTargets = new address[](1);
+        rmTargets[0] = proxy;
+        bytes32[] memory rmTypes = new bytes32[](1);
+        rmTypes[0] = ROLE_MANAGER_ID;
+        batch[9] = IExecutor.Call({
+            target: GNOSIS_PAYMASTER,
+            value: 0,
+            data: abi.encodeWithSignature(
+                "setTargetTypesBatch(bytes32,address[],bytes32[])", TEST6_ORG, rmTargets, rmTypes
+            )
         });
     }
 
@@ -390,6 +406,17 @@ contract SimAdoptTest6 is Test6RMBase {
         // Propagation check: the new EM code exposes roleManager() (reverts on the old impl).
         require(IEMAdmin(TEST6_EM).roleManager() == address(0), "beacon wave did not reach Test6 EM (Static?)");
         console.log("[proto] Beacon wave landed on all 7 Test6 modules (Mirror).");
+
+        // (c) PaymasterHub v20 rulebook (batch call ⑤ uses setTargetTypesBatch, a v20 function; the
+        //     live hub is still v19). At broadcast time the v20 rollout lands first (runbook step 1);
+        //     in-fork, stand it up the same way the SyncRoleManagerGlobalRules sims do.
+        (bool ok,) = GNOSIS_PAYMASTER.staticcall(abi.encodeWithSignature("getGlobalRuleCount()"));
+        if (!ok) {
+            _upgrade("PaymasterHub", address(new PaymasterHub()));
+            (ok,) = GNOSIS_PAYMASTER.staticcall(abi.encodeWithSignature("getGlobalRuleCount()"));
+            require(ok, "hub v20 stand-up failed");
+            console.log("[proto] PaymasterHub v20 stood up in-fork (rulebook + targetTypes available).");
+        }
     }
 
     function _upgrade(string memory typeName, address impl) internal {

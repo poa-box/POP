@@ -53,7 +53,7 @@ library DefaultGlobalRules {
 
     /// @notice All default rulebook entries (selector strings match the deployed module ABIs).
     function entries() internal pure returns (Entry[] memory e) {
-        e = new Entry[](56);
+        e = new Entry[](61);
         uint256 i;
 
         // ── QuickJoin (6) ──
@@ -154,7 +154,7 @@ library DefaultGlobalRules {
         e[i++] = Entry(t, bytes4(keccak256("createDistribution(address,uint256,bytes32,uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("finalizeDistribution(uint256,uint256)")), 0);
 
-        // ── EligibilityModule (7) — vouch + role-application + RoleManager self-claim paths ──
+        // ── EligibilityModule (10) — vouch + role-application + RoleManager self-claim + kick paths ──
         t = ModuleTypes.ELIGIBILITY_MODULE_ID;
         e[i++] = Entry(t, bytes4(keccak256("claimVouchedHat(uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("vouchFor(address,uint256)")), 0);
@@ -167,6 +167,18 @@ library DefaultGlobalRules {
         // bounds a full 20-hat accept while still covering legitimate offers).
         e[i++] = Entry(t, bytes4(keccak256("claimHat(uint256)")), 300_000);
         e[i++] = Entry(t, bytes4(keccak256("claimHats(uint256[])")), 3_000_000);
+        // Delegated-kick lifecycle (kicker-hat wearers; delegation wave). kickWearer covers rule
+        // write + provenance + burn; finalizeKick applies a delayed kick; unkickWearer is a rule
+        // restore only.
+        e[i++] = Entry(t, bytes4(keccak256("kickWearer(address,uint256)")), 400_000);
+        e[i++] = Entry(t, bytes4(keccak256("finalizeKick(address,uint256)")), 400_000);
+        e[i++] = Entry(t, bytes4(keccak256("unkickWearer(address,uint256)")), 200_000);
+
+        // ── RoleManager (2) — delegated lifecycle (manager-hat wearers; executor path never needs
+        // sponsorship). grantRole worst case clears rules + mints identity + several group markers.
+        t = ModuleTypes.ROLE_MANAGER_ID;
+        e[i++] = Entry(t, bytes4(keccak256("grantRole(uint256,address)")), 800_000);
+        e[i++] = Entry(t, bytes4(keccak256("revokeRole(uint256,address)")), 800_000);
 
         // ── ParticipationToken (3) ──
         t = ModuleTypes.PARTICIPATION_TOKEN_ID;

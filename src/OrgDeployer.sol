@@ -1153,10 +1153,12 @@ contract OrgDeployer is Initializable {
     {
         bool educationEnabled = result.educationHub != address(0);
         bool zkEmailEnabled = result.zkEmailInvites != address(0);
+        bool roleManagerEnabled = result.roleManager != address(0);
 
         uint256 count = 9;
         if (educationEnabled) count += 1;
         if (zkEmailEnabled) count += 1;
+        if (roleManagerEnabled) count += 1;
 
         typeTargets = new address[](count);
         typeIds = new bytes32[](count);
@@ -1189,6 +1191,13 @@ contract OrgDeployer is Initializable {
         if (zkEmailEnabled) {
             typeTargets[i] = result.zkEmailInvites;
             typeIds[i] = ModuleTypes.ZKEMAIL_INVITES_ID;
+            i++;
+        }
+        if (roleManagerEnabled) {
+            // Delegated grantRole/revokeRole are user-facing (manager-hat wearers) — the type
+            // mapping lets sponsored calls resolve through the global rulebook.
+            typeTargets[i] = result.roleManager;
+            typeIds[i] = ModuleTypes.ROLE_MANAGER_ID;
         }
     }
 

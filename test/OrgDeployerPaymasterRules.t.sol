@@ -26,6 +26,7 @@ import {ModuleTypes} from "../src/libs/ModuleTypes.sol";
 import {DefaultGlobalRules} from "../script/helpers/DefaultGlobalRules.sol";
 import {ZkEmailInvites} from "../src/ZkEmailInvites.sol";
 import {EligibilityModule} from "../src/EligibilityModule.sol";
+import {RoleManager} from "../src/RoleManager.sol";
 
 /// @dev `_buildTargetTypes` is `internal pure`, so a derived contract can expose it with no
 ///      initialization, no proxy and no infra. Deploying an over-EIP-170 contract is fine in tests.
@@ -155,15 +156,50 @@ contract OrgDeployerPaymasterRulesTest is Test {
             _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.claimHats.selector), 3_000_000
         );
 
+        // Delegation-wave lifecycle entries carry hints too (delegated kicks + RoleManager
+        // grant/revoke — user-facing since the manager-hat wave).
+        assertEq(
+            _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.kickWearer.selector), 400_000
+        );
+        assertEq(
+            _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.finalizeKick.selector), 400_000
+        );
+        assertEq(
+            _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.unkickWearer.selector), 200_000
+        );
+        assertEq(_hintOfType(entries, ModuleTypes.ROLE_MANAGER_ID, RoleManager.grantRole.selector), 800_000);
+        assertEq(_hintOfType(entries, ModuleTypes.ROLE_MANAGER_ID, RoleManager.revokeRole.selector), 800_000);
+
         // Everything else is hint-free (0 = "no per-rule cap", the hub's default).
         for (uint256 i = 0; i < entries.length; i++) {
-            bool isEmClaim = entries[i].typeId == ModuleTypes.ELIGIBILITY_MODULE_ID
+            bool isHintedEm = entries[i].typeId == ModuleTypes.ELIGIBILITY_MODULE_ID
                 && (entries[i].selector == EligibilityModule.claimHat.selector
-                    || entries[i].selector == EligibilityModule.claimHats.selector);
-            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID && !isEmClaim) {
-                assertEq(entries[i].maxCallGasHint, 0, "only zk-email + EM claim entries carry gas hints");
+                    || entries[i].selector == EligibilityModule.claimHats.selector
+                    || entries[i].selector == EligibilityModule.kickWearer.selector
+                    || entries[i].selector == EligibilityModule.finalizeKick.selector
+                    || entries[i].selector == EligibilityModule.unkickWearer.selector);
+            bool isRoleManager = entries[i].typeId == ModuleTypes.ROLE_MANAGER_ID;
+            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID && !isHintedEm && !isRoleManager) {
+                assertEq(entries[i].maxCallGasHint, 0, "unexpected gas hint outside the hinted entry set");
             }
         }
+    }
+
+    /// @notice RoleManager joins the target-type map when deployed (delegated grantRole/revokeRole
+    ///         are user-facing — sponsored userOps must resolve through the rulebook).
+    function testTargetTypes_includesRoleManagerWhenDeployed() public view {
+        OrgDeployer.DeploymentResult memory r = _result(EDU, ZK);
+        r.roleManager = address(0x100D);
+        (address[] memory targets, bytes32[] memory typeIds) = harness.exposeTargetTypes(r, ACCT_REG, ORG_REG);
+        assertEq(targets.length, 12, "9 base + education + zk-email + roleManager");
+        bool found;
+        for (uint256 i = 0; i < targets.length; i++) {
+            if (targets[i] == address(0x100D)) {
+                assertEq(typeIds[i], ModuleTypes.ROLE_MANAGER_ID, "roleManager typeId");
+                found = true;
+            }
+        }
+        assertTrue(found, "roleManager missing from target-type map");
     }
 
     /// @notice Tripwire on the four zk-email claim selectors' literal values.

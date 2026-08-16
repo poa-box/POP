@@ -76,12 +76,18 @@ abstract contract SyncBase is Script {
     string internal constant SIM_HUB_VERSION = "rm-w7-sim";
 
     /// @dev A rulebook entry belongs to THIS rollout's delta iff it is one of: the two EM claim
-    ///      selectors, DD createProposalV2, or HV createProposalV2. Filtered from the canonical
-    ///      DefaultGlobalRules seed so hints/selectors stay single-sourced.
+    ///      selectors, the three EM kick-lifecycle selectors (delegation wave), DD/HV
+    ///      createProposalV2, or any ROLE_MANAGER_ID entry (delegated grantRole/revokeRole).
+    ///      Filtered from the canonical DefaultGlobalRules seed so hints/selectors stay
+    ///      single-sourced.
     function _isDeltaEntry(DefaultGlobalRules.Entry memory entry) internal pure returns (bool) {
+        if (entry.typeId == ModuleTypes.ROLE_MANAGER_ID) return true;
         if (entry.typeId == ModuleTypes.ELIGIBILITY_MODULE_ID) {
             return entry.selector == EligibilityModule.claimHat.selector
-                || entry.selector == EligibilityModule.claimHats.selector;
+                || entry.selector == EligibilityModule.claimHats.selector
+                || entry.selector == EligibilityModule.kickWearer.selector
+                || entry.selector == EligibilityModule.finalizeKick.selector
+                || entry.selector == EligibilityModule.unkickWearer.selector;
         }
         if (entry.typeId == ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID) {
             return entry.selector == DirectDemocracyVoting.createProposalV2.selector;
@@ -92,7 +98,8 @@ abstract contract SyncBase is Script {
         return false;
     }
 
-    /// @dev The RoleManager-wave rule delta (2 EM claims + DD/HV createProposalV2).
+    /// @dev The RoleManager-wave rule delta (2 EM claims + 3 EM kicks + DD/HV createProposalV2 +
+    ///      2 RoleManager delegated-lifecycle rules = 9).
     function _delta()
         internal
         pure
@@ -100,10 +107,10 @@ abstract contract SyncBase is Script {
     {
         DefaultGlobalRules.Entry[] memory e = DefaultGlobalRules.entries();
 
-        typeIds = new bytes32[](4);
-        selectors = new bytes4[](4);
-        allowed = new bool[](4);
-        hints = new uint32[](4);
+        typeIds = new bytes32[](9);
+        selectors = new bytes4[](9);
+        allowed = new bool[](9);
+        hints = new uint32[](9);
         uint256 n;
         for (uint256 i; i < e.length; i++) {
             if (_isDeltaEntry(e[i])) {
@@ -114,7 +121,7 @@ abstract contract SyncBase is Script {
                 n++;
             }
         }
-        require(n == 4, "delta: expected exactly 4 RoleManager-wave rules in DefaultGlobalRules");
+        require(n == 9, "delta: expected exactly 9 RoleManager-wave rules in DefaultGlobalRules");
     }
 
     /// @dev Assert the rulebook carries every delta rule with the CORRECT Rule field order
