@@ -4,111 +4,40 @@ pragma solidity ^0.8.20;
 /*──────── OpenZeppelin v5.3 Upgradeables ────────*/
 import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {ContextUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/utils/ContextUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
 
 /*──────── External interfaces / libs ────────*/
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {HatManager} from "./libs/HatManager.sol";
 import {ValidationLib} from "./libs/ValidationLib.sol";
 import {IRoleManager} from "./interfaces/IRoleManager.sol";
-
-/*═════════════════════ Minimal module-call interfaces ═════════════════════*/
-/// @dev Only the exact selectors RoleManager fans out to. Enum parameters are ABI-encoded as
-///      `uint8`, so these declarations share selectors with the concrete modules (W1/W3/W4).
-
-interface IEligibilityModuleRM {
-    struct CreateHatParams {
-        uint256 parentHatId;
-        string details;
-        uint32 maxSupply;
-        bool _mutable;
-        string imageURI;
-        bool defaultEligible;
-        bool defaultStanding;
-        address[] mintToAddresses;
-        bool[] wearerEligibleFlags;
-        bool[] wearerStandingFlags;
-    }
-
-    function createHatWithEligibility(CreateHatParams calldata params) external returns (uint256);
-    function eligibilityModuleAdminHat() external view returns (uint256);
-    function getDefaultRules(uint256 hatId) external view returns (bool eligible, bool standing);
-    function clearWearerEligibility(address wearer, uint256 hatId) external;
-    function grantWearerEligibility(address wearer, uint256 hatId) external;
-    function mintHatToAddress(uint256 hatId, address wearer) external;
-    function setGroupEligibility(uint256 groupHatId, uint256[] calldata memberHats) external;
-    function getGroupMemberHats(uint256 groupHatId) external view returns (uint256[] memory);
-    function configureVouching(uint256 hatId, uint32 quorum, uint256 membershipHatId, bool combineWithHierarchy)
-        external;
-    function updateHatConfig(uint256 hatId, uint32 newMaxSupply) external;
-}
-
-interface IDDVotingRM {
-    enum HatType {
-        VOTING,
-        CREATOR
-    }
-
-    enum ConfigKey {
-        THRESHOLD,
-        EXECUTOR,
-        TARGET_ALLOWED,
-        HAT_ALLOWED,
-        QUORUM
-    }
-
-    function setConfig(ConfigKey key, bytes calldata value) external;
-}
-
-interface IHVVotingRM {
-    function setCreatorHatAllowed(uint256 h, bool ok) external;
-    function addHatToClass(uint8 classIdx, uint256 hatId) external;
-    function removeHatFromClass(uint8 classIdx, uint256 hatId) external;
-}
-
-interface ITaskManagerRM {
-    enum ConfigKey {
-        EXECUTOR,
-        CREATOR_HAT_ALLOWED,
-        ROLE_PERM,
-        PROJECT_ROLE_PERM,
-        BOUNTY_CAP,
-        PROJECT_MANAGER,
-        PROJECT_CAP,
-        ORGANIZER_HAT_ALLOWED
-    }
-
-    function setConfig(ConfigKey key, bytes calldata value) external;
-}
-
-interface IParticipationTokenRM {
-    function setMemberHatAllowed(uint256 h, bool ok) external;
-    function setApproverHatAllowed(uint256 h, bool ok) external;
-}
-
-interface IEducationHubRM {
-    function setCreatorHatAllowed(uint256 h, bool ok) external;
-    function setMemberHatAllowed(uint256 h, bool ok) external;
-}
-
-interface IQuickJoinRM {
-    function updateMemberHatIds(uint256[] calldata memberHatIds_) external;
-    function memberHatIds() external view returns (uint256[] memory);
-}
-
-interface IPaymasterHubRM {
-    function setBudget(bytes32 orgId, bytes32 subjectKey, uint128 capPerEpoch, uint32 epochLen) external;
-}
+// Minimal module-call interfaces + the wiring fan-out bodies live in the delegatecall library so both
+// contracts share ONE declaration of each interface type (no divergence) and RoleManager stays under
+// the EIP-170 runtime limit.
+import {IEligibilityModuleRM, RoleManagerLogic} from "./libs/RoleManagerLogic.sol";
 
 /*════════════════════════════════ RoleManager ════════════════════════════════*/
 /// @title RoleManager – first-class named roles & role groups, orchestrated via governance.
 /// @notice Scoped orchestrator (never superAdmin). Creates identity/marker hats through the
 ///         EligibilityModule, fans permission changes out to the org's sibling modules and drives
-///         the consent-safe grant/offer flow. Every mutating function is `onlyExecutor`; there are
-///         no user-facing mutations (offer acceptance happens on the EligibilityModule).
-contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
+///         the consent-safe grant/offer flow. Structural mutations (create/wiring/group edits/config)
+///         are `onlyExecutor`; only `grantRole`/`revokeRole` may additionally be called by a
+///         manager-hat wearer with the matching capability (W13 delegated lifecycle), and even then
+///         governance-owned EligibilityModule rules stay untouchable (provenance-guarded).
+contract RoleManager is Initializable, ContextUpgradeable, ReentrancyGuardUpgradeable, IRoleManager {
     /*────────── Constants ─────────*/
     bytes4 public constant MODULE_ID = 0x524f4c45; /* "ROLE" */
-    uint8 private constant SUBJECT_TYPE_HAT = 0x01; // PaymasterHub subject-key discriminator
+
+    /// @notice Delegation capability bits (bitmask, separable). See {ManagerConfig}.
+    uint8 public constant CAP_GRANT = 1;
+    uint8 public constant CAP_REVOKE = 2;
+
+    // Provenance flag masks on an EligibilityModule per-wearer rule (W12 `getWearerRuleFlags`):
+    // bit0 eligible, bit1 standing (0x03 == fully eligible (true,true)); bit2 0x04 == DELEGATION_MANAGED.
+    uint8 private constant FLAG_ELIGIBLE_STANDING = 0x03;
+    uint8 private constant FLAG_DELEGATION_MANAGED = 0x04;
 
     /*────────── Errors ─────────*/
     error ZeroAddress();
@@ -122,6 +51,13 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
     error WiringIncompatible();
     error HatAlreadyRegistered();
     error MarkerAlreadyRegistered();
+    error NotAuthorizedManager();
+    error SelfManagedGroup();
+    error GrantBlockedByGovernanceBan();
+    // A delegated revoke may not clear a governance-written (true,true) rule (unclaimed offer / grant)
+    // — those lack the 0x04 provenance bit. INTERNAL error (not in the frozen 3); reported as a
+    // deviation. DELEGATION.md FIX 1 requires the refusal but INTERFACES.md did not name it.
+    error RevokeBlockedByGovernance();
 
     /*────────── ERC-7201 Storage ─────────*/
     /// @custom:storage-location erc7201:poa.rolemanager.storage
@@ -149,6 +85,9 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         uint256 groupCount;
         mapping(uint256 => GroupInfo) groups; // groupId (1-based) => group
         mapping(uint256 => uint256) groupIdOfMarker; // marker hatId => groupId (one-to-one with groups)
+        // delegation configs (W13 appends — MUST stay byte-identical with {RoleManagerLogic.Layout})
+        mapping(uint256 => ManagerConfig) roleManagerConfigs; // roleId => manager-hat delegation config
+        mapping(uint256 => ManagerConfig) groupManagerConfigs; // groupId => manager-hat delegation config
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.rolemanager.storage");
@@ -183,6 +122,7 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         if (cfg.existingOrgHats.length != cfg.existingOrgHatNames.length) revert ArrayLengthMismatch();
 
         __Context_init();
+        __ReentrancyGuard_init();
 
         Layout storage l = _layout();
         l.executor = cfg.executor;
@@ -234,7 +174,7 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         roleId = _registerRole(l, hatId, p.name, p.metadataCID, false);
 
         // Typed permission fan-out onto the identity hat.
-        _applyWiring(l, roleId, hatId, false, p.wiring);
+        RoleManagerLogic.applyWiring(roleId, hatId, false, p.wiring);
 
         // Group memberships.
         uint256 gLen = p.groupIds.length;
@@ -245,10 +185,10 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
             }
         }
 
-        // Initial grants routed through the consent model.
+        // Initial grants routed through the consent model (executor path — createRole is onlyExecutor).
         uint256 grantLen = p.initialGrants.length;
         for (uint256 i; i < grantLen;) {
-            _grantRole(l, roleId, p.initialGrants[i]);
+            _grantRole(l, roleId, p.initialGrants[i], false);
             unchecked {
                 ++i;
             }
@@ -265,15 +205,24 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         Layout storage l = _layout();
         RoleInfo storage r = l.roles[roleId];
         if (!r.exists) revert UnknownRole();
-        _applyWiring(l, roleId, r.hatId, false, w);
+        RoleManagerLogic.applyWiring(roleId, r.hatId, false, w);
     }
 
     /// @notice Grant `roleId` to `user`. Consent model (PLAN §1.4b): in-org members are minted the
     ///         identity + group marker hats directly; non-members receive an explicit eligibility
     ///         OFFER only (they accept via EligibilityModule.claimHats). Nothing is minted for a
     ///         non-member — RoleManager never makes anyone a wearer without consent.
-    function grantRole(uint256 roleId, address user) external onlyExecutor {
-        _grantRole(_layout(), roleId, user);
+    /// @dev Executor OR a manager-hat wearer with {CAP_GRANT} on this role or any containing group.
+    ///      The delegated path is provenance-guarded (DELEGATION.md FIX 1): it may not overwrite a
+    ///      governance-owned ban (an explicit ineligible rule lacking the 0x04 flag) — reverts
+    ///      {GrantBlockedByGovernanceBan} — but MAY clear a 0x04 delegated kick (manager undoing
+    ///      manager). The executor path keeps today's clear-everything semantics byte-for-byte.
+    function grantRole(uint256 roleId, address user) external nonReentrant {
+        Layout storage l = _layout();
+        RoleInfo storage r = l.roles[roleId];
+        if (!r.exists) revert UnknownRole();
+        bool delegated = _authorizeLifecycle(l, roleId, CAP_GRANT);
+        _grantRole(l, roleId, user, delegated);
     }
 
     /// @notice Revoke `roleId` from `user`. Clears the explicit eligibility rule on the identity hat
@@ -289,10 +238,25 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
     ///         (`setWearerEligibility(user, hat, false, false)`, `clearWearerVouches`, or
     ///         `clearEmailVerified`). An honest revert here beats emitting a RoleRevoked event for a
     ///         removal that did not happen.
-    function revokeRole(uint256 roleId, address user) external onlyExecutor {
+    function revokeRole(uint256 roleId, address user) external nonReentrant {
         Layout storage l = _layout();
         RoleInfo storage r = l.roles[roleId];
         if (!r.exists) revert UnknownRole();
+
+        bool delegated = _authorizeLifecycle(l, roleId, CAP_REVOKE);
+
+        // Delegated revoke may clear an explicit (true,true) rule ONLY when it is delegation-managed
+        // (0x04 set) — it must not cancel a governance-written offer/grant made via direct EM setters.
+        // Governance (executor) revoke keeps clear-everything semantics.
+        if (delegated) {
+            (bool hasRule, uint8 flags) = IEligibilityModuleRM(l.eligibilityModule).getWearerRuleFlags(user, r.hatId);
+            if (
+                hasRule && (flags & FLAG_ELIGIBLE_STANDING) == FLAG_ELIGIBLE_STANDING
+                    && (flags & FLAG_DELEGATION_MANAGED) == 0
+            ) {
+                revert RevokeBlockedByGovernance();
+            }
+        }
 
         bool wasWearing = l.hats.isWearerOfHat(user, r.hatId);
         IEligibilityModuleRM(l.eligibilityModule).clearWearerEligibility(user, r.hatId);
@@ -313,7 +277,7 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
 
         if (l.hats.isWearerOfHat(user, r.hatId)) revert RevokeIneffective();
 
-        emit RoleRevoked(roleId, user, wasWearing);
+        emit RoleRevoked(roleId, user, wasWearing, _msgSender(), delegated);
     }
 
     /*═════════════════════════════ Group lifecycle ═════════════════════════════*/
@@ -360,7 +324,7 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         _syncGroupEligibility(l, groupId);
 
         // Shared permission fan-out onto the marker hat.
-        _applyWiring(l, groupId, markerHatId, true, sharedWiring);
+        RoleManagerLogic.applyWiring(groupId, markerHatId, true, sharedWiring);
     }
 
     /// @notice Register an existing hat as a group marker (adoption path, e.g. KUBI's Executive hat).
@@ -427,7 +391,45 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         Layout storage l = _layout();
         GroupInfo storage g = l.groups[groupId];
         if (!g.exists) revert UnknownGroup();
-        _applyWiring(l, groupId, g.markerHatId, true, w);
+        RoleManagerLogic.applyWiring(groupId, g.markerHatId, true, w);
+    }
+
+    /*═════════════════════════════ Delegation config ═════════════════════════════*/
+
+    /// @notice Delegate `roleId`'s grant/revoke lifecycle to wearers of `managerHatId` (with `caps`).
+    /// @dev onlyExecutor. `managerHatId == 0` clears the delegation. Reverts {SelfManagedGroup} on the
+    ///      direct cycle: `managerHatId` is the marker of a group that already contains `roleId` — a
+    ///      wearer of that marker (obtained by holding `roleId`, a member of the group) could otherwise
+    ///      mint co-managers / purge peers. Deeper transitive cycles are UI-surfaced, not contract-
+    ///      checked (DELEGATION.md Primitive A).
+    function setRoleManagerConfig(uint256 roleId, uint256 managerHatId, uint8 caps) external onlyExecutor {
+        Layout storage l = _layout();
+        if (!l.roles[roleId].exists) revert UnknownRole();
+        _requireNoSelfManageCycle(l, roleId, managerHatId);
+        l.roleManagerConfigs[roleId] = ManagerConfig({managerHatId: managerHatId, caps: caps});
+        emit RoleManagerConfigSet(roleId, managerHatId, caps);
+    }
+
+    /// @notice Delegate the grant/revoke lifecycle of ALL of `groupId`'s member roles to wearers of
+    ///         `managerHatId` (with `caps`).
+    /// @dev onlyExecutor. `managerHatId == 0` clears the delegation. Reverts {SelfManagedGroup} when
+    ///      `managerHatId` is the marker of a group that contains any of `groupId`'s member roles
+    ///      (including `groupId` itself) — the same direct-cycle guard as {setRoleManagerConfig}.
+    function setGroupManagerConfig(uint256 groupId, uint256 managerHatId, uint8 caps) external onlyExecutor {
+        Layout storage l = _layout();
+        GroupInfo storage g = l.groups[groupId];
+        if (!g.exists) revert UnknownGroup();
+        // A group config manages each member role — reject the cycle against every one of them.
+        uint256[] storage members = g.memberRoleIds;
+        uint256 len = members.length;
+        for (uint256 i; i < len;) {
+            _requireNoSelfManageCycle(l, members[i], managerHatId);
+            unchecked {
+                ++i;
+            }
+        }
+        l.groupManagerConfigs[groupId] = ManagerConfig({managerHatId: managerHatId, caps: caps});
+        emit GroupManagerConfigSet(groupId, managerHatId, caps);
     }
 
     /*═════════════════════════════ Views ═════════════════════════════*/
@@ -446,6 +448,16 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
     /// @notice Group record for `groupId` (empty struct if unknown).
     function getGroup(uint256 groupId) external view returns (GroupInfo memory) {
         return _layout().groups[groupId];
+    }
+
+    /// @notice Manager-hat delegation config for `roleId` (zeroed struct if none).
+    function getRoleManagerConfig(uint256 roleId) external view returns (ManagerConfig memory) {
+        return _layout().roleManagerConfigs[roleId];
+    }
+
+    /// @notice Manager-hat delegation config for `groupId` (zeroed struct if none).
+    function getGroupManagerConfig(uint256 groupId) external view returns (ManagerConfig memory) {
+        return _layout().groupManagerConfigs[groupId];
     }
 
     /// @notice Reverse index: role id owning `hatId` (0 if none).
@@ -572,6 +584,13 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
         g.memberRoleIds.push(roleId);
         l.roleGroupIds[roleId].push(groupId);
 
+        // Re-check the direct-cycle invariant now that `roleId` belongs to `groupId`: adding the role
+        // must not turn an existing role- or group-level delegation into a self-management cycle
+        // (managerHatId being the marker of a group that now contains the managed role). Reverts roll
+        // back the push above (DELEGATION.md: addRoleToGroup-time re-check).
+        _requireNoSelfManageCycle(l, roleId, l.roleManagerConfigs[roleId].managerHatId);
+        _requireNoSelfManageCycle(l, roleId, l.groupManagerConfigs[groupId].managerHatId);
+
         _syncGroupEligibility(l, groupId);
         emit RoleGroupMembershipChanged(roleId, groupId, true);
     }
@@ -592,18 +611,34 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
 
     /// @dev Consent-model grant. In-org: (re)establish eligibility + mint identity, then group
     ///      markers (derived-eligible once the identity is worn). Out-of-org: explicit eligibility
-    ///      OFFER only — mints nothing.
-    function _grantRole(Layout storage l, uint256 roleId, address user) private {
+    ///      OFFER only — mints nothing. When `delegated` (caller is a manager-hat wearer, not the
+    ///      executor) every rule this path would clear/overwrite (identity + all markers) is first
+    ///      checked for a governance-owned ban — an explicit ineligible rule WITHOUT the 0x04 flag —
+    ///      and reverts {GrantBlockedByGovernanceBan} rather than lifting it. A 0x04 delegated kick is
+    ///      clearable (manager undoing manager). The executor path is byte-identical to today.
+    function _grantRole(Layout storage l, uint256 roleId, address user, bool delegated) private {
         RoleInfo storage r = l.roles[roleId];
         if (!r.exists) revert UnknownRole();
         uint256 identityHat = r.hatId;
         IEligibilityModuleRM em = IEligibilityModuleRM(l.eligibilityModule);
         uint256[] storage groupIds = l.roleGroupIds[roleId];
+        uint256 gLen = groupIds.length;
+
+        // Provenance guard: a delegated grant must never overwrite a governance ban (identity or any
+        // marker it would clear). Checked up-front so the whole call reverts atomically.
+        if (delegated) {
+            _requireNotGovernanceBanned(em, user, identityHat);
+            for (uint256 i; i < gLen;) {
+                _requireNotGovernanceBanned(em, user, l.groups[groupIds[i]].markerHatId);
+                unchecked {
+                    ++i;
+                }
+            }
+        }
 
         if (HatManager.hasAnyHat(l.hats, l.orgHats, user)) {
             // Clear any stale explicit rules on the identity + markers (crit-integration 1.4).
             em.clearWearerEligibility(user, identityHat);
-            uint256 gLen = groupIds.length;
             for (uint256 i; i < gLen;) {
                 em.clearWearerEligibility(user, l.groups[groupIds[i]].markerHatId);
                 unchecked {
@@ -629,14 +664,13 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
                 }
             }
 
-            emit RoleGranted(roleId, user, true);
+            emit RoleGranted(roleId, user, true, _msgSender(), delegated);
         } else {
             // OFFER: explicit eligibility rule is the offer state; user accepts via EM.claimHats.
             // Clear stale explicit rules on the group markers too — an old kick would otherwise
             // shadow the derived path and make the one-tx claimHats([identity, markers]) acceptance
             // revert on the marker entry. (grantWearerEligibility overwrites the identity rule, so
             // no separate clear is needed there; a governance grant vote implies the un-ban.)
-            uint256 gLen = groupIds.length;
             for (uint256 i; i < gLen;) {
                 em.clearWearerEligibility(user, l.groups[groupIds[i]].markerHatId);
                 unchecked {
@@ -644,140 +678,60 @@ contract RoleManager is Initializable, ContextUpgradeable, IRoleManager {
                 }
             }
             em.grantWearerEligibility(user, identityHat);
-            emit RoleOffered(roleId, user, identityHat);
-            emit RoleGranted(roleId, user, false);
+            emit RoleOffered(roleId, user, identityHat, _msgSender(), delegated);
+            emit RoleGranted(roleId, user, false, _msgSender(), delegated);
         }
     }
 
-    /// @dev Typed permission fan-out. Applies the target state idempotently (no diff); a cleared
-    ///      boolean re-applies the permission as `false`. `id` is a roleId or groupId (per isGroup).
-    function _applyWiring(Layout storage l, uint256 id, uint256 hatId, bool isGroup, RoleWiring memory w) private {
-        // Guard incompatible wiring up-front (cheap honest reverts beat silently-broken state):
-        // 1. Vouching with combineWithHierarchy=false makes getWearerStatus IGNORE the explicit
-        //    per-wearer rules that RoleManager's entire grant/offer/consent model rests on — every
-        //    grant would revert NotEligible and every offer would be permanently unclaimable.
-        //    Vouch-gated RM roles must keep combine=true (vouching as an ADDITIONAL path).
-        if (w.vouchingEnabled && !w.vouchCombine) revert WiringIncompatible();
-        // 2. Markers must keep the derived-eligibility path free: vouching on a marker either
-        //    reverts in EM (derived<->vouch guard) or — for a still-empty group — sneaks in and
-        //    permanently blocks every later addRoleToGroup. Reject at the source.
-        if (isGroup && w.vouchingEnabled) revert WiringIncompatible();
-        // 3. QuickJoin auto-mint requires an OPEN (default-eligible) hat: joins mint via
-        //    Executor.mintHatsForUser -> Hats.mintHat, which reverts NotEligible for the
-        //    default-closed hats RoleManager creates — wiring one in would brick every
-        //    subsequent join org-wide. Only pre-existing open hats (e.g. a genesis MEMBER
-        //    role) may be auto-minted on join.
-        if (w.quickJoinAutoMint) {
-            (bool defaultEligible,) = IEligibilityModuleRM(l.eligibilityModule).getDefaultRules(hatId);
-            if (!defaultEligible) revert WiringIncompatible();
+    /// @dev Reverts {GrantBlockedByGovernanceBan} if `user` has an explicit ineligible rule on `hat`
+    ///      that is NOT delegation-managed (0x04) — a governance-owned ban a delegate may not lift.
+    function _requireNotGovernanceBanned(IEligibilityModuleRM em, address user, uint256 hat) private view {
+        (bool hasRule, uint8 flags) = em.getWearerRuleFlags(user, hat);
+        if (
+            hasRule && (flags & FLAG_ELIGIBLE_STANDING) != FLAG_ELIGIBLE_STANDING
+                && (flags & FLAG_DELEGATION_MANAGED) == 0
+        ) {
+            revert GrantBlockedByGovernanceBan();
         }
-
-        // TaskManager global ROLE_PERM (mask==0 removes all perms — gated by the explicit flag).
-        if (w.setTaskPerm && l.taskManager != address(0)) {
-            ITaskManagerRM(l.taskManager)
-                .setConfig(ITaskManagerRM.ConfigKey.ROLE_PERM, abi.encode(hatId, w.taskPermMask));
-        }
-
-        // DirectDemocracy voter / creator rights.
-        if (l.ddVoting != address(0)) {
-            IDDVotingRM(l.ddVoting)
-                .setConfig(IDDVotingRM.ConfigKey.HAT_ALLOWED, abi.encode(IDDVotingRM.HatType.VOTING, hatId, w.ddVoter));
-            IDDVotingRM(l.ddVoting)
-                .setConfig(
-                    IDDVotingRM.ConfigKey.HAT_ALLOWED, abi.encode(IDDVotingRM.HatType.CREATOR, hatId, w.ddCreator)
-                );
-        }
-
-        // HybridVoting creator right + class memberships.
-        if (l.hybridVoting != address(0)) {
-            IHVVotingRM(l.hybridVoting).setCreatorHatAllowed(hatId, w.hvCreator);
-            uint256 cLen = w.hvClassIndexes.length;
-            for (uint256 i; i < cLen;) {
-                IHVVotingRM(l.hybridVoting).addHatToClass(w.hvClassIndexes[i], hatId);
-                unchecked {
-                    ++i;
-                }
-            }
-        }
-
-        // ParticipationToken member / approver rights.
-        if (l.participationToken != address(0)) {
-            IParticipationTokenRM(l.participationToken).setMemberHatAllowed(hatId, w.ptMember);
-            IParticipationTokenRM(l.participationToken).setApproverHatAllowed(hatId, w.ptApprover);
-        }
-
-        // EducationHub creator / member rights.
-        if (l.educationHub != address(0)) {
-            IEducationHubRM(l.educationHub).setCreatorHatAllowed(hatId, w.eduCreator);
-            IEducationHubRM(l.educationHub).setMemberHatAllowed(hatId, w.eduMember);
-        }
-
-        // QuickJoin auto-mint list (read-modify-write, full-replacement setter).
-        if (l.quickJoin != address(0)) {
-            _applyQuickJoin(l.quickJoin, hatId, w.quickJoinAutoMint);
-        }
-
-        // Vouching config (only when enabled — a marker hat with derived config cannot vouch).
-        if (w.vouchingEnabled) {
-            IEligibilityModuleRM(l.eligibilityModule)
-                .configureVouching(hatId, w.vouchQuorum, w.vouchMembershipHatId, w.vouchCombine);
-        }
-
-        // Per-hat paymaster budget (best-effort — never reverts the governance batch).
-        if ((w.budgetCapPerEpoch > 0 || w.budgetEpochLen > 0) && l.paymasterHub != address(0)) {
-            bytes32 subjectKey = keccak256(abi.encodePacked(SUBJECT_TYPE_HAT, bytes32(hatId)));
-            try IPaymasterHubRM(l.paymasterHub).setBudget(l.orgId, subjectKey, w.budgetCapPerEpoch, w.budgetEpochLen) {}
-            catch {
-                emit BudgetSkipped(hatId);
-            }
-        }
-
-        emit RoleWiringApplied(id, hatId, isGroup);
     }
 
-    function _applyQuickJoin(address quickJoin, uint256 hatId, bool include) private {
-        uint256[] memory current = IQuickJoinRM(quickJoin).memberHatIds();
-        uint256 len = current.length;
-        bool present;
-        uint256 idx;
+    /// @dev Lifecycle authorization for grant/revoke. The executor is always authorized (returns
+    ///      `delegated = false`). Otherwise the caller must wear the role's managerHat OR any
+    ///      containing group's managerHat, each carrying `cap` — returns `delegated = true`. Reverts
+    ///      {NotAuthorizedManager} when neither holds.
+    function _authorizeLifecycle(Layout storage l, uint256 roleId, uint8 cap) private view returns (bool delegated) {
+        address caller = _msgSender();
+        if (caller == l.executor) return false;
+
+        if (_isManager(l, l.roleManagerConfigs[roleId], caller, cap)) return true;
+        uint256[] storage gids = l.roleGroupIds[roleId];
+        uint256 len = gids.length;
         for (uint256 i; i < len;) {
-            if (current[i] == hatId) {
-                present = true;
-                idx = i;
-                break;
-            }
+            if (_isManager(l, l.groupManagerConfigs[gids[i]], caller, cap)) return true;
             unchecked {
                 ++i;
             }
         }
+        revert NotAuthorizedManager();
+    }
 
-        if (include && !present) {
-            uint256[] memory next = new uint256[](len + 1);
-            for (uint256 i; i < len;) {
-                next[i] = current[i];
-                unchecked {
-                    ++i;
-                }
-            }
-            next[len] = hatId;
-            IQuickJoinRM(quickJoin).updateMemberHatIds(next);
-        } else if (!include && present) {
-            uint256[] memory next = new uint256[](len - 1);
-            uint256 j;
-            for (uint256 i; i < len;) {
-                if (i != idx) {
-                    next[j] = current[i];
-                    unchecked {
-                        ++j;
-                    }
-                }
-                unchecked {
-                    ++i;
-                }
-            }
-            IQuickJoinRM(quickJoin).updateMemberHatIds(next);
-        }
-        // else: already in desired state — no write.
+    /// @dev A config authorizes `caller` for `cap` iff it names a manager hat, carries the cap bit,
+    ///      and `caller` currently wears that hat (authority self-expires with the hat).
+    function _isManager(Layout storage l, ManagerConfig storage c, address caller, uint8 cap)
+        private
+        view
+        returns (bool)
+    {
+        if (c.managerHatId == 0 || c.caps & cap == 0) return false;
+        return l.hats.isWearerOfHat(caller, c.managerHatId);
+    }
+
+    /// @dev Direct-cycle guard: revert {SelfManagedGroup} if `managerHatId` is the marker of a group
+    ///      that contains `roleId`. `managerHatId == 0` (config clear) is a no-op (no marker maps to
+    ///      group 0). Shared by both config setters and the addRoleToGroup re-check.
+    function _requireNoSelfManageCycle(Layout storage l, uint256 roleId, uint256 managerHatId) private view {
+        uint256 gid = l.groupIdOfMarker[managerHatId];
+        if (gid != 0 && _arrayContains(l.roleGroupIds[roleId], gid)) revert SelfManagedGroup();
     }
 
     function _arrayContains(uint256[] storage arr, uint256 value) private view returns (bool) {

@@ -30,7 +30,15 @@ contract MockEligibilityModuleRM {
     mapping(uint256 => bool) public defaultEligible;
     mapping(uint256 => mapping(address => bool)) public hasExplicit;
     mapping(uint256 => mapping(address => bool)) public explicitEligible;
+    // Provenance emulation (W12 getWearerRuleFlags): the full flags byte per explicit rule —
+    // bit0 eligible, bit1 standing, bit2 (0x04) DELEGATION_MANAGED. RM-mediated writes carry 0x04;
+    // governance (superAdmin) writes do NOT. `govSetRule`/`delegatedKick` seed the two provenances.
+    mapping(uint256 => mapping(address => uint8)) public explicitFlags;
     mapping(uint256 => uint256[]) internal _groupMemberHats;
+
+    uint8 private constant FLAG_ELIGIBLE = 0x01;
+    uint8 private constant FLAG_STANDING = 0x02;
+    uint8 private constant FLAG_DELEGATION_MANAGED = 0x04;
 
     // call recording
     mapping(uint256 => uint32) public lastVouchQuorum;
@@ -56,16 +64,42 @@ contract MockEligibilityModuleRM {
         lastMaxSupply[hatId] = params.maxSupply;
     }
 
+    /// @dev RM-path clear: wipes the rule AND its provenance bit (W12 semantics — RM writes clear 0x04).
     function clearWearerEligibility(address wearer, uint256 hatId) external {
         hasExplicit[hatId][wearer] = false;
         explicitEligible[hatId][wearer] = false;
+        explicitFlags[hatId][wearer] = 0;
         clearCount[hatId] += 1;
     }
 
+    /// @dev RM-path grant: writes (true,true | 0x04) — RM-mediated, delegation-managed provenance.
     function grantWearerEligibility(address wearer, uint256 hatId) external {
         hasExplicit[hatId][wearer] = true;
         explicitEligible[hatId][wearer] = true;
+        explicitFlags[hatId][wearer] = FLAG_ELIGIBLE | FLAG_STANDING | FLAG_DELEGATION_MANAGED;
         grantCount[hatId] += 1;
+    }
+
+    /// @notice Test-only: emulate a GOVERNANCE (superAdmin) rule write — carries NO 0x04 provenance
+    ///         bit, so RoleManager treats it as governance-owned (ban when ineligible, offer when
+    ///         (true,true)).
+    function govSetRule(address wearer, uint256 hatId, bool eligible, bool standing) external {
+        hasExplicit[hatId][wearer] = true;
+        explicitEligible[hatId][wearer] = eligible;
+        explicitFlags[hatId][wearer] = (eligible ? FLAG_ELIGIBLE : 0) | (standing ? FLAG_STANDING : 0);
+    }
+
+    /// @notice Test-only: emulate a DELEGATED KICK — explicit (false,false | 0x04). RoleManager may
+    ///         clear/overwrite it (manager undoing manager).
+    function delegatedKick(address wearer, uint256 hatId) external {
+        hasExplicit[hatId][wearer] = true;
+        explicitEligible[hatId][wearer] = false;
+        explicitFlags[hatId][wearer] = FLAG_DELEGATION_MANAGED;
+    }
+
+    /// @notice Provenance view consumed by RoleManager's delegated grant/revoke guards.
+    function getWearerRuleFlags(address wearer, uint256 hatId) external view returns (bool hasRule, uint8 flags) {
+        return (hasExplicit[hatId][wearer], explicitFlags[hatId][wearer]);
     }
 
     function mintHatToAddress(uint256 hatId, address wearer) external {
