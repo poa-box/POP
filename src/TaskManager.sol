@@ -15,6 +15,8 @@ import {ValidationLib} from "./libs/ValidationLib.sol";
 /*────────── External Hats interface ──────────*/
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {HatManager} from "./libs/HatManager.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
+import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 
 /*────────── External Interfaces ──────────*/
 interface IParticipationToken is IERC20 {
@@ -180,6 +182,11 @@ contract TaskManager is Initializable, ContextUpgradeable {
         // Optional secondary admin (e.g. RoleManager) permitted to set global ROLE_PERM masks
         // alongside the executor. address(0) = none. Does NOT widen any other config branch.
         address configAdmin;
+        // ─── Access v2 dual-path (append-only tail) ───
+        // When non-zero, permission/creator/organizer reads route through the org's
+        // MembershipAuthority instead of the legacy Hats path. address(0) = legacy path
+        // (byte-identical to pre-v2 behavior; this is also the rollback state).
+        address membershipAuthority;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.taskmanager.storage");
@@ -192,6 +199,9 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Events ───────*/
+    /// @notice The org's MembershipAuthority pointer changed. `authority == address(0)` restores the
+    ///         legacy Hats permission path (rollback).
+    event MembershipAuthoritySet(address indexed authority);
     /// @notice A role hat of `hatType` was added or removed from its enumeration array.
     event HatSet(HatType hatType, uint256 hat, bool allowed);
     /// @notice A project was created. `metadataHash` is an IPFS CID — not stored on-chain.
@@ -348,6 +358,11 @@ contract TaskManager is Initializable, ContextUpgradeable {
         Layout storage l = _layout();
         address s = _msgSender();
         if (s == l.executor) return;
+        address a = l.membershipAuthority;
+        if (a != address(0)) {
+            if (!_authorityHoldsAny(a, l.organizerHatIds, s)) revert NotOrganizer();
+            return;
+        }
         if (!HatManager.hasAnyHat(l.hats, l.organizerHatIds, s)) revert NotOrganizer();
     }
 
@@ -1371,6 +1386,16 @@ contract TaskManager is Initializable, ContextUpgradeable {
         emit ConfigAdminSet(admin);
     }
 
+    /// @notice Repoint this module to the org's MembershipAuthority (Access v2).
+    /// @dev Executor-only. When `authority != address(0)` permission/creator/organizer reads route
+    ///      through the authority; `address(0)` restores the legacy Hats path (rollback). Access v2
+    ///      dual-path invariant §4.4/§4.1.
+    function setMembershipAuthority(address authority) external {
+        _requireExecutor();
+        _layout().membershipAuthority = authority;
+        emit MembershipAuthoritySet(authority);
+    }
+
     /**
      * @notice Replace a hat's permission mask on a specific project (overrides global).
      * @dev Permission: creator hat or executor. Setting `mask` to zero removes the override
@@ -1422,6 +1447,18 @@ contract TaskManager is Initializable, ContextUpgradeable {
 
     function _permMask(address user, bytes32 pid) internal view returns (uint8 m) {
         Layout storage l = _layout();
+
+        // ── Access v2 authority arm ──
+        // Effective mask = authority.hasPerm(user, TM_PERMS, ctx=projectId). The packed-word
+        // inherit/global-union semantics live authority-side (§3 CTX RESOLUTION); TaskManager just
+        // reads the folded value. TM_PERMS is OR-mask-tagged. Only the low 8 bits are meaningful to
+        // TaskPerm today, so the fold is narrowed to uint8 without losing any defined flag.
+        address a = l.membershipAuthority;
+        if (a != address(0)) {
+            return uint8(IMembershipAuthority(a).hasPerm(user, AccessV2PermKeys.TM_PERMS, bytes32(pid)));
+        }
+
+        // ── Legacy Hats arm (byte-identical to pre-v2) ──
         uint256 len = l.permissionHatIds.length;
         if (len == 0) return 0;
 
@@ -1549,10 +1586,31 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Internal Helper Functions ─────────── */
-    /// @dev Returns true if `user` wears *any* creator hat.
+    /// @dev Returns true if `user` wears *any* creator hat. Access v2: when an authority is set the
+    ///      creator hat ids are read as subject ids (adopted verbatim, §1) and `hasAnyHat` is mirrored
+    ///      by folding authority membership over the same enumeration; legacy Hats otherwise.
     function _hasCreatorHat(address user) internal view returns (bool) {
         Layout storage l = _layout();
+        address a = l.membershipAuthority;
+        if (a != address(0)) return _authorityHoldsAny(a, l.creatorHatIds, user);
         return HatManager.hasAnyHat(l.hats, l.creatorHatIds, user);
+    }
+
+    /// @dev Access v2 mirror of `HatManager.hasAnyHat`: true iff `user` is a member of any subject id
+    ///      in `subjectIds` per the authority. Membership = accepted && eligible (authority-computed).
+    function _authorityHoldsAny(address authority, uint256[] storage subjectIds, address user)
+        internal
+        view
+        returns (bool)
+    {
+        uint256 len = subjectIds.length;
+        for (uint256 i; i < len;) {
+            if (IMembershipAuthority(authority).isMember(subjectIds[i], user)) return true;
+            unchecked {
+                ++i;
+            }
+        }
+        return false;
     }
 
     /*──────── Utils / View ────*/
@@ -1578,6 +1636,7 @@ contract TaskManager is Initializable, ContextUpgradeable {
      *      - `9` → Bounty budget: `d = abi.encode(bytes32 pid, address token)` → `(uint128 cap, uint128 spent)`.
      *      - `10` → Folders root: `d = ""` → `(bytes32 foldersRoot)`.
      *      - `11` → Organizer hats: `d = ""` → `(uint256[] hatIds)`.
+     *      - `12` → MembershipAuthority pointer: `d = ""` → `(address membershipAuthority)`.
      * @param t Variant selector.
      * @param d ABI-encoded variant payload (see above).
      * @return ABI-encoded result whose shape depends on `t`.
@@ -1640,6 +1699,9 @@ contract TaskManager is Initializable, ContextUpgradeable {
         } else if (t == 11) {
             // OrganizerHats
             return abi.encode(HatManager.getHatArray(l.organizerHatIds));
+        } else if (t == 12) {
+            // MembershipAuthority (Access v2 dual-path pointer; address(0) = legacy Hats path)
+            return abi.encode(l.membershipAuthority);
         }
         revert NotFound();
     }
