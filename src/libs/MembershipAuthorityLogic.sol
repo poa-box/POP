@@ -187,7 +187,11 @@ library MembershipAuthorityLogic {
         mapping(uint256 => mapping(address => uint64)) wearerVouchEpoch;
         mapping(uint256 => mapping(address => mapping(address => bool))) vouchers;
         mapping(uint256 => mapping(address => mapping(address => uint64))) voucherRecordEpoch;
-        // Per-user vouch generation (appended, ERC-7201-safe). Bumped by clearUserVouches to
+        // Per-user vouch generation. (Placed mid-struct here for locality with the other vouch
+        // fields; MembershipAuthority is NEW on this branch with no deployed baseline, so the whole
+        // Layout is authored fresh — position only needs to be self-consistent across the hub + both
+        // libs, which share this single struct definition. Post-deploy, all additions append at the
+        // tail per repo discipline.) Bumped by clearUserVouches to
         // PERMANENTLY strand that user's prior per-voucher records without disturbing other users
         // (the subject-level vouchEpoch can't be bumped per-user). Voucher records validate against
         // BOTH the subject epoch and this generation, so a stranded record can never be revived by

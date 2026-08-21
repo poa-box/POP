@@ -475,7 +475,10 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
         }
         if (l.membership[subject][user].accepted) return (AccessV2Types.ActionReason.AlreadyMember, address(0));
         Lib.RuleRec storage r = l.ruleOf[subject][user];
-        if (r.kind == AccessV2Types.RuleKind.Ban && r.author == AccessV2Types.RuleAuthor.Governance) {
+        // Mirror the enforcement guard (delegatedGrant/Offer): a delegated action is blocked by ANY
+        // non-delegable governance rule (grant OR ban), not just a ban — otherwise this preflight
+        // would say Ok on a sticky-grant seat a delegate cannot actually touch.
+        if (r.kind != AccessV2Types.RuleKind.None && r.author == AccessV2Types.RuleAuthor.Governance && !r.delegable) {
             return (AccessV2Types.ActionReason.BlockedByGovernanceBan, address(0));
         }
         if (!Lib._isInOrg(l, user)) return (AccessV2Types.ActionReason.NotInOrg, address(0));
