@@ -202,6 +202,51 @@ contract HybridVotingAuthorityTest is Test {
         assertTrue(valid);
     }
 
+    /*───────────────────────── PRE-CUTOVER ANCHOR SENTINEL (C5/C8/C9) ─────────────────────────*/
+
+    /// @notice REGRESSION (C5/C8/C9): a proposal created BEFORE the module carried the activation
+    ///         anchor — `proposalCreatedAt` slot reads 0, a pre-cutover / pre-Access-v2 legacy
+    ///         proposal — must stay votable by its eligible classes after `setMembershipAuthority`
+    ///         repoints the module. Pre-fix every class member yielded zero power (activeMemberSince
+    ///         is never `<= 0`), so the whole electorate hit Unauthorized on any in-flight proposal
+    ///         spanning cutover. Membership is still required on the zero anchor: a non-member reverts.
+    function testPreCutoverProposalVotableAfterAuthoritySet() public {
+        // Legacy-path proposal at genesis ⇒ its anchor + class-subject snapshot slots both read 0
+        // (pre-Access-v2 bytecode: neither mapping existed). Class 0 stays hat-gated on MEMBER_HAT.
+        vm.warp(0);
+        hats.mintHat(CREATOR_HAT, creator);
+        uint256 id = _create(creator);
+        assertEq(hv.proposalCreatedAt(id), 0, "precondition: legacy proposal has a zero anchor");
+        assertEq(hv.proposalClassSubject(id, 0), 0, "precondition: no class-subject snapshot");
+
+        // Cutover.
+        vm.warp(100);
+        _setAuthority(address(auth));
+
+        // Snapshot is 0 ⇒ class falls back to cls.hatIds ([MEMBER_HAT]) as adopted-verbatim subject
+        // ids. A member of subject MEMBER_HAT (active since T=1, before creation) can vote.
+        auth.setSubjectActive(MEMBER_HAT, voter, uint64(1));
+        _vote(id, voter, 0);
+        vm.warp(block.timestamp + 16 minutes);
+        (, bool valid) = hv.announceWinner(id);
+        assertTrue(valid, "eligible member's vote must count on the zero-anchor proposal");
+    }
+
+    /// @notice REGRESSION (C5/C8/C9): a non-member is still excluded from a zero-anchor proposal —
+    ///         the fix relaxes the TIME gate, not the MEMBERSHIP gate.
+    function testPreCutoverProposalStillBlocksNonMember() public {
+        vm.warp(0);
+        hats.mintHat(CREATOR_HAT, creator);
+        uint256 id = _create(creator);
+        assertEq(hv.proposalCreatedAt(id), 0);
+
+        vm.warp(100);
+        _setAuthority(address(auth));
+
+        // `rando` is a member of no subject ⇒ zero power ⇒ Unauthorized, even on the zero anchor.
+        _expectVoteRevert(id, rando);
+    }
+
     /*───────────────────────── subject snapshot IMMUTABILITY ─────────────────────────*/
 
     /// @notice A class's per-proposal subject is snapshotted at creation and is immune to later

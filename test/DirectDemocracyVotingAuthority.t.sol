@@ -159,6 +159,71 @@ contract DirectDemocracyVotingAuthorityTest is Test {
         assertEq(dd.proposalsCount(), 2);
     }
 
+    /*───────────────────────── PRE-CUTOVER ANCHOR SENTINEL (C5/C8/C9) ─────────────────────────*/
+
+    /// @notice REGRESSION (C5/C8/C9): a proposal created BEFORE the module carried the activation
+    ///         anchor — its `proposalCreatedAt` slot reads 0, i.e. a pre-cutover / pre-Access-v2
+    ///         legacy proposal — must stay votable by the ELIGIBLE electorate after
+    ///         `setMembershipAuthority` flips the module onto the authority path. Pre-fix the whole
+    ///         electorate was locked out (activeMemberSince, always a real ts or the max sentinel, is
+    ///         never `<= 0`), disenfranchising every in-flight proposal that spans an org's cutover.
+    ///         Membership is STILL required on the zero anchor: a non-member remains blocked.
+    function testPreCutoverProposalVotableAfterAuthoritySet() public {
+        // Create the proposal on the LEGACY path (authority unset) at genesis, so its anchor slot
+        // reads 0 — mirroring a proposal created under pre-Access-v2 bytecode (mapping absent).
+        vm.warp(0);
+        hats.mintHat(CREATOR_HAT, creator);
+        uint256 id = _createUnrestricted(creator);
+        assertEq(dd.proposalCreatedAt(id), 0, "precondition: legacy proposal has a zero anchor");
+
+        // Cutover: repoint the still-open proposal onto the authority path.
+        vm.warp(100);
+        _setAuthority(address(auth));
+
+        // A long-standing eligible member (active since T=1, before the proposal existed) can vote.
+        auth.setKeyActive(voter, AccessV2PermKeys.DD_VOTE, uint64(1));
+        _voteYes(voter, id);
+
+        // Anti-packing survives on the zero anchor: a non-member is still rejected (membership gate).
+        uint8[] memory idx = new uint8[](1);
+        idx[0] = 0;
+        uint8[] memory w = new uint8[](1);
+        w[0] = 100;
+        vm.prank(rando);
+        vm.expectRevert(VotingErrors.Unauthorized.selector);
+        dd.vote(id, idx, w);
+    }
+
+    /// @notice REGRESSION (C5/C8/C9), restricted-poll arm: a pre-cutover restricted poll (zero anchor)
+    ///         stays votable by its subject members after cutover, while the per-poll subject gate is
+    ///         still enforced (a DD_VOTE holder outside the subject gets RoleNotAllowed).
+    function testPreCutoverRestrictedPollVotableAfterAuthoritySet() public {
+        vm.warp(0);
+        hats.mintHat(CREATOR_HAT, creator);
+        uint256 id = dd.proposalsCount();
+        vm.prank(creator);
+        dd.createProposal(bytes("restricted"), bytes32(0), 10, 2, _emptyBatches(2), _one(EXEC_SUBJECT));
+        assertEq(dd.proposalCreatedAt(id), 0, "precondition: legacy restricted poll has a zero anchor");
+
+        vm.warp(100);
+        _setAuthority(address(auth));
+
+        // `voter`: DD_VOTE + EXEC_SUBJECT member ⇒ passes both gates on the zero anchor.
+        auth.setKeyActive(voter, AccessV2PermKeys.DD_VOTE, uint64(1));
+        auth.setSubjectActive(EXEC_SUBJECT, voter, uint64(1));
+        _voteYes(voter, id);
+
+        // `rando`: holds DD_VOTE but NOT EXEC_SUBJECT ⇒ subject gate still bites ⇒ RoleNotAllowed.
+        auth.setKeyActive(rando, AccessV2PermKeys.DD_VOTE, uint64(1));
+        uint8[] memory idx = new uint8[](1);
+        idx[0] = 0;
+        uint8[] memory w = new uint8[](1);
+        w[0] = 100;
+        vm.prank(rando);
+        vm.expectRevert(VotingErrors.RoleNotAllowed.selector);
+        dd.vote(id, idx, w);
+    }
+
     /*───────────────────────── restricted-poll subjects ─────────────────────────*/
 
     function testAuthorityRestrictedPollSubject() public {

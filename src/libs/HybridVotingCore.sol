@@ -75,7 +75,9 @@ library HybridVotingCore {
             for (uint256 i = 0; i < len;) {
                 bool ok = a == address(0)
                     ? l.hats.isWearerOfHat(voter, p.pollHatIds[i])
-                    : IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], voter) <= createdAt;
+                    : VotingMath.activationOk(
+                        IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], voter), createdAt
+                    );
                 if (ok) {
                     hasAllowedHat = true;
                     break;
@@ -210,12 +212,14 @@ library HybridVotingCore {
     ) internal view returns (bool) {
         uint256 sid = l.proposalClassSubjects[id][classIdx];
         if (sid != 0) {
-            return IMembershipAuthority(a).activeMemberSince(sid, voter) <= createdAt;
+            return VotingMath.activationOk(IMembershipAuthority(a).activeMemberSince(sid, voter), createdAt);
         }
         uint256 n = cls.hatIds.length;
         if (n == 0) return true; // open class (legacy `cls.hatIds.length == 0` parity)
         for (uint256 i; i < n;) {
-            if (IMembershipAuthority(a).activeMemberSince(cls.hatIds[i], voter) <= createdAt) return true;
+            if (VotingMath.activationOk(IMembershipAuthority(a).activeMemberSince(cls.hatIds[i], voter), createdAt)) {
+                return true;
+            }
             unchecked {
                 ++i;
             }

@@ -484,12 +484,16 @@ contract DirectDemocracyVoting is Initializable {
         // Authority-path activation anchor: a voter is only eligible if they were an active member
         // AT OR BEFORE proposal creation (closes every instant-add / mid-proposal-packing channel at
         // the READ side, §4 electorate gate). Unused on the legacy path.
+        // createdAt == 0 is the pre-authority sentinel (legacy proposal that predates the anchor):
+        // enforce membership only, not the activation gate — see VotingMath.activationOk (C5/C8/C9).
         uint64 createdAt = l.proposalCreatedAt[id];
         if (_msgSender() != address(l.executor)) {
             bool canVote = a == address(0)
                 ? HatManager.hasAnyHat(l.hats, l.votingHatIds, _msgSender())
-                : IMembershipAuthority(a).activeMemberSince(_msgSender(), AccessV2PermKeys.DD_VOTE, bytes32(0))
-                    <= createdAt;
+                : VotingMath.activationOk(
+                    IMembershipAuthority(a).activeMemberSince(_msgSender(), AccessV2PermKeys.DD_VOTE, bytes32(0)),
+                    createdAt
+                );
             if (!canVote) revert VotingErrors.Unauthorized();
         }
         Proposal storage p = l._proposals[id];
@@ -504,7 +508,9 @@ contract DirectDemocracyVoting is Initializable {
             for (uint256 i = 0; i < pollHatLen;) {
                 bool ok = a == address(0)
                     ? l.hats.isWearerOfHat(_msgSender(), p.pollHatIds[i])
-                    : IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], _msgSender()) <= createdAt;
+                    : VotingMath.activationOk(
+                        IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], _msgSender()), createdAt
+                    );
                 if (ok) {
                     hasAllowedHat = true;
                     break;
