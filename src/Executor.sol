@@ -50,10 +50,16 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     /// @custom:storage-location erc7201:poa.executor.storage
     struct Layout {
         address allowedCaller; // sole authorised governor
-        IHats hats; // Hats Protocol interface
+        IHats hats; // Hats Protocol interface (repointed to the MembershipAuthority when migrated, §4.7)
         mapping(address => bool) authorizedHatMinters; // contracts authorized to request hat minting
         address pendingCaller;
         uint256 callerChangeTimestamp;
+        // ─── Access v2 dual-path (append-only tail) ───
+        // Access v2 repoints `hats` itself to the org's MembershipAuthority (§4.7): there is NO second
+        // pointer. `legacyHats` stashes the ORIGINAL Hats address on the first repoint so a rollback
+        // (`setMembershipAuthority(0)`) can restore the byte-identical legacy read. address(0) = never
+        // repointed (still on legacy Hats).
+        address legacyHats;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.executor.storage");
@@ -73,6 +79,8 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     event CallExecuted(uint256 indexed proposalId, uint256 indexed index, address target, uint256 value);
     event Swept(address indexed to, uint256 amount);
     event HatsSet(address indexed hats);
+    /// @notice Emitted when {setMembershipAuthority} repoints (or restores) the `hats` slot (§4.7).
+    event HatsRepointed(address indexed hats);
     event HatMinterAuthorized(address indexed minter, bool authorized);
     event HatsMinted(address indexed user, uint256[] hatIds);
     event ModuleConfigured(address indexed target, bytes4 indexed selector);
@@ -151,6 +159,34 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         emit HatMinterAuthorized(minter, authorized);
     }
 
+    /// @notice Repoint {hats} to the org's MembershipAuthority (or back to legacy Hats at `address(0)`).
+    /// @dev §4.7: the repoint IS the mechanism — there is NO second pointer. Every `hats()` consumer
+    ///      (ZkEmailInvites' hats-surface resolution, {mintHatsForUser}'s `l.hats.mintHat`) follows
+    ///      automatically because the authority exposes an IHats-shaped {mintHat}. On the FIRST repoint
+    ///      the original Hats address is stashed in `legacyHats`; `setMembershipAuthority(0)` restores it
+    ///      byte-identically (the rollback path). AUTH mirrors {setHatMinterAuthorization}: owner, the
+    ///      allowed caller (governance), or the Executor itself via a self-targeted batch (the sole
+    ///      other self-target-permitted selector) — so a renounced org can repoint through governance.
+    ///      Emits HatsRepointed.
+    function setMembershipAuthority(address authority) external {
+        Layout storage l = _layout();
+        if (msg.sender != owner() && msg.sender != l.allowedCaller && msg.sender != address(this)) {
+            revert UnauthorizedCaller();
+        }
+        if (authority != address(0)) {
+            // Repoint: stash the original Hats on the first repoint only, then point `hats` at the authority.
+            if (l.legacyHats == address(0)) l.legacyHats = address(l.hats);
+            l.hats = IHats(authority);
+        } else {
+            // Rollback: restore the original Hats. No-op if never repointed (legacyHats == 0).
+            if (l.legacyHats != address(0)) {
+                l.hats = IHats(l.legacyHats);
+                l.legacyHats = address(0);
+            }
+        }
+        emit HatsRepointed(address(l.hats));
+    }
+
     function mintHatsForUser(address user, uint256[] calldata hatIds) external {
         Layout storage l = _layout();
         if (!l.authorizedHatMinters[msg.sender]) revert UnauthorizedCaller();
@@ -177,9 +213,13 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
             if (batch[i].target == address(this)) {
                 // Self-targeting is forbidden EXCEPT for a narrow allowlist of admin functions that
                 // governance must be able to invoke on the Executor itself (impossible otherwise once
-                // ownership is renounced). Only setHatMinterAuthorization is permitted; every other
-                // self-admin function (setCaller, pause, sweep, …) still reverts TargetSelf.
-                if (bytes4(batch[i].data) != this.setHatMinterAuthorization.selector) revert TargetSelf();
+                // ownership is renounced): setHatMinterAuthorization and setMembershipAuthority (the
+                // §4.7 hats repoint / rollback). Every other self-admin function (setCaller, pause,
+                // sweep, …) still reverts TargetSelf.
+                bytes4 sel = bytes4(batch[i].data);
+                if (sel != this.setHatMinterAuthorization.selector && sel != this.setMembershipAuthority.selector) {
+                    revert TargetSelf();
+                }
             }
 
             (bool ok, bytes memory ret) = batch[i].target.call{value: batch[i].value}(batch[i].data);
@@ -351,6 +391,13 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     /// @notice Whether `minter` is authorized to request hat minting via {mintHatsForUser}.
     function isAuthorizedHatMinter(address minter) external view returns (bool) {
         return _layout().authorizedHatMinters[minter];
+    }
+
+    /// @notice The org's MembershipAuthority when migrated (§4.7), else `address(0)` (legacy Hats).
+    /// @dev Derived: once repointed, `legacyHats` holds the original and `hats` IS the authority.
+    function membershipAuthority() external view returns (address) {
+        Layout storage l = _layout();
+        return l.legacyHats == address(0) ? address(0) : address(l.hats);
     }
 
     /* accept ETH for payable calls within a batch */

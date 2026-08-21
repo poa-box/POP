@@ -12,6 +12,8 @@ import {
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {HatManager} from "./libs/HatManager.sol";
 import {WebAuthnLib} from "./libs/WebAuthnLib.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
+import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 
 interface IUniversalAccountRegistry {
     function getUsername(address account) external view returns (string memory);
@@ -82,6 +84,12 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         // Optional secondary admin (e.g. RoleManager) permitted to update the member-hat
         // auto-mint list alongside the executor. address(0) = none.
         address configAdmin;
+        // ─── Access v2 dual-path (append-only tail) ───
+        // When address(0) the join path mints the LEGACY `memberHatIds` list byte-identically.
+        // When set, the auto-join subject list is the QJ_AUTOJOIN-permed default-ALLOW subjects
+        // enumerated off the MembershipAuthority; mints still flow through the Executor unchanged
+        // (its IHats-shaped mintHat resolves against the authority). address(0) again = rollback.
+        address membershipAuthority;
     }
 
     /* ───────── Passkey Enrollment Struct ──────── */
@@ -107,6 +115,8 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
     event MemberHatIdsUpdated(uint256[] hatIds);
     /// @notice The secondary config admin (may update the member-hat auto-mint list) changed.
     event ConfigAdminSet(address indexed admin);
+    /// @notice The org's MembershipAuthority pointer changed (address(0) = legacy Hats path).
+    event MembershipAuthoritySet(address indexed authority);
     event QuickJoined(address indexed user, uint256[] hatIds);
     event QuickJoinedByMaster(address indexed master, address indexed user, uint256[] hatIds);
     event UniversalFactoryUpdated(address indexed universalFactory);
@@ -228,6 +238,15 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         emit ConfigAdminSet(admin);
     }
 
+    /// @notice Repoint this module to the org's MembershipAuthority. `address(0)` restores the legacy
+    ///         Hats path (rollback). Executor-only. Emits MembershipAuthoritySet.
+    /// @dev When set, the auto-join subject list is enumerated off QJ_AUTOJOIN (default-ALLOW roles);
+    ///      mints still route through the Executor's unchanged {mintHatsForUser}.
+    function setMembershipAuthority(address authority) external onlyExecutor {
+        _layout().membershipAuthority = authority;
+        emit MembershipAuthoritySet(authority);
+    }
+
     function setUniversalFactory(address factory) external onlyMasterDeploy {
         _layout().universalFactory = IUniversalPasskeyAccountFactory(factory);
         emit UniversalFactoryUpdated(factory);
@@ -269,17 +288,30 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         return true;
     }
 
+    /// @dev DUAL-PATH auto-join subject list. When the authority is unset, returns a memory copy of the
+    ///      LEGACY `memberHatIds` array (byte-identical mint set + event payload). When set, returns the
+    ///      QJ_AUTOJOIN-permed default-ALLOW subjects enumerated off the authority. Either way the ids
+    ///      flow through the Executor's unchanged {mintHatsForUser}, whose `l.hats.mintHat` resolves
+    ///      against the authority for migrated orgs (§4.6).
+    function _memberSubjects() private view returns (uint256[] memory) {
+        Layout storage l = _layout();
+        address a = l.membershipAuthority;
+        if (a == address(0)) return HatManager.getHatArray(l.memberHatIds);
+        return IMembershipAuthority(a).subjectsWithKey(AccessV2PermKeys.QJ_AUTOJOIN, bytes32(0));
+    }
+
     function _quickJoin(address user) private nonReentrant {
         if (user == address(0)) revert ZeroUser();
 
         Layout storage l = _layout();
 
-        // Request executor to mint all configured member hats to the user
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(user, l.memberHatIds);
+        // Request executor to mint all configured auto-join subjects to the user
+        uint256[] memory hatIds = _memberSubjects();
+        if (hatIds.length > 0) {
+            IExecutorHatMinter(l.executor).mintHatsForUser(user, hatIds);
         }
 
-        emit QuickJoined(user, l.memberHatIds);
+        emit QuickJoined(user, hatIds);
     }
 
     /* ───────── Public user paths ─────── */
@@ -290,12 +322,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         string memory existing = l.accountRegistry.getUsername(_msgSender());
         if (bytes(existing).length == 0) revert NoUsername();
 
-        // Request executor to mint all configured member hats to the user
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(_msgSender(), l.memberHatIds);
+        // Request executor to mint all configured auto-join subjects to the user
+        uint256[] memory hatIds = _memberSubjects();
+        if (hatIds.length > 0) {
+            IExecutorHatMinter(l.executor).mintHatsForUser(_msgSender(), hatIds);
         }
 
-        emit QuickJoined(_msgSender(), l.memberHatIds);
+        emit QuickJoined(_msgSender(), hatIds);
     }
 
     /* ───────── Passkey join paths ─────── */
@@ -316,12 +349,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
 
-        // 2. Mint member hats to the account
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(account, l.memberHatIds);
+        // 2. Mint auto-join subjects to the account
+        uint256[] memory hatIds = _memberSubjects();
+        if (hatIds.length > 0) {
+            IExecutorHatMinter(l.executor).mintHatsForUser(account, hatIds);
         }
 
-        emit QuickJoinedWithPasskeyByMaster(_msgSender(), account, passkey.credentialId, l.memberHatIds);
+        emit QuickJoinedWithPasskeyByMaster(_msgSender(), account, passkey.credentialId, hatIds);
     }
 
     /* ───────── Register + join paths ─────── */
@@ -347,12 +381,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         // 1. Register the username via signature (reverts if sig invalid)
         l.accountRegistry.registerAccountBySig(user, username, deadline, nonce, signature);
 
-        // 2. Mint member hats
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(user, l.memberHatIds);
+        // 2. Mint auto-join subjects
+        uint256[] memory hatIds = _memberSubjects();
+        if (hatIds.length > 0) {
+            IExecutorHatMinter(l.executor).mintHatsForUser(user, hatIds);
         }
 
-        emit RegisterAndQuickJoined(user, username, l.memberHatIds);
+        emit RegisterAndQuickJoined(user, username, hatIds);
     }
 
     /// @notice Create a passkey account, register a username, and join the org in one transaction.
@@ -391,12 +426,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
 
-        // 3. Mint member hats
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(account, l.memberHatIds);
+        // 3. Mint auto-join subjects
+        uint256[] memory hatIds = _memberSubjects();
+        if (hatIds.length > 0) {
+            IExecutorHatMinter(l.executor).mintHatsForUser(account, hatIds);
         }
 
-        emit RegisterAndQuickJoinedWithPasskey(account, passkey.credentialId, username, l.memberHatIds);
+        emit RegisterAndQuickJoinedWithPasskey(account, passkey.credentialId, username, hatIds);
     }
 
     /* ───────── Vouch-claim paths: mint caller-specified hats ─────── */
@@ -533,21 +569,20 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         account = l.universalFactory
             .createAccount(passkey.credentialId, passkey.publicKeyX, passkey.publicKeyY, passkey.salt);
 
-        // 3. Mint member hats
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(account, l.memberHatIds);
+        // 3. Mint auto-join subjects
+        uint256[] memory hatIds = _memberSubjects();
+        if (hatIds.length > 0) {
+            IExecutorHatMinter(l.executor).mintHatsForUser(account, hatIds);
         }
 
-        emit RegisterAndQuickJoinedWithPasskeyByMaster(
-            _msgSender(), account, passkey.credentialId, username, l.memberHatIds
-        );
+        emit RegisterAndQuickJoinedWithPasskeyByMaster(_msgSender(), account, passkey.credentialId, username, hatIds);
     }
 
     /* ───────── Master-deploy helper paths ─────── */
 
     function quickJoinNoUserMasterDeploy(address newUser) external onlyMasterDeploy {
         _quickJoin(newUser);
-        emit QuickJoinedByMaster(_msgSender(), newUser, _layout().memberHatIds);
+        emit QuickJoinedByMaster(_msgSender(), newUser, _memberSubjects());
     }
 
     function quickJoinWithUserMasterDeploy(address newUser) external onlyMasterDeploy nonReentrant {
@@ -556,12 +591,13 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
         string memory existing = l.accountRegistry.getUsername(newUser);
         if (bytes(existing).length == 0) revert NoUsername();
 
-        // Request executor to mint all configured member hats to the user
-        if (l.memberHatIds.length > 0) {
-            IExecutorHatMinter(l.executor).mintHatsForUser(newUser, l.memberHatIds);
+        // Request executor to mint all configured auto-join subjects to the user
+        uint256[] memory hatIds = _memberSubjects();
+        if (hatIds.length > 0) {
+            IExecutorHatMinter(l.executor).mintHatsForUser(newUser, hatIds);
         }
 
-        emit QuickJoinedByMaster(_msgSender(), newUser, l.memberHatIds);
+        emit QuickJoinedByMaster(_msgSender(), newUser, hatIds);
     }
 
     /* ───────── Misc view helpers ─────── */
@@ -583,6 +619,11 @@ contract QuickJoin is Initializable, ContextUpgradeable, ReentrancyGuardUpgradea
 
     function masterDeployAddress() external view returns (address) {
         return _layout().masterDeployAddress;
+    }
+
+    /// @notice The org's MembershipAuthority (address(0) = legacy Hats path).
+    function membershipAuthority() external view returns (address) {
+        return _layout().membershipAuthority;
     }
 
     /* ───────── Hat Management View Functions ─────────── */

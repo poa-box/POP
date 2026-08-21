@@ -12,6 +12,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {HatManager} from "./libs/HatManager.sol";
 import {ValidationLib} from "./libs/ValidationLib.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
+import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 
 interface IParticipationToken is IERC20 {
     function mint(address to, uint256 amount) external;
@@ -60,6 +62,11 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         // Optional secondary admin (e.g. RoleManager) permitted to set creator/member hat
         // allowlists alongside the executor. address(0) = none.
         address configAdmin;
+        // ─── Access v2 dual-path (append-only tail) ───
+        // When address(0) the module reads its LEGACY Hats path byte-identically (unmigrated org).
+        // When set, creator/member checks route through the org's MembershipAuthority per the frozen
+        // EDU_CREATE / EDU_MEMBER perm keys. Setting back to address(0) IS the rollback path.
+        address membershipAuthority;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.educationhub.storage");
@@ -84,6 +91,8 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     event HatsSet(address indexed newHats);
     /// @notice The secondary config admin (may set creator/member hat allowlists) changed.
     event ConfigAdminSet(address indexed admin);
+    /// @notice The org's MembershipAuthority pointer changed (address(0) = legacy Hats path).
+    event MembershipAuthoritySet(address indexed authority);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -212,6 +221,14 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         emit ConfigAdminSet(admin);
     }
 
+    /// @notice Repoint this module to the org's MembershipAuthority. `address(0)` restores the legacy
+    ///         Hats path (rollback). Executor-only. Emits MembershipAuthoritySet.
+    /// @dev When set, creator/member checks fold through EDU_CREATE / EDU_MEMBER perm keys.
+    function setMembershipAuthority(address authority) external onlyExecutor {
+        _layout().membershipAuthority = authority;
+        emit MembershipAuthoritySet(authority);
+    }
+
     /*────────── Pause Control (executor) ───────*/
     function pause() external {
         if (_msgSender() != _layout().executor) revert NotExecutor();
@@ -311,16 +328,22 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     }
 
     /*────────── Internal Helper Functions ─────────── */
-    /// @dev Returns true if `user` wears *any* creator hat.
+    /// @dev Returns true if `user` may CREATE. DUAL-PATH: legacy Hats allowlist when the authority is
+    ///      unset (byte-identical), else the EDU_CREATE perm fold on the MembershipAuthority.
     function _hasCreatorHat(address user) internal view returns (bool) {
         Layout storage l = _layout();
-        return HatManager.hasAnyHat(l.hats, l.creatorHatIds, user);
+        address a = l.membershipAuthority;
+        if (a == address(0)) return HatManager.hasAnyHat(l.hats, l.creatorHatIds, user);
+        return IMembershipAuthority(a).hasPerm(user, AccessV2PermKeys.EDU_CREATE, bytes32(0)) != 0;
     }
 
-    /// @dev Returns true if `user` wears *any* member hat.
+    /// @dev Returns true if `user` is a MEMBER. DUAL-PATH: legacy Hats allowlist when the authority is
+    ///      unset (byte-identical), else the EDU_MEMBER perm fold on the MembershipAuthority.
     function _hasMemberHat(address user) internal view returns (bool) {
         Layout storage l = _layout();
-        return HatManager.hasAnyHat(l.hats, l.memberHatIds, user);
+        address a = l.membershipAuthority;
+        if (a == address(0)) return HatManager.hasAnyHat(l.hats, l.memberHatIds, user);
+        return IMembershipAuthority(a).hasPerm(user, AccessV2PermKeys.EDU_MEMBER, bytes32(0)) != 0;
     }
 
     /*────────── Public getters for storage variables ─────────*/
@@ -346,6 +369,11 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
 
     function executor() external view returns (address) {
         return _layout().executor;
+    }
+
+    /// @notice The org's MembershipAuthority (address(0) = legacy Hats path).
+    function membershipAuthority() external view returns (address) {
+        return _layout().membershipAuthority;
     }
 
     /*────────── Hat Management View Functions ─────────── */
