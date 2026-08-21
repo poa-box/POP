@@ -130,7 +130,11 @@ contract TaskManagerAccessV2Test is Test {
 
     function _setPerm(uint256 subject, bytes32 ctx, uint256 value, bool inherit) internal {
         vm.prank(executor);
-        auth.setPerm(subject, AccessV2PermKeys.TM_PERMS, ctx, _word(value, inherit));
+        // Freeze amendment W4: TaskManager's authority arm queries ctx = projectId + 1 (project
+        // ids start at 0 and would collide with the global ctx 0), so project rows are WRITTEN at
+        // the offset ctx too. Global rows (ctx 0) pass through unshifted.
+        bytes32 effectiveCtx = ctx == bytes32(0) ? ctx : bytes32(uint256(ctx) + 1);
+        auth.setPerm(subject, AccessV2PermKeys.TM_PERMS, effectiveCtx, _word(value, inherit));
     }
 
     /// @dev Create a real project (legacy creator path) so project-scoped setters have a live pid.

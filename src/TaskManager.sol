@@ -1449,13 +1449,17 @@ contract TaskManager is Initializable, ContextUpgradeable {
         Layout storage l = _layout();
 
         // ── Access v2 authority arm ──
-        // Effective mask = authority.hasPerm(user, TM_PERMS, ctx=projectId). The packed-word
+        // Effective mask = authority.hasPerm(user, TM_PERMS, ctx). The packed-word
         // inherit/global-union semantics live authority-side (§3 CTX RESOLUTION); TaskManager just
         // reads the folded value. TM_PERMS is OR-mask-tagged. Only the low 8 bits are meaningful to
         // TaskPerm today, so the fold is narrowed to uint8 without losing any defined flag.
+        // CTX CONVENTION (freeze amendment W4): ctx = projectId + 1 — TM project ids START AT 0,
+        // and ctx 0 is the authority's GLOBAL context, so the identity mapping would collide every
+        // org's first project with its global rows. The +1 offset is bijective and collision-free;
+        // seeding derives per-project rows with the same convention.
         address a = l.membershipAuthority;
         if (a != address(0)) {
-            return uint8(IMembershipAuthority(a).hasPerm(user, AccessV2PermKeys.TM_PERMS, bytes32(pid)));
+            return uint8(IMembershipAuthority(a).hasPerm(user, AccessV2PermKeys.TM_PERMS, bytes32(uint256(pid) + 1)));
         }
 
         // ── Legacy Hats arm (byte-identical to pre-v2) ──
