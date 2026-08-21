@@ -590,6 +590,24 @@ contract MembershipAuthorityDelegationTest is MembershipAuthorityBase {
         auth.delegatedGrant(member, alice);
     }
 
+    /// @dev finding C1 RESIDUAL (re-verify): delegatedOffer carried the old Ban-only guard, so it
+    ///      could still launder a sticky governance grant — and worse, on an ACTIVE officer (it
+    ///      writes the rule immediately with no membership check). The broadened guard must apply.
+    function testDelegatedOfferCannotLaunderStickyGovernanceGrant() public {
+        vm.prank(alice);
+        auth.claim(open);
+        auth.grant(member, alice, false); // sticky governance grant, alice ACTIVE member
+        assertTrue(auth.isMember(member, alice));
+
+        vm.prank(bob);
+        vm.expectRevert(IMembershipAuthority.GrantBlockedByGovernanceBan.selector);
+        auth.delegatedOffer(member, alice);
+
+        // Sticky protection intact: rule still governance + non-delegable.
+        (bool present,, AccessV2Types.RuleAuthor author, bool delegable) = auth.getRuleFlags(member, alice);
+        assertTrue(present && author == AccessV2Types.RuleAuthor.Governance && !delegable, "sticky rule untouched");
+    }
+
     function testDelegatedGrantStillWorksOverDelegableGovernanceGrant() public {
         // A DELEGABLE governance grant is touchable — the D3 guard must not over-block it.
         vm.prank(alice);
@@ -950,5 +968,38 @@ contract MembershipAuthorityVouchClearTest is MembershipAuthorityBase {
         auth.vouch(gated, alice);
         assertTrue(auth.eligible(gated, alice), "fresh vouch restores eligibility");
         assertEq(auth.vouchCount(gated, alice), 1, "count reset to 1 on fresh vouch");
+    }
+
+    /// @dev finding C2/C3/C6 RESIDUAL (re-verify): the SENTINEL-only fix left a live vector — a
+    ///      fresh vouch() after clearUserVouches resets wearerVouchEpoch back to the recoverable
+    ///      subject epoch, reviving the STALE per-voucher record so its revokeVouch underflows the
+    ///      count. The per-user generation bump must strand the stale record permanently.
+    function testClearThenFreshVouchThenStaleRevokeCannotUnderflow() public {
+        // Two vouchers: bob (will be cleared/stale) and carol (fresh).
+        vm.prank(carol);
+        auth.claim(voucher);
+
+        vm.prank(bob);
+        auth.vouch(gated, alice); // bob's record written at gen 0
+        assertTrue(auth.eligible(gated, alice));
+
+        auth.clearUserVouches(gated, alice); // gen bumped 0 -> 1; bob's record now stranded forever
+        assertFalse(auth.eligible(gated, alice));
+
+        // Fresh voucher carol vouches: resets wearerVouchEpoch to the live epoch, count 1 (gen 1).
+        vm.prank(carol);
+        auth.vouch(gated, alice);
+        assertEq(auth.vouchCount(gated, alice), 1, "carol's fresh vouch");
+        vm.prank(carol);
+        auth.revokeVouch(gated, alice); // count 1 -> 0, clean
+        assertEq(auth.vouchCount(gated, alice), 0);
+
+        // The STALE bob record (gen 0) is dead: revoke reverts, never decrements the fresh count.
+        vm.prank(bob);
+        vm.expectRevert(IMembershipAuthority.HasNotVouched.selector);
+        auth.revokeVouch(gated, alice);
+
+        assertEq(auth.vouchCount(gated, alice), 0, "no underflow: count stays 0");
+        assertFalse(auth.eligible(gated, alice), "no forged eligibility");
     }
 }

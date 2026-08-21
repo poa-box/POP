@@ -115,7 +115,11 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
             l.currentVouchCount[subject][user] = 0;
             l.wearerVouchEpoch[subject][user] = epoch;
         }
-        if (l.vouchers[subject][user][msg.sender] && l.voucherRecordEpoch[subject][user][msg.sender] == epoch) {
+        uint64 gen = l.userVouchGen[subject][user];
+        if (
+            l.vouchers[subject][user][msg.sender] && l.voucherRecordEpoch[subject][user][msg.sender] == epoch
+                && l.voucherRecordGen[subject][user][msg.sender] == gen
+        ) {
             revert AlreadyVouched();
         }
         uint256 day = block.timestamp / Lib.SECONDS_PER_DAY;
@@ -125,6 +129,7 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
 
         l.vouchers[subject][user][msg.sender] = true;
         l.voucherRecordEpoch[subject][user][msg.sender] = epoch;
+        l.voucherRecordGen[subject][user][msg.sender] = gen;
         unchecked {
             l.currentVouchCount[subject][user] += 1;
         }
@@ -137,13 +142,19 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
         Lib._gateNonExecutor(l);
         uint64 epoch = l.vouchEpoch[subject];
         if (l.wearerVouchEpoch[subject][user] != epoch) revert HasNotVouched();
-        if (!l.vouchers[subject][user][msg.sender] || l.voucherRecordEpoch[subject][user][msg.sender] != epoch) {
+        if (
+            !l.vouchers[subject][user][msg.sender] || l.voucherRecordEpoch[subject][user][msg.sender] != epoch
+                || l.voucherRecordGen[subject][user][msg.sender] != l.userVouchGen[subject][user]
+        ) {
             revert HasNotVouched();
         }
+        // Defense-in-depth: a stale record can never make this underflow (the gen check above
+        // strands cleared records), but guard the decrement explicitly so no future path can wrap
+        // currentVouchCount to type(uint32).max and forge eligibility.
+        uint32 c = l.currentVouchCount[subject][user];
+        if (c == 0) revert HasNotVouched();
         l.vouchers[subject][user][msg.sender] = false;
-        unchecked {
-            l.currentVouchCount[subject][user] -= 1;
-        }
+        l.currentVouchCount[subject][user] = c - 1;
         emit VouchRevoked(subject, user, msg.sender);
         Lib._reconcileOne(l, subject, user);
     }

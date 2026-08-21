@@ -187,6 +187,13 @@ library MembershipAuthorityLogic {
         mapping(uint256 => mapping(address => uint64)) wearerVouchEpoch;
         mapping(uint256 => mapping(address => mapping(address => bool))) vouchers;
         mapping(uint256 => mapping(address => mapping(address => uint64))) voucherRecordEpoch;
+        // Per-user vouch generation (appended, ERC-7201-safe). Bumped by clearUserVouches to
+        // PERMANENTLY strand that user's prior per-voucher records without disturbing other users
+        // (the subject-level vouchEpoch can't be bumped per-user). Voucher records validate against
+        // BOTH the subject epoch and this generation, so a stranded record can never be revived by
+        // a later fresh vouch resetting wearerVouchEpoch — closing the revokeVouch underflow.
+        mapping(uint256 => mapping(address => uint64)) userVouchGen;
+        mapping(uint256 => mapping(address => mapping(address => uint64))) voucherRecordGen;
         mapping(address => mapping(uint256 => uint32)) dailyVouchCount;
         mapping(uint256 => mapping(address => bool)) emailVerified;
         mapping(uint256 => uint256[]) groupRoles;
@@ -514,7 +521,11 @@ library MembershipAuthorityLogic {
         if (user == address(0)) revert ZeroAddress();
         uint256 managerSubject = _requireManager(l, subject, msg.sender, CAP_GRANT);
         RuleRec storage r = l.ruleOf[subject][user];
-        if (r.kind == AccessV2Types.RuleKind.Ban && r.author == AccessV2Types.RuleAuthor.Governance) {
+        // Same sticky-supremacy guard as delegatedGrant (broader vector: delegatedOffer writes the
+        // rule immediately with no membership check, so it could launder a sticky governance grant
+        // on an ACTIVE officer, not just a renounced reserved seat). Reject any non-delegable
+        // governance rule (grant OR ban); kind != None excludes the empty slot.
+        if (r.kind != AccessV2Types.RuleKind.None && r.author == AccessV2Types.RuleAuthor.Governance && !r.delegable) {
             revert GrantBlockedByGovernanceBan();
         }
         _writeRuleEmit(
@@ -671,12 +682,16 @@ library MembershipAuthorityLogic {
     function clearUserVouches(uint256 subject, address user) external nonReentrant(layout()) {
         Layout storage l = layout();
         _onlyExecutor(l);
-        // Strand the wearer's vouch state at the SENTINEL epoch (v1 clearWearerVouches precedent):
-        // pinning to the CURRENT epoch would leave the per-voucher records (vouchers /
-        // voucherRecordEpoch) valid, so a later revokeVouch by one of those vouchers would pass its
-        // epoch guards and `currentVouchCount -= 1` from 0 would underflow to type(uint32).max,
-        // restoring governance-cleared eligibility. SENTINEL never equals l.vouchEpoch, so those
-        // stale records go dead: revokeVouch reverts HasNotVouched and _vouchMet reads 0.
+        // Strand the wearer's vouch state PERMANENTLY by bumping the per-user generation: every
+        // prior per-voucher record (vouchers / voucherRecordGen) is now stale forever, because
+        // vouch()/revokeVouch() validate records against BOTH the subject epoch AND this generation.
+        // The SENTINEL epoch reset alone was insufficient — a later fresh vouch() resets
+        // wearerVouchEpoch back to the recoverable subject epoch, which would have revived the stale
+        // records and let their revokeVouch underflow currentVouchCount to type(uint32).max,
+        // restoring governance-cleared eligibility. The generation bump makes that impossible.
+        unchecked {
+            l.userVouchGen[subject][user] += 1;
+        }
         l.currentVouchCount[subject][user] = 0;
         l.wearerVouchEpoch[subject][user] = SENTINEL;
         emit UserVouchesCleared(subject, user);
