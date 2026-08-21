@@ -296,7 +296,7 @@ sequenceDiagram
     participant Z as ZkEmailInvites
     participant D as PoaDKIMRegistry
     participant E as Executor / EligibilityModule
-    U->>B: Send/forward an email; paste the raw .eml
+    U->>B: Send/forward an email, paste the raw .eml
     B->>B: Generate Groth16 proof (domain or specific-address circuit)
     B->>Z: claimRoleByDomain / claimRoleByEmail (proof, hatIds, merkleProof)
     Z->>Z: Verify Groth16 proof
