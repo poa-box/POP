@@ -8,6 +8,8 @@ import "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgra
 /*────────────── External Hats interface ─────────────*/
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {HatManager} from "./libs/HatManager.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
+import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 
 /*──────────────────  Participation Token  ──────────────────*/
 contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyGuardUpgradeable {
@@ -70,6 +72,10 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         // Optional secondary admin (e.g. RoleManager) permitted to set member/approver hat
         // allowlists alongside the executor. address(0) = none.
         address configAdmin;
+        // ─── Access v2 dual-path (append-only tail) ───
+        // When non-zero, member/approver reads route through the org's MembershipAuthority instead
+        // of the legacy Hats path. address(0) = legacy path (byte-identical; also the rollback state).
+        address membershipAuthority;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.participationtoken.storage");
@@ -93,6 +99,9 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     event SymbolSet(string newSymbol);
     /// @notice The secondary config admin (may set member/approver hat allowlists) changed.
     event ConfigAdminSet(address indexed admin);
+    /// @notice The org's MembershipAuthority pointer changed. `authority == address(0)` restores the
+    ///         legacy Hats member/approver path (rollback).
+    event MembershipAuthoritySet(address indexed authority);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -228,6 +237,14 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     function setConfigAdmin(address admin) external onlyExecutor {
         _layout().configAdmin = admin;
         emit ConfigAdminSet(admin);
+    }
+
+    /// @notice Repoint this module to the org's MembershipAuthority (Access v2).
+    /// @dev Executor-only. When `authority != address(0)` member/approver reads route through the
+    ///      authority; `address(0)` restores the legacy Hats path (rollback). Dual-path §4.5/§4.1.
+    function setMembershipAuthority(address authority) external onlyExecutor {
+        _layout().membershipAuthority = authority;
+        emit MembershipAuthoritySet(authority);
     }
 
     /// @notice Add or remove a member hat. Executor or configAdmin.
@@ -411,9 +428,16 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     }
 
     /*───────── Internal Helper Functions ─────────*/
-    /// @dev Returns true if `user` wears *any* hat of the requested type.
+    /// @dev Returns true if `user` wears *any* hat of the requested type. Access v2: when an authority
+    ///      is set, the check routes through `hasPerm(user, PT_MEMBER|PT_APPROVE, GLOBAL) != 0` (§4.5);
+    ///      legacy Hats otherwise (byte-identical / rollback path).
     function _hasHat(address user, HatType hatType) internal view returns (bool) {
         Layout storage l = _layout();
+        address a = l.membershipAuthority;
+        if (a != address(0)) {
+            bytes32 key = hatType == HatType.MEMBER ? AccessV2PermKeys.PT_MEMBER : AccessV2PermKeys.PT_APPROVE;
+            return IMembershipAuthority(a).hasPerm(user, key, bytes32(0)) != 0;
+        }
         uint256[] storage ids = hatType == HatType.MEMBER ? l.memberHatIds : l.approverHatIds;
         return HatManager.hasAnyHat(l.hats, ids, user);
     }
@@ -443,6 +467,11 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
 
     function executor() external view returns (address) {
         return _layout().executor;
+    }
+
+    /// @notice The org's MembershipAuthority pointer (Access v2). address(0) = legacy Hats path.
+    function membershipAuthority() external view returns (address) {
+        return _layout().membershipAuthority;
     }
 
     function requestCounter() external view returns (uint256) {
