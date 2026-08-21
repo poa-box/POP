@@ -42,6 +42,8 @@ contract MembershipAuthorityBase is Test {
         uint64 activatesAt
     );
     event ConfigLint(uint256 indexed subjectId, uint8 lintCode);
+    event UserVouchesCleared(uint256 indexed subjectId, address indexed user);
+    event RuleCleared(uint256 indexed subjectId, address indexed user);
 
     function setUp() public virtual {
         auth = _deployAuthority(ORG_ID);
@@ -528,6 +530,120 @@ contract MembershipAuthorityDelegationTest is MembershipAuthorityBase {
         vm.expectRevert(IMembershipAuthority.SelfManagedCycle.selector);
         auth.setManagerConfig(member, grp, 3, 0);
     }
+
+    /*───────── D2: cancelling a delegated OFFER must clear the ALLOW rule it wrote (finding C0) ─────────*/
+
+    function testCancelDelegatedOfferClearsRuleSoTargetCannotClaim() public {
+        // delegatedOffer writes a Delegated/Grant/delegable rule immediately, then a pending Offer
+        // carrying the delay. Cancelling must drop BOTH — otherwise the rule survives and the target
+        // claims instantly with no delay and no manager re-check (strictly worse than uncancelled).
+        vm.prank(bob);
+        uint256 pid = auth.delegatedOffer(member, alice);
+        (bool present,,,) = auth.getRuleFlags(member, alice);
+        assertTrue(present, "offer wrote an ALLOW rule at creation");
+
+        vm.expectEmit(true, true, false, false);
+        emit RuleCleared(member, alice);
+        auth.cancel(pid); // executor cancels
+
+        (present,,,) = auth.getRuleFlags(member, alice);
+        assertFalse(present, "cancel cleared the offer rule");
+        assertFalse(auth.eligible(member, alice), "target no longer eligible after cancel");
+
+        // Even after the delay window elapses, the cancelled offer must not admit alice.
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(alice);
+        vm.expectRevert(IMembershipAuthority.NotClaimable.selector);
+        auth.claim(member);
+    }
+
+    function testCancelDelegatedGrantLeavesNoRuleResidue() public {
+        // A Grant pending writes NO rule at creation, so cancel must not fabricate/clear one.
+        vm.prank(alice);
+        auth.claim(open); // alice in-org
+        vm.prank(bob);
+        uint256 pid = auth.delegatedGrant(member, alice);
+        (bool present,,,) = auth.getRuleFlags(member, alice);
+        assertFalse(present, "grant pending writes no rule");
+        auth.cancel(pid);
+        (present,,,) = auth.getRuleFlags(member, alice);
+        assertFalse(present, "still no rule after cancel");
+    }
+
+    /*───────── D3: delegatedGrant must not overwrite a sticky (non-delegable) governance grant (C1) ─────────*/
+
+    function testDelegatedGrantBlockedByStickyGovernanceGrant() public {
+        // Seed a sticky officer seat, then have the officer renounce (reserved seat: accepted=false,
+        // sticky rule survives). A delegate must NOT be able to launder the sticky protection away.
+        vm.prank(alice);
+        auth.claim(open); // alice in-org
+        auth.grant(member, alice, false); // sticky governance grant => member
+        assertTrue(auth.isMember(member, alice));
+        vm.prank(alice);
+        auth.renounce(member); // reserved seat; sticky rule survives
+        assertFalse(auth.isMember(member, alice), "renounced");
+        (bool present,, AccessV2Types.RuleAuthor author, bool delegable) = auth.getRuleFlags(member, alice);
+        assertTrue(present && author == AccessV2Types.RuleAuthor.Governance && !delegable, "sticky seat reserved");
+
+        vm.prank(bob);
+        vm.expectRevert(IMembershipAuthority.GrantBlockedByGovernanceBan.selector);
+        auth.delegatedGrant(member, alice);
+    }
+
+    function testDelegatedGrantStillWorksOverDelegableGovernanceGrant() public {
+        // A DELEGABLE governance grant is touchable — the D3 guard must not over-block it.
+        vm.prank(alice);
+        auth.claim(open);
+        auth.grant(member, alice, true); // delegable governance grant => member
+        vm.prank(alice);
+        auth.renounce(member); // delegable grant is deleted on renounce
+        (bool present,,,) = auth.getRuleFlags(member, alice);
+        assertFalse(present, "delegable grant cleared on renounce");
+        // fresh delegatedGrant on the now-ruleless in-org alice succeeds
+        vm.prank(bob);
+        uint256 pid = auth.delegatedGrant(member, alice);
+        assertEq(pid, 1);
+    }
+
+    /*───────── D4: delegatedGrant to an out-of-org target = OFFER, not a forced accept (C4/C7) ─────────*/
+
+    function testDelegatedGrantOutOfOrgFinalizesToOfferNotMembership() public {
+        // alice has never interacted with the org (out-of-org). A delegated grant must record an
+        // OFFER (consent model) — accepted stays false until alice claims — not force-join her.
+        vm.prank(bob);
+        uint256 pid = auth.delegatedGrant(member, alice);
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.expectEmit(true, true, false, true);
+        emit RoleOffered(member, alice, bob, true);
+        vm.prank(bob);
+        auth.finalize(pid);
+
+        assertFalse(auth.isMember(member, alice), "out-of-org grant is an offer, not membership");
+        (bool accepted,,,) = auth.getStatus(member, alice);
+        assertFalse(accepted, "accepted stays false until consent");
+        assertTrue(auth.eligible(member, alice), "offer rule written => claimable");
+
+        // alice consents by claiming.
+        vm.prank(alice);
+        auth.claim(member);
+        assertTrue(auth.isMember(member, alice), "member after own claim = consent");
+    }
+
+    function testDelegatedGrantInOrgFinalizesToDirectMembership() public {
+        // Control: an IN-ORG target is still directly accepted on finalize (RoleGranted, no offer).
+        vm.prank(alice);
+        auth.claim(open); // alice in-org
+        vm.prank(bob);
+        uint256 pid = auth.delegatedGrant(member, alice);
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.expectEmit(true, true, false, true);
+        emit RoleGranted(member, alice, bob, true);
+        vm.prank(bob);
+        auth.finalize(pid);
+        assertTrue(auth.isMember(member, alice), "in-org grant flips on directly");
+    }
 }
 
 /*═══════════════════════════════ Perm inverted union fold ═══════════════════════════════*/
@@ -758,5 +874,81 @@ contract MembershipAuthorityHatsViewTest is MembershipAuthorityBase {
 
     function testCheckHatWearerStatusConstantTrue() public view {
         assertTrue(auth.checkHatWearerStatus(12345, alice));
+    }
+}
+
+/*═══════════════════════════════ D1: clearUserVouches — no underflow, burn+emit on eviction ═══════════════════════════════*/
+
+contract MembershipAuthorityVouchClearTest is MembershipAuthorityBase {
+    uint256 internal voucher;
+    uint256 internal gated;
+
+    function setUp() public override {
+        super.setUp();
+        voucher = _defaultAllowRole("Voucher");
+        gated = _role("Vouched", 0); // deny-by-default, vouch-gated
+        auth.configureVouchAttestor(gated, 1, voucher); // quorum 1
+        // bob is a voucher-subject member
+        vm.prank(bob);
+        auth.claim(voucher);
+    }
+
+    /// @dev finding C2/C3/C6: after clearUserVouches, a stale voucher's revokeVouch must NOT
+    ///      underflow currentVouchCount to type(uint32).max and restore governance-cleared eligibility.
+    function testClearUserVouchesThenRevokeDoesNotUnderflow() public {
+        vm.prank(bob);
+        auth.vouch(gated, alice); // count 1 >= quorum => eligible
+        assertTrue(auth.eligible(gated, alice), "eligible after vouch");
+
+        auth.clearUserVouches(gated, alice); // governance strips the vouch
+        assertFalse(auth.eligible(gated, alice), "ineligible after clear");
+        assertEq(auth.vouchCount(gated, alice), 0, "count zeroed by clear");
+
+        // The stale voucher can no longer target the cleared record: revoke reverts instead of
+        // wrapping the count. Pre-fix this decremented 0 -> type(uint32).max and re-granted eligibility.
+        vm.prank(bob);
+        vm.expectRevert(IMembershipAuthority.HasNotVouched.selector);
+        auth.revokeVouch(gated, alice);
+
+        assertFalse(auth.eligible(gated, alice), "still ineligible: no underflow");
+        assertEq(auth.vouchCount(gated, alice), 0, "count still 0: no underflow");
+    }
+
+    /// @dev finding C10: clearUserVouches that evicts an accepted vouch-only member must emit the
+    ///      same-tx TransferSingle burn + MembershipReconciled (§5 emission contract).
+    function testClearUserVouchesEvictsAcceptedMemberWithBurnAndReconcile() public {
+        vm.prank(bob);
+        auth.vouch(gated, alice); // alice eligible via quorum
+        vm.prank(alice);
+        auth.claim(gated); // accepted member (vouch-only)
+        assertTrue(auth.isMember(gated, alice));
+
+        vm.expectEmit(true, true, false, false);
+        emit UserVouchesCleared(gated, alice);
+        vm.expectEmit(true, true, true, true);
+        emit TransferSingle(address(this), alice, address(0), gated, 1); // burn
+        vm.expectEmit(true, true, false, false);
+        emit MembershipReconciled(gated, alice);
+        auth.clearUserVouches(gated, alice);
+
+        assertFalse(auth.isMember(gated, alice), "evicted");
+        (bool accepted,,,) = auth.getStatus(gated, alice);
+        assertFalse(accepted, "accepted cleared by reconcile");
+    }
+
+    /// @dev A fresh voucher can still vouch the cleared user back to eligibility (clear is not permanent).
+    function testClearUserVouchesAllowsFreshVouchToRestoreEligibility() public {
+        vm.prank(bob);
+        auth.vouch(gated, alice);
+        auth.clearUserVouches(gated, alice);
+        assertFalse(auth.eligible(gated, alice));
+
+        // carol (a different voucher) vouches: the SENTINEL epoch is reset to the live epoch, count=1.
+        vm.prank(carol);
+        auth.claim(voucher);
+        vm.prank(carol);
+        auth.vouch(gated, alice);
+        assertTrue(auth.eligible(gated, alice), "fresh vouch restores eligibility");
+        assertEq(auth.vouchCount(gated, alice), 1, "count reset to 1 on fresh vouch");
     }
 }

@@ -495,7 +495,13 @@ library MembershipAuthorityLogic {
         _requireRole(l, subject);
         _requireManager(l, subject, msg.sender, CAP_GRANT);
         RuleRec storage r = l.ruleOf[subject][user];
-        if (r.kind == AccessV2Types.RuleKind.Ban && r.author == AccessV2Types.RuleAuthor.Governance) {
+        // A delegate may never overwrite a STICKY (non-delegable) governance rule — grant OR ban
+        // (§4 cross-delegate rule: sticky governance rules are untouchable by all delegates).
+        // Guarding Ban alone let a renounced sticky-seat officer (accepted=false, sticky Grant
+        // survives) be delegatedGrant→finalize'd, laundering the sticky protection into a
+        // delegable rule the delegate could then ban. kind != None excludes the empty slot
+        // (author defaults to Governance(0), delegable=false).
+        if (r.kind != AccessV2Types.RuleKind.None && r.author == AccessV2Types.RuleAuthor.Governance && !r.delegable) {
             revert GrantBlockedByGovernanceBan();
         }
         pendingId = _createPending(l, AccessV2Types.PendingKind.Grant, subject, user, false);
@@ -565,11 +571,27 @@ library MembershipAuthorityLogic {
         _deletePending(l, pendingId);
 
         if (action == AccessV2Types.PendingKind.Grant) {
+            // Defense-in-depth mirror of the delegatedGrant guard: never overwrite a sticky
+            // (non-delegable) governance rule at finalize either (D3).
+            RuleRec storage rr = l.ruleOf[subject][user];
+            if (
+                rr.kind != AccessV2Types.RuleKind.None && rr.author == AccessV2Types.RuleAuthor.Governance
+                    && !rr.delegable
+            ) {
+                revert GrantBlockedByGovernanceBan();
+            }
             _writeRuleEmit(
                 l, subject, user, AccessV2Types.RuleKind.Grant, AccessV2Types.RuleAuthor.Delegated, true, managerSubject
             );
-            _flipOn(l, subject, user);
-            emit RoleGranted(subject, user, actor, true);
+            // Consent model (§1, mirrors governance grant): a delegated GRANT force-accepts only an
+            // IN-ORG target. An out-of-org target is recorded as an OFFER (rule written above,
+            // RoleOffered emitted, accepted stays false) — the target's own claim is the consent.
+            if (_isInOrg(l, user)) {
+                _flipOn(l, subject, user);
+                emit RoleGranted(subject, user, actor, true);
+            } else {
+                emit RoleOffered(subject, user, actor, true);
+            }
         } else {
             if (!l.membership[subject][user].accepted) revert NotMember();
             if (ban) {
@@ -599,6 +621,19 @@ library MembershipAuthorityLogic {
             uint256 ms = l.managerConfig[p.subject].managerSubject;
             bool ok = ms != 0 && _isMember(l, ms, msg.sender);
             if (!ok && _isContainingManager(l, p.subject, msg.sender, 0) == 0) revert NotAuthorizedManager();
+        }
+        // An Offer pending wrote a Delegated Grant (ALLOW) rule at creation (delegatedOffer). Deleting
+        // the pending alone would strand that rule live, so the target could claim IMMEDIATELY with no
+        // delay and no manager re-check — worse than an uncancelled offer. Mirror withdrawOffer's dual
+        // cleanup and drop the rule too. Grant/Remove pendings write no rule at creation, so nothing
+        // to clear there (D2).
+        if (p.action == AccessV2Types.PendingKind.Offer) {
+            uint256 subject = p.subject;
+            address user = p.user;
+            if (l.ruleOf[subject][user].kind == AccessV2Types.RuleKind.Grant) {
+                delete l.ruleOf[subject][user];
+                emit RuleCleared(subject, user);
+            }
         }
         _deletePending(l, pendingId);
         emit PendingActionCancelled(pendingId, msg.sender);
@@ -636,8 +671,14 @@ library MembershipAuthorityLogic {
     function clearUserVouches(uint256 subject, address user) external nonReentrant(layout()) {
         Layout storage l = layout();
         _onlyExecutor(l);
+        // Strand the wearer's vouch state at the SENTINEL epoch (v1 clearWearerVouches precedent):
+        // pinning to the CURRENT epoch would leave the per-voucher records (vouchers /
+        // voucherRecordEpoch) valid, so a later revokeVouch by one of those vouchers would pass its
+        // epoch guards and `currentVouchCount -= 1` from 0 would underflow to type(uint32).max,
+        // restoring governance-cleared eligibility. SENTINEL never equals l.vouchEpoch, so those
+        // stale records go dead: revokeVouch reverts HasNotVouched and _vouchMet reads 0.
         l.currentVouchCount[subject][user] = 0;
-        l.wearerVouchEpoch[subject][user] = l.vouchEpoch[subject];
+        l.wearerVouchEpoch[subject][user] = SENTINEL;
         emit UserVouchesCleared(subject, user);
         _reconcileOne(l, subject, user);
     }
