@@ -16,6 +16,9 @@ library HybridVotingConfig {
     // V2 (RoleManager Phase 2): incremental single-hat edit to a class's voter set. `added` = true
     // for addHatToClass, false for removeHatFromClass. Slice percentages are never touched.
     event ClassHatSet(uint8 indexed classIdx, uint256 indexed hatId, bool added);
+    // Access v2 (§4): a positional class index is bound to an authority subject id. `classId` is the
+    // stable id allocated for `classIdx` (idx→classId linkage), `subjectId == 0` clears the binding.
+    event ClassSubjectSet(uint256 indexed classId, uint256 indexed classIdx, uint256 indexed subjectId);
 
     function _layout() private pure returns (HybridVoting.Layout storage s) {
         bytes32 slot = _STORAGE_SLOT;
@@ -75,6 +78,24 @@ library HybridVotingConfig {
         if (classIdx >= l.classes.length) revert VotingErrors.InvalidClassCount();
         HatManager.setHatInArray(l.classes[classIdx].hatIds, hatId, false);
         emit ClassHatSet(classIdx, hatId, false);
+    }
+
+    /// @notice Bind positional class index `classIdx` to authority subject `subjectId` (§4). Allocates
+    ///         the stable classId for `classIdx` on first use and records the idx→classId linkage.
+    /// @dev Auth is enforced by the facade (executor || configAdmin). ALLOCATION IS FROZEN HERE: the
+    ///      first setClassSubject for an idx assigns `classId = ++classSubjectSeq` and writes
+    ///      `classIdOfIdx[classIdx] = classId`; subsequent calls reuse the allocated id (so the stable
+    ///      subject binding survives positional class churn). `subjectId == 0` clears the binding — the
+    ///      class then falls back to its legacy `hatIds`. Emits ClassSubjectSet.
+    function setClassSubject(uint256 classIdx, uint256 subjectId) external {
+        HybridVoting.Layout storage l = _layout();
+        uint256 classId = l.classIdOfIdx[classIdx];
+        if (classId == 0) {
+            classId = ++l.classSubjectSeq;
+            l.classIdOfIdx[classIdx] = classId;
+        }
+        l.classSubject[classId] = subjectId;
+        emit ClassSubjectSet(classId, classIdx, subjectId);
     }
 
     function validateAndInitClasses(HybridVoting.ClassConfig[] calldata initialClasses) external {

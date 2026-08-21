@@ -147,6 +147,23 @@ library HybridVotingProposals {
 
         uint256 id = l._proposals.length - 1;
 
+        // Access v2 (§4): anchor the activation gate to creation time and take the IMMUTABLE per-
+        // proposal subject snapshot mirroring p.classesSnapshot's positional indices. The snapshot
+        // freezes each class's subject binding at creation, so a later setClassSubject can never move
+        // an in-flight proposal's electorate (side-mapping precedent — the Proposal struct is never
+        // widened). equalWeight is skipped: its synthetic DIRECT class has no configured org subject
+        // and gates on pollHatIds (resolved via the hatIds-as-subject-ids fallback in the tally).
+        // Behaviour-neutral for the legacy path, which never reads either mapping.
+        l.proposalCreatedAt[id] = uint64(block.timestamp);
+        if (!equalWeight) {
+            for (uint256 c; c < classCount;) {
+                l.proposalClassSubjects[id][c] = l.classSubject[l.classIdOfIdx[c]];
+                unchecked {
+                    ++c;
+                }
+            }
+        }
+
         if (isExecuting) {
             for (uint256 i; i < numOptions;) {
                 p.batches.push(batches[i]);

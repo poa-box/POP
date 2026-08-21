@@ -11,6 +11,8 @@ import {VotingErrors} from "./libs/VotingErrors.sol";
 import {HybridVotingProposals} from "./libs/HybridVotingProposals.sol";
 import {HybridVotingCore} from "./libs/HybridVotingCore.sol";
 import {HybridVotingConfig} from "./libs/HybridVotingConfig.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
+import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 
 /* ─────────────────── HybridVoting ─────────────────── */
 contract HybridVoting is Initializable {
@@ -85,6 +87,20 @@ contract HybridVoting is Initializable {
         // no field: it is realised by snapshotting a synthetic DIRECT class at proposal creation.
         mapping(uint256 => uint32) proposalQuorumOverride; // proposalId => override (0 = none)
         address configAdmin; // scoped secondary admin (RoleManager) for hat/class wiring; 0 = none
+        // ─── Access v2 (MembershipAuthority) DUAL-PATH append-only tail ───
+        // STORAGE TRANSITION IS SURGERY, NOT A CALL SWAP (§4): the `Proposal` struct (a storage array)
+        // and `ClassConfig` are NEVER touched — any stride change corrupts every historical proposal on
+        // beacon upgrade. All new state is Layout-tail mappings + a stable-classId counter. When
+        // `membershipAuthority == 0` every class/creator read stays byte-identical to the legacy Hats
+        // path; when set, class membership resolves via stable subject ids + the activation gate.
+        address membershipAuthority; // 0 = legacy Hats path (rollback target, §6)
+        uint256 classSubjectSeq; // stable-classId ALLOCATOR (monotonic; ++ starts at 1; 0 = unallocated)
+        mapping(uint256 => uint256) classIdOfIdx; // positional classIdx → stable classId (the idx→classId linkage)
+        mapping(uint256 => uint256) classSubject; // stable classId → subjectId (0 ⇒ fall back to legacy hatIds)
+        mapping(uint256 => mapping(uint256 => uint256)) proposalClassSubjects; // proposalId → classIdx → subjectId (immutable snapshot)
+        // Per-proposal creation timestamp — the authority-path activation-gate anchor (anti-packing,
+        // §4). A SIDE mapping keyed by proposalId, NEVER a Proposal-struct field (stride is frozen).
+        mapping(uint256 => uint64) proposalCreatedAt;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.hybridvoting.v2.storage");
@@ -133,6 +149,8 @@ contract HybridVoting is Initializable {
     // V2 (RoleManager Phase 2): scoped config admin set/cleared. ProposalConfigV2 + ClassHatSet are
     // declared/emitted in the libraries that own the mutation (HybridVotingProposals / -Config).
     event ConfigAdminSet(address indexed admin);
+    // Access v2: dual-path repoint. `address(0)` restores the legacy Hats path (rollback, §6).
+    event MembershipAuthoritySet(address indexed authority);
 
     /* ─────── Initialiser ─────── */
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -217,6 +235,51 @@ contract HybridVoting is Initializable {
     function setConfigAdmin(address admin) external onlyExecutor {
         _layout().configAdmin = admin;
         emit ConfigAdminSet(admin);
+    }
+
+    /// @notice Repoint this module to the org's MembershipAuthority (Access v2). `address(0)` restores
+    ///         the legacy Hats path (rollback, §6). AUTH: onlyExecutor. Emits MembershipAuthoritySet.
+    /// @dev DUAL-PATH INVARIANT: while `membershipAuthority == address(0)` every creator/class check
+    ///      reads the legacy `creatorHatIds`/`ClassConfig.hatIds` byte-identically; once set, creation
+    ///      routes to `hasPerm(HV_CREATE)` and class membership resolves via stable subject ids.
+    function setMembershipAuthority(address authority) external onlyExecutor {
+        _layout().membershipAuthority = authority;
+        emit MembershipAuthoritySet(authority);
+    }
+
+    /// @notice Bind positional class index `classIdx` to authority subject `subjectId` (§4). Allocates
+    ///         the stable classId for `classIdx` on first use (`classId = ++classSubjectSeq`) and
+    ///         records the idx→classId linkage; later calls reuse it. `subjectId == 0` clears the
+    ///         binding (class falls back to its legacy `hatIds`). AUTH: executor || configAdmin.
+    /// @dev Class-config edits that reorder/replace classes re-call this per affected idx — the stable
+    ///      id follows governance's explicit re-assignment, not positional churn. Emits ClassSubjectSet.
+    function setClassSubject(uint256 classIdx, uint256 subjectId) external onlyConfigAdmin {
+        HybridVotingConfig.setClassSubject(classIdx, subjectId);
+    }
+
+    /// @notice The stable classId bound to positional class index `classIdx` (0 = unallocated).
+    function classIdOfIndex(uint256 classIdx) external view returns (uint256 classId) {
+        return _layout().classIdOfIdx[classIdx];
+    }
+
+    /// @notice The subject id bound to stable class id `classId` (0 = none / falls back to hatIds).
+    function classSubjectOf(uint256 classId) external view returns (uint256 subjectId) {
+        return _layout().classSubject[classId];
+    }
+
+    /// @notice The immutable per-proposal subject snapshot for `(proposalId, classIdx)` (0 = none).
+    function proposalClassSubject(uint256 proposalId, uint256 classIdx) external view returns (uint256 subjectId) {
+        return _layout().proposalClassSubjects[proposalId][classIdx];
+    }
+
+    /// @notice The org's MembershipAuthority (Access v2). `address(0)` = legacy Hats path active.
+    function membershipAuthority() external view returns (address) {
+        return _layout().membershipAuthority;
+    }
+
+    /// @notice Proposal `id`'s creation timestamp — the authority-path activation-gate anchor.
+    function proposalCreatedAt(uint256 id) external view exists(id) returns (uint64) {
+        return _layout().proposalCreatedAt[id];
     }
 
     function pause() external onlyExecutor {
@@ -310,7 +373,10 @@ contract HybridVoting is Initializable {
     function _checkCreator() private view {
         Layout storage l = _layout();
         if (_msgSender() != address(l.executor)) {
-            bool canCreate = HatManager.hasAnyHat(l.hats, l.creatorHatIds, _msgSender());
+            address a = l.membershipAuthority;
+            bool canCreate = a == address(0)
+                ? HatManager.hasAnyHat(l.hats, l.creatorHatIds, _msgSender())
+                : IMembershipAuthority(a).hasPerm(_msgSender(), AccessV2PermKeys.HV_CREATE, bytes32(0)) != 0;
             if (!canCreate) revert VotingErrors.Unauthorized();
         }
     }

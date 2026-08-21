@@ -6,6 +6,7 @@ import "./VotingErrors.sol";
 import "./VotingMath.sol";
 import {IExecutor} from "../Executor.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IMembershipAuthority} from "../interfaces/IMembershipAuthority.sol";
 
 library HybridVotingCore {
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.hybridvoting.v2.storage");
@@ -61,13 +62,21 @@ library HybridVotingCore {
         HybridVoting.Layout storage l = _layout();
         HybridVoting.Proposal storage p = l._proposals[id];
         address voter = msg.sender;
+        // DUAL-PATH: 0 ⇒ legacy Hats reads (byte-identical); set ⇒ authority reads + activation gate.
+        address a = l.membershipAuthority;
+        // Authority-path anti-packing anchor: only members active AT OR BEFORE creation may vote.
+        uint64 createdAt = l.proposalCreatedAt[id];
 
-        // Check poll-level restrictions
+        // Check poll-level restrictions. `pollHatIds` are opaque uint256 ids (Hats ids on the legacy
+        // path, adopted-verbatim subject ids on the authority path); the id-agnostic scan is reused.
         if (p.restricted) {
             bool hasAllowedHat = false;
             uint256 len = p.pollHatIds.length;
             for (uint256 i = 0; i < len;) {
-                if (l.hats.isWearerOfHat(voter, p.pollHatIds[i])) {
+                bool ok = a == address(0)
+                    ? l.hats.isWearerOfHat(voter, p.pollHatIds[i])
+                    : IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], voter) <= createdAt;
+                if (ok) {
                     hasAllowedHat = true;
                     break;
                 }
@@ -89,7 +98,18 @@ library HybridVotingCore {
 
         for (uint256 c; c < classCount;) {
             HybridVoting.ClassConfig memory cls = p.classesSnapshot[c];
-            uint256 rawPower = _calculateClassPower(voter, cls, l);
+            uint256 rawPower;
+            if (a == address(0)) {
+                // LEGACY: hat-gated power, byte-identical to pre-Access-v2 behaviour.
+                rawPower = _calculateClassPower(voter, cls, l);
+            } else {
+                // AUTHORITY: class COMPOSITION follows the stable subject snapshot; member ACTIVATION
+                // is gated at creation time (a mid-vote group-packer is excluded, §4). Executor keeps
+                // its power bypass. Power math (DIRECT/ERC20/quadratic/minBalance) is untouched.
+                bool member =
+                    (voter == address(l.executor)) || _classMemberAuthority(l, a, id, c, cls, voter, createdAt);
+                rawPower = member ? _classPower(voter, cls) : 0;
+            }
             classRawPowers[c] = rawPower;
             p.classTotalsRaw[c] += rawPower;
             unchecked {
@@ -143,6 +163,7 @@ library HybridVotingCore {
         emit VoteCast(id, voter, idxs, weights, classRawPowers, uint64(block.timestamp));
     }
 
+    /// @dev LEGACY (Hats) class power: hat-gated, byte-identical to pre-Access-v2 behaviour.
     function _calculateClassPower(address voter, HybridVoting.ClassConfig memory cls, HybridVoting.Layout storage l)
         internal
         view
@@ -166,6 +187,44 @@ library HybridVotingCore {
 
         if (!hasClassHat) return 0;
 
+        return _classPower(voter, cls);
+    }
+
+    /// @dev Authority-path class MEMBERSHIP predicate (§4). Resolution order:
+    ///      1. the IMMUTABLE per-proposal subject snapshot `proposalClassSubjects[id][classIdx]` — a
+    ///         ROLE resolves via its own acceptedAt, a GROUP via its EARLIEST qualifying member-role
+    ///         activation, so a mid-vote group-packer is caught;
+    ///      2. snapshot 0 (a legacy in-flight proposal, an unconfigured class, or the equalWeight
+    ///         synthetic class) ⇒ treat `cls.hatIds` as adopted-verbatim subject ids (empty = OPEN
+    ///         class, legacy parity) — each subject is activation-gated identically.
+    ///      No LIVE `classSubject` read is consulted at vote time: the snapshot is the sole source of
+    ///      truth, which is what makes the binding immutable across later setClassSubject edits.
+    function _classMemberAuthority(
+        HybridVoting.Layout storage l,
+        address a,
+        uint256 id,
+        uint256 classIdx,
+        HybridVoting.ClassConfig memory cls,
+        address voter,
+        uint64 createdAt
+    ) internal view returns (bool) {
+        uint256 sid = l.proposalClassSubjects[id][classIdx];
+        if (sid != 0) {
+            return IMembershipAuthority(a).activeMemberSince(sid, voter) <= createdAt;
+        }
+        uint256 n = cls.hatIds.length;
+        if (n == 0) return true; // open class (legacy `cls.hatIds.length == 0` parity)
+        for (uint256 i; i < n;) {
+            if (IMembershipAuthority(a).activeMemberSince(cls.hatIds[i], voter) <= createdAt) return true;
+            unchecked {
+                ++i;
+            }
+        }
+        return false;
+    }
+
+    /// @dev Post-gate class power (strategy math shared by both paths; UNTOUCHED from v1).
+    function _classPower(address voter, HybridVoting.ClassConfig memory cls) internal view returns (uint256) {
         if (cls.strategy == HybridVoting.ClassStrategy.DIRECT) {
             return 100; // Direct democracy: 1 person = 100 raw points
         } else if (cls.strategy == HybridVoting.ClassStrategy.ERC20_BAL) {
