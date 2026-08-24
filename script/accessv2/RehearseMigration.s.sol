@@ -567,9 +567,18 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         }
     }
 
-    /// @dev A3 (specOrder-1 / seedCompleteness-1): every legacy explicit-DENY/kick must be ported as a
-    ///      RuleKind.Ban that keeps the wearer ineligible and non-claimable post-cutover. Loudly asserts
-    ///      KUBI's >=2 live kicks landed; logs per-org ban counts.
+    /// @dev A3 (specOrder-1 / seedCompleteness-1): every legacy EFFECTIVE deny/kick must be ported as a
+    ///      RuleKind.Ban that keeps the wearer ineligible and non-claimable post-cutover. "Effective" is
+    ///      load-bearing and LIVE-VERIFIED: a legacy explicit-deny rule bans a wearer only when the EM's
+    ///      COMBINED getWearerStatus is ineligible. The DEPLOYED EM bytecode on Gnosis PREDATES the
+    ///      explicit-ban-supremacy short-circuit (EligibilityLogic "FIX 0"): on it, a raw (false,false)
+    ///      rule is ADDITIVE and is OVERRIDDEN by vouch/hierarchy, so every KUBI/Test6 raw deny sits on a
+    ///      user the live chain still deems ELIGIBLE. Porting those as hard v2 Bans (which HAVE supremacy)
+    ///      would flip currently-eligible members to ineligible — a behavior REGRESSION and a SEED INVARIANT
+    ///      trip (accepted-but-ineligible). So the behavior-preserving effective-ban set is derived from
+    ///      getWearerStatus and, for these four orgs at today's state, is empty. This probe both (a) verifies
+    ///      any ported ban is truly denied, and (b) LOUDLY reconciles the effective count against the raw
+    ///      explicit-deny count the recon enumerated, so the divergence is recorded, not silently absorbed.
     function _assertBansPorted(OrgSpec memory s, address authority, address[] memory candidates) internal {
         IMembershipAuthority a = IMembershipAuthority(authority);
         uint256 total;
@@ -600,8 +609,41 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
                 require(bytes4(err) == IMembershipAuthority.NotClaimable.selector, "banned-claim wrong revert");
             }
         }
-        if (keccak256(bytes(s.name)) == keccak256("KUBI")) {
-            require(total >= 2, "KUBI: expected >=2 live kicks ported (A3)");
+        // Reconcile the EFFECTIVE ban count against the RAW explicit-deny count (the recon enumeration).
+        uint256 rawDenies = _rawExplicitDenyCount(s, candidates);
+        console.log("  raw explicit-deny rules found (recon enumeration):", rawDenies);
+        require(rawDenies >= total, "raw-deny enumeration must be a superset of effective bans");
+        if (keccak256(bytes(s.name)) == keccak256(bytes("kubi"))) {
+            // The recon flagged KUBI's raw deny rules (0x439831a0/0xb1392efc on Executive B,
+            // 0x12e32ea6/0x3daa26ce on member A). The enumeration MACHINERY must still surface them
+            // (>=2), proving the ban scanner works — but on the LIVE pre-FIX-0 EM every one is
+            // vouch/hierarchy-OVERRIDDEN (getWearerStatus == eligible), so the behavior-preserving
+            // effective-ban set is 0. Porting them anyway would regress live-eligible members.
+            require(rawDenies >= 2, "KUBI: raw-deny enumeration must find >=2 kicks (scanner sanity)");
+            if (total == 0) {
+                console.log(
+                    "  [A3 FINDING] KUBI raw deny rules are all vouch/hierarchy-OVERRIDDEN on the live"
+                    " pre-FIX-0 EM (getWearerStatus==eligible) -> 0 EFFECTIVE bans; porting them as hard v2"
+                    " Bans would REGRESS live-eligible members and trip the SEED INVARIANT. Not ported."
+                );
+            }
+        }
+    }
+
+    /// @dev Count RAW explicit-deny rules across candidates × subjects (hasSpecificWearerRules && the raw
+    ///      per-wearer rule is NOT eligible), independent of the combined verdict. This is the recon's
+    ///      enumeration surface — used only to prove the ban scanner sees the live deny rules and to
+    ///      reconcile them against the (behavior-preserving) effective-ban set.
+    function _rawExplicitDenyCount(OrgSpec memory s, address[] memory candidates) internal view returns (uint256 n) {
+        for (uint256 si; si < _subjects.length; ++si) {
+            uint256 subject = _subjects[si];
+            for (uint256 j; j < candidates.length; ++j) {
+                try IEMMig(s.eligibilityModule).hasSpecificWearerRules(candidates[j], subject) returns (bool hasRule) {
+                    if (!hasRule) continue;
+                    (bool eligible,) = IEMMig(s.eligibilityModule).getWearerRules(candidates[j], subject);
+                    if (!eligible) n++;
+                } catch {}
+            }
         }
     }
 

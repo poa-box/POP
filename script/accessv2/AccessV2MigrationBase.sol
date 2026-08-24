@@ -106,6 +106,12 @@ interface IEMMig {
     //    getWearerRules(user, hat) NOT (eligible && standing) it identifies a legacy BAN/kick (A3).
     function getWearerRules(address wearer, uint256 hatId) external view returns (bool eligible, bool standing);
     function hasSpecificWearerRules(address wearer, uint256 hatId) external view returns (bool);
+    // getWearerStatus is the EM's COMBINED verdict (rule + vouch + email + hierarchy). It is
+    // TOGGLE-INDEPENDENT (the EM has no knowledge of the ToggleModule), so it is the stable
+    // "is this candidate an effectively-eligible member today" test — used to exclude current members
+    // from the ban set at BOTH build time and post-toggle-off assert time (isWearerOfHat is NOT stable
+    // across the cutover toggle-off: it goes false for every wearer once legacy hats are toggled off).
+    function getWearerStatus(address wearer, uint256 hatId) external view returns (bool eligible, bool standing);
 }
 
 interface IDDMig {
@@ -593,15 +599,24 @@ abstract contract AccessV2MigrationBase is Script {
     function _isLegacyBanned(OrgSpec memory s, address user, uint256 subject) internal view returns (bool) {
         // A ban is a legacy explicit rule that leaves the wearer EFFECTIVELY ineligible today, so it must
         // NOT overlap the seeded member set. Two facts, both live-verified:
-        //  (1) getWearerRules(user, subject) exposes the RAW per-wearer rule flags, but Hats.isWearerOfHat
-        //      resolves the EM's COMBINED getWearerStatus (rule + vouch/email/hierarchy). A user can carry
-        //      a raw deny (eligible==false) yet remain a combined-eligible wearer (e.g. a standing-only
+        //  (1) getWearerRules(user, subject) exposes the RAW per-wearer rule flags, but the EM's COMBINED
+        //      getWearerStatus (rule + vouch/email/hierarchy) is what decides membership. A user can carry
+        //      a raw deny (eligible==false) yet remain a combined-eligible member (e.g. a standing-only
         //      rule, or a vouch override). Seeding a Ban for such a user would overwrite their seeded Grant
-        //      → accepted-but-ineligible (SEED INVARIANT trip). So EXCLUDE anyone who is a current wearer.
-        //  (2) A genuine kick/ban is a NON-wearer carrying an explicit deny (hasSpecificWearerRules &&
-        //      raw eligible==false). getWearerRuleFlags is absent on the deployed EM (reverts), hence the
-        //      hasSpecificWearerRules + getWearerRules pair.
-        if (IHatsMin(HATS).isWearerOfHat(user, subject)) return false;
+        //      → accepted-but-ineligible (SEED INVARIANT trip). So EXCLUDE anyone the EM deems eligible.
+        //      NOTE: this MUST use getWearerStatus (toggle-INDEPENDENT), NOT hats.isWearerOfHat: the ban set
+        //      is re-derived by the rehearsal AFTER the cutover toggle-off, at which point isWearerOfHat is
+        //      false for every wearer and would misclassify combined-eligible members as bans. At build time
+        //      (toggle active, candidates hold balance) getWearerStatus.eligible ⟺ isWearerOfHat, so the
+        //      seeded ban set is unchanged; only the assert-time re-derivation is made stable.
+        //  (2) A genuine kick/ban is a candidate carrying an explicit deny (hasSpecificWearerRules &&
+        //      raw eligible==false) whom the EM deems combined-INELIGIBLE. getWearerRuleFlags is absent on
+        //      the deployed EM (reverts), hence the hasSpecificWearerRules + getWearerRules pair.
+        try IEMMig(s.eligibilityModule).getWearerStatus(user, subject) returns (bool combinedEligible, bool) {
+            if (combinedEligible) return false;
+        } catch {
+            return false;
+        }
         try IEMMig(s.eligibilityModule).hasSpecificWearerRules(user, subject) returns (bool hasRule) {
             if (!hasRule) return false;
             (bool eligible,) = IEMMig(s.eligibilityModule).getWearerRules(user, subject);
