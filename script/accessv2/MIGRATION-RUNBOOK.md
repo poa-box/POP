@@ -73,6 +73,24 @@ Each org: three ops surfaces in `MigrateOrgToAuthority.s.sol`, env-driven `ORG=T
    supply, and router-through resolution of the admin id; a failed check reverts the WHOLE batch, so
    nothing half-lands. See the CutoverVerifier note below for the full check set.
 
+### announceWinner discipline (STRICT IN-ORDER + post-state verification)
+
+`announceWinner`'s `try/catch` swallows a batch revert: it succeeds, emits `ProposalExecutionFailed`
+(`Executor.CallFailed`), marks the proposal `executed`, and **nothing lands** — the proposal is
+permanently burned and must be re-created + re-voted through a full window. Two rules close this:
+
+1. **Finalize IN ORDER and one at a time.** Create+finalize `seed.1`, then `seed.2`, … then
+   `cutover.1`. Never finalize `seed.N` before `seed.N-1` has executed — the later batch assumes the
+   earlier one's state.
+2. **After EVERY `announceWinner`, verify before creating the next proposal.** Check the tx did NOT
+   emit `ProposalExecutionFailed` / `Executor.CallFailed` (i.e. `didExecute == true`), then read the
+   seed-invariant surface for that batch's subjects (`authority.isMember` / `memberCount` for the
+   slice just seeded). If a batch silently no-op'd, STOP and re-create that proposal — do not proceed.
+   For the cutover, the appended `CutoverVerifier.verify` makes a silent no-op impossible (any drift
+   reverts the whole batch), but still confirm `didExecute == true`.
+
+Always pass the explicit `--gas-limit` from the table below; the try/catch defeats `eth_estimateGas`.
+
 ### Measured announceWinner gas (fork rehearsal, production profile)
 
 | Org | seed proposals | cutover | recommended `--gas-limit` |
@@ -96,8 +114,20 @@ Each org: three ops surfaces in `MigrateOrgToAuthority.s.sol`, env-driven `ORG=T
   ported** (C1): the authority accepts them (emits the `SelfVoucher` lint, no revert), so KUBI's
   Executives-vouch-Executives officer gate survives verbatim. Only an EMPTY subject bootstrap-
   deadlocks, recoverable via a governance seed/grant exactly like legacy.
-- **maxMembers**: titled roles tightened to live active count; the open member role stays
-  UNLIMITED (capping it would brick QuickJoin).
+- **maxMembers (R1)**: adopts the legacy `hats.viewHat(id).maxSupply` **VERBATIM** for EVERY subject
+  (admin, titled, and the open member role) — the honest live cap. NOT tightened to the current count
+  (which would revert `SubjectFull` on the next grant/claim/vouch and create the linted
+  `VouchWithMaxMembers` anti-pattern) and NOT guessed-unlimited. Hats guarantees `supply <= maxSupply`,
+  so the seeded `memberCount` is always `<= maxMembers` (SEED INVARIANT holds). The open member role's
+  QuickJoin was already bounded by the same `maxSupply` legacy-side, so nothing regresses.
+- **role names (specOrder-10)**: subjects adopt the live `hats.viewHat(id).details` string; empty
+  details fall back to `Role#N` (admin → `Admin`, reconstructed voucher subjects → `VoucherRole`).
+- **subject discovery (A6 / seedCompleteness-6)**: discovery now covers TM creator hats (lens 5), TM
+  organizer hats (lens 11), and every HybridVoting voting-class `hatId` (`getClasses()`) in ADDITION
+  to the DD/HV/PT/EDU/QJ/TM-permission lists. All three resolve on the module authority arms by pure
+  membership (`_authorityHoldsAny` / `activeMemberSince`), so they are seeded as membership-only
+  subjects (no perm key). This prevents a post-cutover HV voting class scoring zero (governance
+  disenfranchisement) or TM create/organize going dark if an org adds such a hat before broadcast.
 
 ### Sims (the gate for everything above)
 
@@ -146,6 +176,25 @@ code paths) ships only after the LAST org migrates and soaks.
   proposal's `createdAt`, keeping those proposals votable across the cutover; post-cutover `claim()`
   members get `acceptedAt = now` and stay gated out of pre-claim proposals (the §4 anti-packing
   property survives).
+
+## Orchestrator rulings (recorded spec §6 deviations / realizations)
+
+- **R3 — reconcile stays EXCLUDED from sponsorship (documented §6 step-0 item-4 deviation).** §6
+  lists `reconcile` among the sponsored authority selectors, but a permissionless, gas-free reconcile
+  is a grief-spam vector (any address can repeatedly burn an org's solidarity-fund gas). It is
+  deliberately left unsponsored (see `DefaultGlobalRules.sol` reconcile comment). §8's permissionless
+  reconcile repair still functions — the keeper just self-funds the gas. This is the ONE accepted
+  divergence from the binding selector list.
+- **R4 — "burn-shaped events for unported wearers" (§6 step-3) is realized as full-port + in-batch
+  count verification, NOT synthetic burn events.** The ceremony ports EVERY live wearer (candidate
+  set + admin), and `CutoverVerifier.verify` require()s per-subject `memberCount == expectedCounts[i]`
+  AND `memberCount <= hats.hatSupply(subject)` (the canonical, enumeration-independent Hats supply).
+  If any wearer were unported, `hatSupply` would exceed the ported `memberCount` and — combined with
+  the generation-time count baked into the batch — the operator's regenerate-before-cutover step
+  surfaces the gap; the toggle-off then provably covers exactly the ported set. The unported set is
+  therefore provably EMPTY at cutover, which makes synthetic burn-shaped events unnecessary (and
+  rollback DEPENDS on toggle-off never burning real balances — §6 ROLLBACK). Subgraph member-set
+  divergence is a Wave-E indexing concern, not a cutover-batch one.
 
 ## SPEC ERRATA (appended per C5)
 

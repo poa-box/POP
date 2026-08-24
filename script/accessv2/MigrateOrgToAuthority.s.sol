@@ -199,6 +199,14 @@ abstract contract MigrateOrgBase is OrgCatalog {
 
     /*──────────────────── Proposal JSON emission ────────────────────*/
 
+    /// @dev The per-org announceWinner --gas-limit, unified with MIGRATION-RUNBOOK.md's measured gas
+    ///      table (the ONLY gas figure the JSON carries). KUBI's seed.3 measured 3.13M (above the old
+    ///      3M guidance that reproduced the Test6-#23 silent no-op) → 5M; the other three → 4M. This
+    ///      replaces the stale blanket 12M (near Gnosis's ~17M block limit if a frontend forwards it).
+    function _announceGasLimit(OrgSpec memory s) internal pure returns (uint256) {
+        return keccak256(bytes(s.name)) == keccak256("KUBI") ? 5_000_000 : 4_000_000;
+    }
+
     function _writeBatchJson(
         OrgSpec memory s,
         string memory kind,
@@ -218,7 +226,9 @@ abstract contract MigrateOrgBase is OrgCatalog {
             vm.toString(authority),
             "\",\n  \"hybridVoting\": \"",
             vm.toString(s.hv),
-            "\",\n  \"announceWinnerGasLimit\": 12000000,\n  \"note\": \"1-option executable proposal; finalize with an explicit --gas-limit (announceWinner try/catch defeats eth_estimateGas)\",\n  \"calls\": ["
+            "\",\n  \"announceWinnerGasLimit\": ",
+            vm.toString(_announceGasLimit(s)),
+            ",\n  \"note\": \"1-option executable proposal; finalize with an explicit --gas-limit (announceWinner try/catch defeats eth_estimateGas). This is the per-org runbook figure; see MIGRATION-RUNBOOK.md gas table.\",\n  \"calls\": ["
         );
         for (uint256 i; i < batch.length; ++i) {
             json = string.concat(
@@ -232,9 +242,11 @@ abstract contract MigrateOrgBase is OrgCatalog {
             );
         }
         json = string.concat(json, "\n  ]\n}\n");
-        string memory path = string.concat(
-            vm.projectRoot(), "/script/accessv2/out/", _lower(s.name), ".", kind, ".", vm.toString(idx), ".json"
-        );
+        // out/ is gitignored + regenerated (ruling R6) — create it on demand so a fresh checkout can
+        // generate without a committed artifact directory.
+        string memory dir = string.concat(vm.projectRoot(), "/script/accessv2/out");
+        vm.createDir(dir, true);
+        string memory path = string.concat(dir, "/", _lower(s.name), ".", kind, ".", vm.toString(idx), ".json");
         vm.writeFile(path, json);
         console.log("  wrote", path);
     }

@@ -22,6 +22,7 @@ import {IExecutor} from "../../src/Executor.sol";
 
 import {MembershipAuthority} from "../../src/MembershipAuthority.sol";
 import {AuthorityRouter} from "../../src/AuthorityRouter.sol";
+import {CutoverVerifier} from "../../src/CutoverVerifier.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
 import {DirectDemocracyVoting} from "../../src/DirectDemocracyVoting.sol";
 import {HybridVoting} from "../../src/HybridVoting.sol";
@@ -207,6 +208,11 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
 
         require(IPaymasterMig(_paymaster(s)).HATS() == routerProxy, "hub setHats(router) did not land");
         require(IAuthorityRouter(routerProxy).authorityOf(_topHatId(s)) == address(0), "router must be empty at birth");
+
+        // Deploy the stateless CutoverVerifier (immutable hats + orgRegistry, ZERO storage) so the
+        // cutover batch carries its in-batch verify() as the LAST call (§6, C4). Fresh instance per sim
+        // mirrors the Phase-0 protocol singleton; production resolves the registered per-chain address.
+        _verifier = address(new CutoverVerifier(HATS, _orgRegistry(s)));
     }
 
     /*═══════════════════════════════ (iii) bind-before-toggle ═══════════════════════════════*/
@@ -285,24 +291,85 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
     function _assertVouchParity(OrgSpec memory s, address authority, address[] memory candidates) internal {
         IMembershipAuthority a = IMembershipAuthority(authority);
         uint256 vouchSubjects;
+        uint256 recordsExercised;
         for (uint256 si; si < _subjects.length; ++si) {
             uint256 subject = _subjects[si];
             IEMMig.VouchCfg memory vc = IEMMig(s.eligibilityModule).getVouchConfig(subject);
             if ((vc.flags & 0x01) == 0 || vc.quorum == 0) continue;
-            if (vc.membershipHatId == subject || vc.membershipHatId == 0) continue; // self-cycle not ported
+            // A4: self-voucher configs (membershipHatId == subject) ARE ported (C1) — check them too.
+            // Only a genuinely empty voucher subject (== 0) has nothing to port.
+            if (vc.membershipHatId == 0) continue;
             vouchSubjects++;
             (uint32 quorum, uint256 voucherSubject,) = a.vouchConfig(subject);
             require(quorum == vc.quorum, "vouch quorum not ported");
             require(voucherSubject == vc.membershipHatId, "voucher subject not ported");
             if (!s.vouchVerbatim) continue;
-            // VERBATIM: each pre-cutover member's ported count equals the legacy currentVouchCount.
+            // VERBATIM: the ported per-wearer count must equal the number of voucher RECORDS the seed
+            // could actually reconstruct from the candidate set (records-first port — seedCompleteness-5).
+            // NOTE (candidate-completeness limitation, seedCompleteness-7 / A5): legacy
+            // EligibilityModule.currentVouchCount may exceed this when a wearer was vouched by an address
+            // OUTSIDE the candidate fixture (EM direct-mint / vouched-but-unclaimed channels the current
+            // enumerate-wearers.sh misses). Those records are provably unportable with the current
+            // candidate source, so byte-exact legacy-count parity is NOT asserted here; closing it
+            // requires the A5 candidate-enumeration rewrite (event-log union of every join/vouch channel).
+            // What IS asserted: the authority faithfully ported EVERY record the seed saw (round-trip).
             for (uint256 j; j < candidates.length; ++j) {
                 if (!_expectMember[subject][candidates[j]]) continue;
+                uint256 portable = _reconstructVouchers(s, subject, candidates[j], candidates).length;
+                require(a.vouchCount(subject, candidates[j]) == portable, "VERBATIM vouch record port drift");
                 uint32 legacy = IEMMig(s.eligibilityModule).currentVouchCount(subject, candidates[j]);
-                require(a.vouchCount(subject, candidates[j]) == legacy, "VERBATIM vouch count drift");
+                require(a.vouchCount(subject, candidates[j]) <= legacy, "ported count exceeds legacy (over-count)");
             }
+            // A4 behavioral parity: exercise the FIRST ported (wearer, voucher) RECORD on this subject.
+            // Records-first porting (not a bare count) must let a ported voucher REVOKE (count drops)
+            // and must REJECT a re-vouch by that same voucher (AlreadyVouched) — the two behaviors the
+            // VERBATIM port exists to preserve.
+            recordsExercised += _exerciseVouchRecord(s, authority, subject, candidates);
         }
         console.log("  vouch-configured subjects checked:", vouchSubjects);
+        console.log("  vouch RECORD behaviors exercised (revoke+re-vouch):", recordsExercised);
+        // Non-vacuity guard: a VERBATIM org MUST have at least one real ported record to exercise
+        // (KUBI's Executive gate). If none was found, the port silently did nothing — fail loudly.
+        if (s.vouchVerbatim) require(recordsExercised > 0, "VERBATIM: no ported vouch record exercised");
+    }
+
+    /// @dev Find the first (wearer, voucher) ported record on `subject` and assert: (1) re-vouch by the
+    ///      ported voucher reverts AlreadyVouched (record present), then (2) the ported voucher can
+    ///      revoke and the authority's vouchCount drops by exactly 1. Returns 1 if a record was
+    ///      exercised, 0 otherwise. Mutates the (ephemeral) fork — run AFTER count parity above.
+    function _exerciseVouchRecord(OrgSpec memory s, address authority, uint256 subject, address[] memory candidates)
+        internal
+        returns (uint256)
+    {
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        for (uint256 j; j < candidates.length; ++j) {
+            address wearer = candidates[j];
+            if (a.vouchCount(subject, wearer) == 0) continue;
+            for (uint256 v; v < candidates.length; ++v) {
+                address voucher = candidates[v];
+                // A ported record exists legacy-side AND the voucher is an authority member of the
+                // voucher subject (so vouch/revokeVouch pass the caller gate).
+                if (!IEMMig(s.eligibilityModule).vouchers(subject, wearer, voucher)) continue;
+                (, uint256 voucherSubject,) = a.vouchConfig(subject);
+                if (!a.isMember(voucherSubject, voucher)) continue;
+
+                // (1) re-vouch by the ported voucher must revert AlreadyVouched.
+                vm.prank(voucher);
+                try IMembershipAuthority(authority).vouch(subject, wearer) {
+                    revert("ported voucher re-vouch did NOT revert (double-count risk)");
+                } catch (bytes memory err) {
+                    require(bytes4(err) == IMembershipAuthority.AlreadyVouched.selector, "re-vouch wrong revert");
+                }
+
+                // (2) the ported voucher can revoke → count drops by exactly 1.
+                uint32 before = a.vouchCount(subject, wearer);
+                vm.prank(voucher);
+                IMembershipAuthority(authority).revokeVouch(subject, wearer);
+                require(a.vouchCount(subject, wearer) == before - 1, "ported voucher revoke did not drop count");
+                return 1;
+            }
+        }
+        return 0;
     }
 
     /*═══════════════════════════════ (ii) behavioral probes ═══════════════════════════════*/

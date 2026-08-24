@@ -253,8 +253,13 @@ library DefaultGlobalRules {
         //   EXCLUDED — every onlyExecutor write (grant/offer/remove/setRule/config/seed/setPaused/…):
         //     governance-only, never passkey-sponsored (executor batches fund their own gas), matching
         //     the RoleManager wave excluding RoleManager's executor path.
-        //   EXCLUDED — reconcile (permissionless keeper repair): not a member-facing gasless flow; left
-        //     unsponsored like v1's absence of a sponsored reconcile path.
+        //   EXCLUDED — reconcile (permissionless keeper repair): DELIBERATE spec §6 step-0 item-4
+        //     DEVIATION (orchestrator ruling R3). §6 lists reconcile among the sponsored selectors, but
+        //     a permissionless, gas-free reconcile is a grief-spam vector (any address can burn org
+        //     solidarity-fund gas repeatedly). Rationale: not a member-facing gasless flow; left
+        //     unsponsored like v1's absence of a sponsored reconcile path. Recorded here + in
+        //     MIGRATION-RUNBOOK.md (Orchestrator rulings) as the accepted deviation from the binding
+        //     spec text; §8's permissionless-reconcile repair still works, just self-funded.
         // Gas hints mirror the v1 delegation-selector calibration (single-subject, bounded writes):
         t = ModuleTypes.MEMBERSHIP_AUTHORITY_ID;
         e[i++] = Entry(t, bytes4(keccak256("claim(uint256)")), 300_000); // single mint + fold (~claimHat)

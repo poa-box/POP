@@ -32,8 +32,9 @@ import {IExecutor} from "../../src/Executor.sol";
  *   (b) CUTOVER BATCH (§6 step 3): the exact Executor.Call[] — router legacy-id BIND
  *       ordered BEFORE the eligibility toggle-off; setMembershipAuthority on all 8
  *       modules incl. Executor itself (the W6 self-target allowlist); unpause; legacy
- *       toggle-off + unported burns. announceWinner needs an explicit 3,000,000 gas
- *       limit (CLAUDE.md gotcha) — noted in every generated proposal JSON.
+ *       toggle-off + in-batch CutoverVerifier. announceWinner needs an explicit high gas
+ *       limit (CLAUDE.md gotcha) — the per-org figure from MIGRATION-RUNBOOK.md's measured gas
+ *       table (KUBI 5M, others 4M) is written into every generated proposal JSON.
  *
  * SEED DATA SOURCING (§6 "enumerate wearers via event logs + fork reads"): the CANDIDATE
  * address set comes from tools/enumerate-wearers.sh (Executor.HatsMinted + QuickJoin
@@ -50,6 +51,38 @@ interface IHatsMin {
     function balanceOf(address user, uint256 hatId) external view returns (uint256);
     function isEligible(address wearer, uint256 hatId) external view returns (bool);
     function isInGoodStanding(address wearer, uint256 hatId) external view returns (bool);
+    // viewHat returns the full 9-field hat record — we adopt maxSupply (the honest live cap, R1)
+    // and details (the live role name, specOrder-10) verbatim.
+    function viewHat(uint256 hatId)
+        external
+        view
+        returns (
+            string memory details,
+            uint32 maxSupply,
+            uint32 supply,
+            address eligibility,
+            address toggle,
+            string memory imageURI,
+            uint16 lastHatId,
+            bool mutable_,
+            bool active
+        );
+}
+
+/// @dev HybridVoting voting-class enumeration — class hatIds are consumed as authority subjects
+///      (activeMemberSince) post-cutover, so they must be discovered/seeded (finding
+///      seedCompleteness-6). Struct field order MUST match HybridVoting.ClassConfig exactly.
+interface IHVClasses {
+    struct ClassCfg {
+        uint8 strategy;
+        uint8 slicePct;
+        bool quadratic;
+        uint256 minBalance;
+        address asset;
+        uint256[] hatIds;
+    }
+
+    function getClasses() external view returns (ClassCfg[] memory);
 }
 
 interface IEMMig {
@@ -135,6 +168,18 @@ interface IPaymasterMig {
     function HATS() external view returns (address);
 }
 
+/// @dev CutoverVerifier — the stateless §6 in-batch verifier (src/CutoverVerifier.sol). Wired as the
+///      LAST call of the cutover batch so a failed check reverts the WHOLE batch (nothing half-lands).
+interface ICutoverVerifierMig {
+    function verify(
+        bytes32 orgId,
+        address authority,
+        address router,
+        uint256[] calldata subjects,
+        uint32[] calldata expectedCounts
+    ) external view;
+}
+
 abstract contract AccessV2MigrationBase is Script {
     /*──────────────────────── Protocol constants ────────────────────────*/
     address internal constant HUDSON = 0xA6F4D9f44Dd980b7168D829d5f74c2b00a46b2c9;
@@ -184,6 +229,10 @@ abstract contract AccessV2MigrationBase is Script {
     // go dark, so parity must compare the authority against a pre-cutover snapshot, not a live read).
     mapping(uint256 => mapping(address => bool)) internal _expectMember;
     uint256 internal _expectTotal;
+    // The stateless CutoverVerifier singleton (src/CutoverVerifier.sol). Set by _setupProtocol (sims
+    // deploy a fresh instance) or by GenerateBatches (the registered per-chain address). When nonzero,
+    // _buildCutoverBatch appends its verify() as the LAST cutover call (§6 in-batch verification, C4).
+    address internal _verifier;
 
     /*═══════════════════════════════ Chain helpers ═══════════════════════════════*/
     function _poaManager(OrgSpec memory s) internal pure returns (address) {
@@ -245,14 +294,63 @@ abstract contract AccessV2MigrationBase is Script {
         _addArray(IEDUMig(s.edu).creatorHatIds());
         _addArray(IEDUMig(s.edu).memberHatIds());
         _addArray(_tmPermissionHats(s));
+        // A6 (seedCompleteness-6): the TM authority arm resolves creator (lens 5) and organizer
+        // (lens 11) hats through _authorityHoldsAny (pure isMember, no perm key), and HybridVoting
+        // resolves each voting-class hatId via activeMemberSince. All three are AUTHORITY SUBJECTS
+        // post-cutover — omitting them disenfranchises voters / breaks TM create+organize. They are
+        // pure-membership subjects, so discovery+seeding (no perm key) is the complete fix.
+        _addArray(_tmLensHats(s, 5)); // creator hats
+        _addArray(_tmLensHats(s, 11)); // organizer hats
+        _addArray(_hvClassHats(s)); // HybridVoting voting-class hats
     }
 
     function _tmPermissionHats(OrgSpec memory s) internal view returns (uint256[] memory) {
-        try ITMMig(s.tm).getLensData(6, "") returns (bytes memory raw) {
+        return _tmLensHats(s, 6);
+    }
+
+    function _tmLensHats(OrgSpec memory s, uint8 t) internal view returns (uint256[] memory) {
+        try ITMMig(s.tm).getLensData(t, "") returns (bytes memory raw) {
             return abi.decode(raw, (uint256[]));
         } catch {
             return new uint256[](0);
         }
+    }
+
+    /// @dev Flatten every HybridVoting voting-class hatId (union across classes) — each is an
+    ///      adopted-verbatim authority subject on the HV tally arm.
+    function _hvClassHats(OrgSpec memory s) internal view returns (uint256[] memory out) {
+        try IHVClasses(s.hv).getClasses() returns (IHVClasses.ClassCfg[] memory cs) {
+            uint256 total;
+            for (uint256 i; i < cs.length; ++i) {
+                total += cs[i].hatIds.length;
+            }
+            out = new uint256[](total);
+            uint256 k;
+            for (uint256 i; i < cs.length; ++i) {
+                for (uint256 j; j < cs[i].hatIds.length; ++j) {
+                    out[k++] = cs[i].hatIds[j];
+                }
+            }
+        } catch {
+            out = new uint256[](0);
+        }
+    }
+
+    /*═══════════════════════════════ Live hat record adoption (R1, specOrder-10) ═══════════════════════════════*/
+
+    /// @dev maxMembers adopts the legacy hat's maxSupply VERBATIM (R1) — the honest live cap, neither
+    ///      tightened to the current count nor guessed-unlimited. Hats guarantees supply ≤ maxSupply, so
+    ///      the seeded memberCount is always ≤ maxMembers (SEED INVARIANT holds).
+    function _hatMaxSupply(uint256 id) internal view returns (uint32) {
+        (, uint32 maxSupply,,,,,,,) = IHatsMin(HATS).viewHat(id);
+        return maxSupply;
+    }
+
+    /// @dev Role name adopts the live hat details (specOrder-10); falls back to "Role#N" when the
+    ///      legacy hat carries an empty details string.
+    function _hatName(uint256 id, string memory fallbackName) internal view returns (string memory) {
+        (string memory details,,,,,,,,) = IHatsMin(HATS).viewHat(id);
+        return bytes(details).length == 0 ? fallbackName : details;
     }
 
     /*═══════════════════════════════ Wearer resolution (fork read) ═══════════════════════════════*/
@@ -379,8 +477,10 @@ abstract contract AccessV2MigrationBase is Script {
 
         // (0) ADMIN subject + membership LEAD the batch (lock-out guard): create the topHat subject,
         //     then grant + accept the Executor as its sole member, before any other subject/rule.
+        //     The admin grant is STICKY (delegable=false, R5 / specOrder-8): a delegated CAP_REMOVE
+        //     manager must never be able to clear the Executor's admin membership (org lock-out).
         _pushAdminSubject(authority, topHat);
-        _pushSeedSlice(authority, topHat, _single(s.executor), true);
+        _pushSeedSlice(authority, topHat, _single(s.executor), false);
 
         // (1) Role subjects (maxMembers=0 during seeding; tightened after memberships).
         _pushRoleSubjects(authority);
@@ -434,8 +534,8 @@ abstract contract AccessV2MigrationBase is Script {
         uint32[] memory maxm = new uint32[](1);
         ids[0] = topHat;
         kinds[0] = AccessV2Types.SubjectKind.Role;
-        names[0] = "Admin";
-        maxm[0] = 0;
+        names[0] = _hatName(topHat, "Admin"); // live details, fallback "Admin" (specOrder-10)
+        maxm[0] = _hatMaxSupply(topHat); // legacy maxSupply verbatim (R1) — topHat is 1
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
     }
 
@@ -450,8 +550,8 @@ abstract contract AccessV2MigrationBase is Script {
         for (uint256 i = 1; i < _subjects.length; ++i) {
             ids[i - 1] = _subjects[i];
             kinds[i - 1] = AccessV2Types.SubjectKind.Role;
-            names[i - 1] = string.concat("Role#", vm.toString(i));
-            maxm[i - 1] = 0; // unlimited during seeding; tightened post-membership
+            names[i - 1] = _hatName(_subjects[i], string.concat("Role#", vm.toString(i))); // specOrder-10
+            maxm[i - 1] = _hatMaxSupply(_subjects[i]); // legacy maxSupply verbatim (R1)
         }
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
     }
@@ -521,12 +621,12 @@ abstract contract AccessV2MigrationBase is Script {
                 _pushSeedSlice(authority, subject, slice, delegable);
                 inBatch += len;
             }
-            // Tighten maxMembers to the live active count (§6 "max(active count, cap)") for TITLED roles
-            // only. The OPEN member role (default-ALLOW, QuickJoin) stays UNLIMITED so new joins keep
-            // working post-cutover — capping it at the current count would brick QuickJoin.
-            if (subject != _memberSubject) {
-                _push(authority, abi.encodeCall(IMembershipAuthority.setMaxMembers, (subject, uint32(members.length))));
-            }
+            // maxMembers is NOT tightened here: R1 adopts the legacy hats.viewHat(id).maxSupply
+            // VERBATIM at subject-creation time (_pushRoleSubjects / _pushAdminSubject). That is the
+            // honest live cap — headroom above the current count — so post-cutover grant/claim/vouch
+            // on titled roles does NOT revert SubjectFull, and it never produces the linted
+            // VouchWithMaxMembers anti-pattern (seedCompleteness-3). The open member role's maxSupply
+            // is likewise adopted verbatim (QuickJoin was already bounded by it legacy-side).
         }
     }
 
@@ -536,11 +636,13 @@ abstract contract AccessV2MigrationBase is Script {
             IEMMig.VouchCfg memory vc = IEMMig(s.eligibilityModule).getVouchConfig(subject);
             bool enabled = (vc.flags & 0x01) != 0;
             if (!enabled || vc.quorum == 0) continue;
-            // A legacy self-voucher config (voucherSubject == subject) is a v2 bootstrap deadlock the
-            // authority rejects ({WiringIncompatible}). It is NOT ported verbatim: members hold seeded
-            // explicit grants and stay eligible; governance re-configures a valid voucher subject
-            // post-cutover if vouch-lapse semantics are wanted (recorded in the migration notes).
-            if (vc.membershipHatId == subject || vc.membershipHatId == 0) continue;
+            // A4 (C1): a legacy SELF-voucher config (voucherSubject == subject) — KUBI's
+            // Executives-vouch-Executives officer gate — is a REAL live semantic the authority now
+            // ACCEPTS (emits the SelfVoucher lint, no WiringIncompatible revert). It IS ported verbatim
+            // (configureVouchAttestor(subject, quorum, subject) below + per-voucher records). Only a
+            // genuinely EMPTY voucher subject (membershipHatId == 0) is skipped — there is nothing to
+            // port, and members hold seeded explicit grants regardless.
+            if (vc.membershipHatId == 0) continue;
             _ensureSubjectPushed(authority, vc.membershipHatId);
             _push(
                 authority,
@@ -593,8 +695,8 @@ abstract contract AccessV2MigrationBase is Script {
         uint32[] memory maxm = new uint32[](1);
         ids[0] = id;
         kinds[0] = AccessV2Types.SubjectKind.Role;
-        names[0] = "VoucherRole";
-        maxm[0] = 0;
+        names[0] = _hatName(id, "VoucherRole"); // live details, fallback "VoucherRole" (specOrder-10)
+        maxm[0] = _hatMaxSupply(id); // legacy maxSupply verbatim (R1)
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
     }
 
@@ -663,7 +765,8 @@ abstract contract AccessV2MigrationBase is Script {
 
     /// @notice Build the exact atomic cutover Executor.Call[] in §6 order. `router` is the singleton.
     ///         Ordering: router BIND (before toggle-off) → setMembershipAuthority ×8 (incl. Executor
-    ///         self-target) → unpause → legacy toggle-off. announceWinner needs a 3,000,000 gas limit.
+    ///         self-target) → unpause → legacy toggle-off → in-batch CutoverVerifier.verify (LAST).
+    ///         announceWinner needs the per-org runbook --gas-limit (KUBI 5M, others 4M).
     ///         Returns the batch and the index of the router-bind call (for the ordering assertion).
     function _buildCutoverBatch(OrgSpec memory s, address authority, address router)
         internal
@@ -675,7 +778,9 @@ abstract contract AccessV2MigrationBase is Script {
         bool[] memory offs = new bool[](roleHats.length);
         // offs default false → setHatStatus(false)
 
-        batch = new IExecutor.Call[](11);
+        // The batch is 11 core calls + 1 trailing CutoverVerifier.verify (when a verifier is wired).
+        bool withVerify = _verifier != address(0);
+        batch = new IExecutor.Call[](withVerify ? 12 : 11);
         uint256 k;
 
         // 1. Router legacy-id BIND — BEFORE toggle-off (adopted ids flip passthrough→authority-native).
@@ -714,12 +819,48 @@ abstract contract AccessV2MigrationBase is Script {
             target: authority, value: 0, data: abi.encodeCall(IMembershipAuthority.setPaused, (false))
         });
 
-        // 10. Legacy-hat TOGGLE-OFF (one batched call) — AFTER the bind, so no hub/admin gap.
+        // 11. Legacy-hat TOGGLE-OFF (one batched call) — AFTER the bind, so no hub/admin gap.
         batch[k++] = IExecutor.Call({
             target: s.toggleModule, value: 0, data: abi.encodeCall(IToggleMig.batchSetHatStatus, (roleHats, offs))
         });
 
+        // 12. §6 IN-BATCH VERIFICATION (C4) — the LAST call: CutoverVerifier.verify require()s, THROUGH
+        //     the just-bound router, (a) every subject binds to THIS authority (no spoof), (b) authority
+        //     unpaused, (c) per-subject memberCount == the generation-time count (seed→cutover DRIFT
+        //     reverts the whole batch — the on-chain regenerate-before-cutover guard, A5) AND
+        //     memberCount <= canonical Hats supply, (d) the admin (topHat, subjects[0]) resolves to the
+        //     org Executor + is active through the router. A failed check reverts the ENTIRE batch, so
+        //     the runbook's "the cutover batch itself require()s counts and router-through resolution"
+        //     is now TRUE (was previously sim-only — specOrder-2 / simVsBroadcast-1 / seedCompleteness-2).
+        if (withVerify) {
+            (uint256[] memory subjects, uint32[] memory expectedCounts) = _cutoverExpectedCounts(authority);
+            batch[k++] = IExecutor.Call({
+                target: _verifier,
+                value: 0,
+                data: abi.encodeCall(ICutoverVerifierMig.verify, (s.orgId, authority, router, subjects, expectedCounts))
+            });
+        }
+
         require(k == batch.length, "batch length mismatch");
+    }
+
+    /// @dev Generation-time (post-seed, pre-cutover) per-subject memberCount, baked into the cutover
+    ///      batch as the verifier's `expectedCounts`. subjects[0] is the admin (topHat) id, as the
+    ///      CutoverVerifier requires. Any membership drift between generation and announceWinner then
+    ///      reverts the batch on-chain (A5 drift protection).
+    function _cutoverExpectedCounts(address authority)
+        internal
+        view
+        returns (uint256[] memory subjects, uint32[] memory expectedCounts)
+    {
+        uint256 n = _subjects.length;
+        subjects = new uint256[](n);
+        expectedCounts = new uint32[](n);
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        for (uint256 i; i < n; ++i) {
+            subjects[i] = _subjects[i];
+            expectedCounts[i] = uint32(a.memberCount(_subjects[i]));
+        }
     }
 
     function _setAuth(address module, address authority) internal pure returns (IExecutor.Call memory) {
