@@ -280,24 +280,13 @@ abstract contract AccessV2MigrationBase is Script {
 
     /*═══════════════════════════════ PREDEPLOY (§6 step 1) ═══════════════════════════════*/
 
-    /// @notice Deploy the authority BeaconProxy UNINITIALIZED, register it (register-before-init),
-    ///         then initialize it PAUSED with a minimal seed (the admin subject only — lock-out guard).
-    ///         AUTH: executor (pranked in sims / a governance call in production). Returns the proxy.
+    /// @notice Deploy the authority BeaconProxy UNINITIALIZED (permissionless; empty init data so the
+    ///         governance batch can order registerOrgContract BEFORE initialize). Register/init/seed
+    ///         all live in the SEED BATCH (built by _buildSeedBatches, executed by the Executor).
     function _predeployAuthority(OrgSpec memory s) internal returns (address authority) {
         address beacon = IPoaManagerMig(_poaManager(s)).getBeaconById(MEMBERSHIP_AUTHORITY_TYPEID);
         require(beacon != address(0), "MA beacon not registered (run protocol wave first)");
-
-        // 1. Permissionless proxy deploy — UNINITIALIZED (empty init data) so registration precedes init.
         authority = address(new BeaconProxy(beacon, ""));
-
-        // 2. Register in OrgRegistry BEFORE initialize (subgraph template ordering, §6 / graph-node note).
-        IOrgRegistryMig(_orgRegistry(s)).registerOrgContract(
-            s.orgId, MEMBERSHIP_AUTHORITY_TYPEID, authority, beacon, true, s.executor, false
-        );
-
-        // 3. Initialize PAUSED with the ADMIN subject as the sole genesis subject (seeded first).
-        IMembershipAuthority(authority).initialize(_minimalInit(s));
-        require(IMembershipAuthority(authority).paused(), "authority must be born paused");
     }
 
     /// @dev Minimal InitConfig: exactly the admin (topHat) subject — deny-default, unlimited. The
@@ -330,59 +319,106 @@ abstract contract AccessV2MigrationBase is Script {
         // vouch / perm arrays left empty (applied via seed batches).
     }
 
-    /*═══════════════════════════════ SEED (§6 step 2) ═══════════════════════════════*/
+    /*═══════════════════════════════ SEED BATCH (§6 step 2) ═══════════════════════════════*/
+    /*
+     * ONE SOURCE OF TRUTH for the ceremony content: the seed is BUILT as Executor.Call[] batches and
+     * EXECUTED through Executor.execute — by the rehearsal (pranked voting contract) and by the real
+     * governance proposals (HybridVoting create→vote→announceWinner) ALIKE. What is rehearsed is
+     * byte-identical to what ships.
+     *
+     * Batch 1: registerOrgContract → initialize(PAUSED) → admin seed → role subjects → defaults →
+     *          SUBJECT_RENAME → module perms.   (register-before-initialize INSIDE one tx: same-block
+     *          init events are safe for the subgraph template — graph-node note.)
+     * Batch 2+: per-subject membership chunks — each chunk carries seedRules AND seedMemberships for
+     *          the SAME member slice (the §6 SEED INVARIANT holds per-chunk, even across KUBI's split
+     *          batches) — then tighten, vouch, email.
+     */
 
-    /// @notice Full seed choreography. AUTH: executor (pranked). Ordering per §6:
-    ///         admin membership → role subjects → defaults → SUBJECT_RENAME → perms →
-    ///         memberships(+rule source) → vouch → email. Every write is pause-exempt.
-    function _seedAuthority(OrgSpec memory s, address authority, address[] memory candidates) internal {
-        IMembershipAuthority a = IMembershipAuthority(authority);
+    uint256 internal constant SEED_CHUNK = 20; // members per membership chunk (announceWinner gas bound)
+    // Executor.MAX_CALLS_PER_BATCH is 20; _push auto-splits at this bound. A seedRules/seedMemberships
+    // pair straddling a split is SAFE for the §6 invariant: rules are always pushed BEFORE their
+    // memberships, so across any split the eligibility source lands first — a member can be briefly
+    // eligible-but-not-accepted (harmless), never accepted-but-ineligible.
+    uint256 internal constant MAX_CALLS = 20;
+
+    IExecutor.Call[][] internal _batches;
+
+    function _push(address target, bytes memory data) internal {
+        if (_batches[_batches.length - 1].length >= MAX_CALLS) _newBatch();
+        _batches[_batches.length - 1].push(IExecutor.Call({target: target, value: 0, data: data}));
+    }
+
+    function _newBatch() internal {
+        _batches.push();
+    }
+
+    /// @notice Build the full §6 seed choreography as governance batches for `authority`.
+    function _buildSeedBatches(OrgSpec memory s, address authority, address[] memory candidates)
+        internal
+        returns (IExecutor.Call[][] memory)
+    {
+        delete _batches;
+        address beacon = IPoaManagerMig(_poaManager(s)).getBeaconById(MEMBERSHIP_AUTHORITY_TYPEID);
         uint256 topHat = _topHatId(s);
 
-        // (0) ADMIN membership: grant + accept the Executor on the admin subject FIRST (lock-out guard).
-        _seedOne(a, topHat, s.executor, true);
+        /*── Batch 1: register → init(PAUSED) → admin → subjects → defaults → rename → perms ──*/
+        _newBatch();
+        _push(
+            _orgRegistry(s),
+            abi.encodeCall(
+                IOrgRegistryMig.registerOrgContract,
+                (s.orgId, MEMBERSHIP_AUTHORITY_TYPEID, authority, beacon, true, s.executor, false)
+            )
+        );
+        _push(authority, abi.encodeCall(IMembershipAuthority.initialize, (_minimalInit(s))));
 
-        // (1) Role subjects: create each with maxMembers=0 (unlimited) to avoid any SubjectFull during
-        //     seeding; tightened to the live active count afterward (§6 "max(active count, cap)").
-        _seedRoleSubjects(a);
+        // (0) ADMIN membership FIRST (lock-out guard).
+        _pushSeedSlice(authority, topHat, _single(s.executor), true);
 
-        // (2) Defaults: the QuickJoin member role is default-ALLOW (open, QuickJoin keeps working);
-        //     every titled role stays deny-by-default (explicit grants below carry members). (§2)
-        if (_memberSubject != 0) a.setSubjectDefault(_memberSubject, true, false);
+        // (1) Role subjects (maxMembers=0 during seeding; tightened after memberships).
+        _pushRoleSubjects(authority);
 
-        // (3) SUBJECT_RENAME from live metadataAdmin wearership (§1/§6) — so no live metadata-holder
-        //     silently loses the rename power. Attach the perm to the metadataAdmin subject.
-        a.setPerm(_metadataAdminHat, AccessV2PermKeys.SUBJECT_RENAME, bytes32(0), _boolWord());
+        // (2) Default-ALLOW on the open member role (QuickJoin keeps working).
+        if (_memberSubject != 0) {
+            _push(authority, abi.encodeCall(IMembershipAuthority.setSubjectDefault, (_memberSubject, true, false)));
+        }
 
-        // (4) Perm table from the audited module inventory (§3/§4).
-        _seedPerms(s, a);
+        // (3) SUBJECT_RENAME from live metadataAdmin wearership.
+        _pushPerm(authority, _metadataAdminHat, AccessV2PermKeys.SUBJECT_RENAME, _boolWord());
 
-        // (5) Memberships (+ per-wearer explicit-ALLOW as the SAME-batch eligibility source, §6 invariant).
-        _seedMembershipsAndTighten(s, a, candidates);
+        // (4) Perm table from the audited module inventory.
+        _buildPerms(s, authority);
 
-        // (6) Vouch attestor state (per-org choice: VERBATIM counts+epochs vs AMNESTY). (§6)
-        _seedVouch(s, a, candidates);
+        /*── Batch 2+: memberships (chunked; rule+membership same chunk) → tighten → vouch → email ──*/
+        _newBatch();
+        _buildMembershipsAndTighten(s, authority, candidates);
+        _buildVouch(s, authority, candidates);
+        if (s.zkEmailInvites != address(0)) _buildEmail(s, authority, candidates);
 
-        // (7) Email-verified flags (Test6 zk continuity, §6).
-        if (s.zkEmailInvites != address(0)) _seedEmail(s, a, candidates);
+        return _batches;
     }
 
-    /// @dev Seed a single (subject,user): governance explicit-ALLOW then accepted membership.
-    function _seedOne(IMembershipAuthority a, uint256 subject, address user, bool delegable) internal {
-        uint256[] memory subs = new uint256[](1);
-        address[] memory usr = new address[](1);
-        AccessV2Types.RuleKind[] memory kinds = new AccessV2Types.RuleKind[](1);
-        bool[] memory del = new bool[](1);
-        subs[0] = subject;
-        usr[0] = user;
-        kinds[0] = AccessV2Types.RuleKind.Grant;
-        del[0] = delegable;
-        a.seedRules(subs, usr, kinds, del);
-        a.seedMemberships(subs, usr);
+    /// @dev Push seedRules+seedMemberships for one (subject, member-slice) — the invariant unit.
+    function _pushSeedSlice(address authority, uint256 subject, address[] memory members, bool delegable) internal {
+        AccessV2Types.RuleKind[] memory kinds = new AccessV2Types.RuleKind[](members.length);
+        bool[] memory del = new bool[](members.length);
+        uint256[] memory subs = new uint256[](members.length);
+        for (uint256 j; j < members.length; ++j) {
+            kinds[j] = AccessV2Types.RuleKind.Grant;
+            del[j] = delegable;
+            subs[j] = subject;
+        }
+        _push(authority, abi.encodeCall(IMembershipAuthority.seedRules, (subs, members, kinds, del)));
+        _push(authority, abi.encodeCall(IMembershipAuthority.seedMemberships, (subs, members)));
     }
 
-    function _seedRoleSubjects(IMembershipAuthority a) internal {
-        // skip index 0 (admin subject already exists from initialize)
+    function _single(address x) internal pure returns (address[] memory arr) {
+        arr = new address[](1);
+        arr[0] = x;
+    }
+
+    function _pushRoleSubjects(address authority) internal {
+        // skip index 0 (admin subject — created by initialize's genesis seed)
         uint256 count = _subjects.length - 1;
         if (count == 0) return;
         uint256[] memory ids = new uint256[](count);
@@ -395,45 +431,44 @@ abstract contract AccessV2MigrationBase is Script {
             names[i - 1] = string.concat("Role#", vm.toString(i));
             maxm[i - 1] = 0; // unlimited during seeding; tightened post-membership
         }
-        a.seedSubjects(ids, kinds, names, maxm);
+        _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
     }
 
-    /// @dev Perm rows: for each role subject that a module gates on, attach the module's perm key.
-    ///      member-class → delegable in memberships; here we attach the boolean/mask perm words.
-    function _seedPerms(OrgSpec memory s, IMembershipAuthority a) internal {
-        // DD: voting hats → DD_VOTE, creator hats → DD_CREATE
-        _attachBool(a, IDDMig(s.dd).votingHats(), AccessV2PermKeys.DD_VOTE);
-        _attachBool(a, IDDMig(s.dd).creatorHats(), AccessV2PermKeys.DD_CREATE);
-        // HV: creator hats → HV_CREATE
-        _attachBool(a, IHVMig(s.hv).creatorHats(), AccessV2PermKeys.HV_CREATE);
-        // PT: member/approver
-        _attachBool(a, IPTMig(s.pt).memberHatIds(), AccessV2PermKeys.PT_MEMBER);
-        _attachBool(a, IPTMig(s.pt).approverHatIds(), AccessV2PermKeys.PT_APPROVE);
-        // EDU: creator/member
-        _attachBool(a, IEDUMig(s.edu).creatorHatIds(), AccessV2PermKeys.EDU_CREATE);
-        _attachBool(a, IEDUMig(s.edu).memberHatIds(), AccessV2PermKeys.EDU_MEMBER);
-        // QJ: member role → auto-join key
-        _attachBool(a, IQJMig(s.qj).memberHatIds(), AccessV2PermKeys.QJ_AUTOJOIN);
+    /// @dev Perm rows: for each role subject a module gates on, attach the module's perm key.
+    mapping(uint256 => mapping(bytes32 => bool)) internal _permPushed; // build-time dedup (union across modules)
+
+    function _buildPerms(OrgSpec memory s, address authority) internal {
+        _attachBool(authority, IDDMig(s.dd).votingHats(), AccessV2PermKeys.DD_VOTE);
+        _attachBool(authority, IDDMig(s.dd).creatorHats(), AccessV2PermKeys.DD_CREATE);
+        _attachBool(authority, IHVMig(s.hv).creatorHats(), AccessV2PermKeys.HV_CREATE);
+        _attachBool(authority, IPTMig(s.pt).memberHatIds(), AccessV2PermKeys.PT_MEMBER);
+        _attachBool(authority, IPTMig(s.pt).approverHatIds(), AccessV2PermKeys.PT_APPROVE);
+        _attachBool(authority, IEDUMig(s.edu).creatorHatIds(), AccessV2PermKeys.EDU_CREATE);
+        _attachBool(authority, IEDUMig(s.edu).memberHatIds(), AccessV2PermKeys.EDU_MEMBER);
+        _attachBool(authority, IQJMig(s.qj).memberHatIds(), AccessV2PermKeys.QJ_AUTOJOIN);
         // TM: permission hats → TM_PERMS global mask (ctx=0). Low 8 bits carry the mask; seed all-perms
         //     (0xFF) for holders — behavior-preserving for the global fold (per-project inherit=true).
-        _attachMask(a, _tmPermissionHats(s), AccessV2PermKeys.TM_PERMS, 0xFF);
+        _attachMask(authority, _tmPermissionHats(s), AccessV2PermKeys.TM_PERMS, 0xFF);
     }
 
-    function _attachBool(IMembershipAuthority a, uint256[] memory ids, bytes32 key) internal {
+    function _attachBool(address authority, uint256[] memory ids, bytes32 key) internal {
         for (uint256 i; i < ids.length; ++i) {
-            if (ids[i] == 0) continue;
-            // idempotent: skip if already attached (union across modules)
-            if (a.getPerm(ids[i], key, bytes32(0)) != 0) continue;
-            a.setPerm(ids[i], key, bytes32(0), _boolWord());
+            if (ids[i] == 0 || _permPushed[ids[i]][key]) continue;
+            _pushPerm(authority, ids[i], key, _boolWord());
         }
     }
 
-    function _attachMask(IMembershipAuthority a, uint256[] memory ids, bytes32 key, uint256 mask) internal {
+    function _attachMask(address authority, uint256[] memory ids, bytes32 key, uint256 mask) internal {
         for (uint256 i; i < ids.length; ++i) {
-            if (ids[i] == 0) continue;
-            if (a.getPerm(ids[i], key, bytes32(0)) != 0) continue;
-            a.setPerm(ids[i], key, bytes32(0), AccessV2PermKeys.EXISTS_BIT | (mask & AccessV2PermKeys.VALUE_MASK));
+            if (ids[i] == 0 || _permPushed[ids[i]][key]) continue;
+            _pushPerm(authority, ids[i], key, AccessV2PermKeys.EXISTS_BIT | (mask & AccessV2PermKeys.VALUE_MASK));
         }
+    }
+
+    function _pushPerm(address authority, uint256 subject, bytes32 key, uint256 word) internal {
+        if (_permPushed[subject][key]) return;
+        _permPushed[subject][key] = true;
+        _push(authority, abi.encodeCall(IMembershipAuthority.setPerm, (subject, key, bytes32(0), word)));
     }
 
     function _boolWord() internal pure returns (uint256) {
@@ -441,34 +476,39 @@ abstract contract AccessV2MigrationBase is Script {
         return AccessV2PermKeys.EXISTS_BIT | uint256(1);
     }
 
-    /// @dev Per role subject: seed grant(delegable)+membership for every current wearer, then tighten
-    ///      maxMembers to the live active count (§6). member-class role → delegable=true; else sticky.
-    function _seedMembershipsAndTighten(OrgSpec memory s, IMembershipAuthority a, address[] memory candidates)
-        internal
-    {
+    /// @dev Per role subject: rules+memberships for every current wearer (SEED_CHUNK members per slice,
+    ///      opening a fresh batch when a chunk boundary is crossed), then tighten maxMembers (§6).
+    function _buildMembershipsAndTighten(OrgSpec memory s, address authority, address[] memory candidates) internal {
+        uint256 inBatch;
         for (uint256 si = 1; si < _subjects.length; ++si) {
             uint256 subject = _subjects[si];
             address[] memory members = _currentMembers(s, subject, candidates);
             if (members.length == 0) continue;
             bool delegable = (subject == _memberSubject); // member-class delegable, officer-class sticky
-            AccessV2Types.RuleKind[] memory kinds = new AccessV2Types.RuleKind[](members.length);
-            bool[] memory del = new bool[](members.length);
-            uint256[] memory subs = new uint256[](members.length);
-            for (uint256 j; j < members.length; ++j) {
-                kinds[j] = AccessV2Types.RuleKind.Grant;
-                del[j] = delegable;
-                subs[j] = subject;
+            for (uint256 off; off < members.length; off += SEED_CHUNK) {
+                uint256 len = members.length - off;
+                if (len > SEED_CHUNK) len = SEED_CHUNK;
+                if (inBatch + len > SEED_CHUNK) {
+                    _newBatch(); // split proposal: invariant holds per-chunk (rules+memberships together)
+                    inBatch = 0;
+                }
+                address[] memory slice = new address[](len);
+                for (uint256 j; j < len; ++j) {
+                    slice[j] = members[off + j];
+                }
+                _pushSeedSlice(authority, subject, slice, delegable);
+                inBatch += len;
             }
-            a.seedRules(subs, members, kinds, del);
-            a.seedMemberships(subs, members);
             // Tighten maxMembers to the live active count (§6 "max(active count, cap)") for TITLED roles
             // only. The OPEN member role (default-ALLOW, QuickJoin) stays UNLIMITED so new joins keep
             // working post-cutover — capping it at the current count would brick QuickJoin.
-            if (subject != _memberSubject) a.setMaxMembers(subject, uint32(members.length));
+            if (subject != _memberSubject) {
+                _push(authority, abi.encodeCall(IMembershipAuthority.setMaxMembers, (subject, uint32(members.length))));
+            }
         }
     }
 
-    function _seedVouch(OrgSpec memory s, IMembershipAuthority a, address[] memory candidates) internal {
+    function _buildVouch(OrgSpec memory s, address authority, address[] memory candidates) internal {
         for (uint256 si; si < _subjects.length; ++si) {
             uint256 subject = _subjects[si];
             IEMMig.VouchCfg memory vc = IEMMig(s.eligibilityModule).getVouchConfig(subject);
@@ -479,9 +519,11 @@ abstract contract AccessV2MigrationBase is Script {
             // explicit grants and stay eligible; governance re-configures a valid voucher subject
             // post-cutover if vouch-lapse semantics are wanted (recorded in the migration notes).
             if (vc.membershipHatId == subject || vc.membershipHatId == 0) continue;
-            // Ensure the voucher (membership) subject exists as a subject.
-            _ensureSubjectSeeded(a, vc.membershipHatId);
-            a.configureVouchAttestor(subject, vc.quorum, vc.membershipHatId);
+            _ensureSubjectPushed(authority, vc.membershipHatId);
+            _push(
+                authority,
+                abi.encodeCall(IMembershipAuthority.configureVouchAttestor, (subject, vc.quorum, vc.membershipHatId))
+            );
             if (!s.vouchVerbatim) continue; // AMNESTY: members already hold explicit grants; re-vouch later
             // VERBATIM: port each current member's received-vouch COUNT into the current epoch.
             address[] memory members = _currentMembers(s, subject, candidates);
@@ -491,11 +533,13 @@ abstract contract AccessV2MigrationBase is Script {
                 counts[j] = IEMMig(s.eligibilityModule).currentVouchCount(subject, members[j]);
                 if (counts[j] > 0) nonzero++;
             }
-            if (nonzero > 0) a.seedVouches(subject, members, counts);
+            if (nonzero > 0) {
+                _push(authority, abi.encodeCall(IMembershipAuthority.seedVouches, (subject, members, counts)));
+            }
         }
     }
 
-    function _ensureSubjectSeeded(IMembershipAuthority a, uint256 id) internal {
+    function _ensureSubjectPushed(address authority, uint256 id) internal {
         if (id == 0 || _seen[id]) return;
         _addSubject(id);
         uint256[] memory ids = new uint256[](1);
@@ -506,10 +550,10 @@ abstract contract AccessV2MigrationBase is Script {
         kinds[0] = AccessV2Types.SubjectKind.Role;
         names[0] = "VoucherRole";
         maxm[0] = 0;
-        a.seedSubjects(ids, kinds, names, maxm);
+        _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
     }
 
-    function _seedEmail(OrgSpec memory s, IMembershipAuthority a, address[] memory candidates) internal {
+    function _buildEmail(OrgSpec memory s, address authority, address[] memory candidates) internal {
         for (uint256 si; si < _subjects.length; ++si) {
             uint256 subject = _subjects[si];
             address[] memory tmp = new address[](candidates.length);
@@ -522,7 +566,7 @@ abstract contract AccessV2MigrationBase is Script {
             for (uint256 j; j < n; ++j) {
                 users[j] = tmp[j];
             }
-            a.seedEmailVerified(subject, users);
+            _push(authority, abi.encodeCall(IMembershipAuthority.seedEmailVerified, (subject, users)));
         }
     }
 
@@ -592,9 +636,7 @@ abstract contract AccessV2MigrationBase is Script {
         // 1. Router legacy-id BIND — BEFORE toggle-off (adopted ids flip passthrough→authority-native).
         bindIndex = k;
         batch[k++] = IExecutor.Call({
-            target: router,
-            value: 0,
-            data: abi.encodeCall(IAuthorityRouter.bindAuthority, (s.orgId, domain, authority))
+            target: router, value: 0, data: abi.encodeCall(IAuthorityRouter.bindAuthority, (s.orgId, domain, authority))
         });
 
         // 2-8. setMembershipAuthority on the 7 non-Executor modules...
@@ -606,9 +648,7 @@ abstract contract AccessV2MigrationBase is Script {
         batch[k++] = _setAuth(s.qj, authority);
         // ...and the Executor itself (repoints l.hats — the W6 self-target allowlist).
         batch[k++] = IExecutor.Call({
-            target: s.executor,
-            value: 0,
-            data: abi.encodeCall(IExecMig.setMembershipAuthority, (authority))
+            target: s.executor, value: 0, data: abi.encodeCall(IExecMig.setMembershipAuthority, (authority))
         });
 
         // 9. targetTypes: map the authority target → MembershipAuthority typeId so the hub resolves its
@@ -626,22 +666,20 @@ abstract contract AccessV2MigrationBase is Script {
 
         // 10. UNPAUSE the authority (reads were live; now open non-executor writes).
         batch[k++] = IExecutor.Call({
-            target: authority,
-            value: 0,
-            data: abi.encodeCall(IMembershipAuthority.setPaused, (false))
+            target: authority, value: 0, data: abi.encodeCall(IMembershipAuthority.setPaused, (false))
         });
 
         // 10. Legacy-hat TOGGLE-OFF (one batched call) — AFTER the bind, so no hub/admin gap.
         batch[k++] = IExecutor.Call({
-            target: s.toggleModule,
-            value: 0,
-            data: abi.encodeCall(IToggleMig.batchSetHatStatus, (roleHats, offs))
+            target: s.toggleModule, value: 0, data: abi.encodeCall(IToggleMig.batchSetHatStatus, (roleHats, offs))
         });
 
         require(k == batch.length, "batch length mismatch");
     }
 
     function _setAuth(address module, address authority) internal pure returns (IExecutor.Call memory) {
-        return IExecutor.Call({target: module, value: 0, data: abi.encodeWithSignature("setMembershipAuthority(address)", authority)});
+        return IExecutor.Call({
+            target: module, value: 0, data: abi.encodeWithSignature("setMembershipAuthority(address)", authority)
+        });
     }
 }

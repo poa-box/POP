@@ -170,6 +170,20 @@ contract OrgDeployerPaymasterRulesTest is Test {
         assertEq(_hintOfType(entries, ModuleTypes.ROLE_MANAGER_ID, RoleManager.grantRole.selector), 800_000);
         assertEq(_hintOfType(entries, ModuleTypes.ROLE_MANAGER_ID, RoleManager.revokeRole.selector), 800_000);
 
+        // Access-v2 MembershipAuthority user-facing entries (Wave D1) carry the calibrated hints;
+        // vouch mirrors EM vouchFor's hint-free entry, finalize is the heavy verb.
+        bytes32 maId = ModuleTypes.MEMBERSHIP_AUTHORITY_ID;
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("claim(uint256)"))), 300_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("renounce(uint256)"))), 200_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("vouch(uint256,address)"))), 0);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("revokeVouch(uint256,address)"))), 200_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("delegatedGrant(uint256,address)"))), 250_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("delegatedOffer(uint256,address)"))), 300_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("delegatedRemove(uint256,address,bool)"))), 250_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("delegatedUnremove(uint256,address)"))), 200_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("finalize(uint256)"))), 600_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("cancel(uint256)"))), 200_000);
+
         // Everything else is hint-free (0 = "no per-rule cap", the hub's default).
         for (uint256 i = 0; i < entries.length; i++) {
             bool isHintedEm = entries[i].typeId == ModuleTypes.ELIGIBILITY_MODULE_ID
@@ -179,7 +193,8 @@ contract OrgDeployerPaymasterRulesTest is Test {
                     || entries[i].selector == EligibilityModule.finalizeKick.selector
                     || entries[i].selector == EligibilityModule.unkickWearer.selector);
             bool isRoleManager = entries[i].typeId == ModuleTypes.ROLE_MANAGER_ID;
-            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID && !isHintedEm && !isRoleManager) {
+            bool isAuthority = entries[i].typeId == maId;
+            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID && !isHintedEm && !isRoleManager && !isAuthority) {
                 assertEq(entries[i].maxCallGasHint, 0, "unexpected gas hint outside the hinted entry set");
             }
         }

@@ -108,13 +108,18 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         // (1) Protocol effects.
         address router = _setupProtocol(s);
 
-        // (2) PREDEPLOY + SEED (executor-pranked; register-before-initialize; paused).
+        // (2) PREDEPLOY (permissionless proxy) + SEED as governance batches through Executor.execute —
+        //     the SAME Call[] content the real proposals will carry (one source of truth).
         _discoverSubjects(s);
         console.log("  subjects discovered:", _subjects.length);
-        vm.startPrank(s.executor);
         address authority = _predeployAuthority(s);
-        _seedAuthority(s, authority, candidates);
-        vm.stopPrank();
+        IExecutor.Call[][] memory seedBatches = _buildSeedBatches(s, authority, candidates);
+        console.log("  seed batches (proposals):", seedBatches.length);
+        for (uint256 b; b < seedBatches.length; ++b) {
+            vm.prank(s.votingContract);
+            IExecMig(s.executor).execute(100 + b, seedBatches[b]);
+        }
+        require(IMembershipAuthority(authority).paused(), "authority must be paused after seed batches");
 
         // (3) SEED INVARIANT.
         uint256 seeded = _assertSeedInvariant(s, authority, candidates);
@@ -379,7 +384,9 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         hatIds[0] = _memberSubject;
         vm.prank(s.qj);
         try IExecMig(s.executor).mintHatsForUser(fresh, hatIds) {
-            require(IMembershipAuthority(authority).isMember(_memberSubject, fresh), "QuickJoin mint did not create member");
+            require(
+                IMembershipAuthority(authority).isMember(_memberSubject, fresh), "QuickJoin mint did not create member"
+            );
             console.log("  probe QuickJoin join path: OK (QJ->Executor.mintHatsForUser->authority.mintHat)");
             return;
         } catch {}
@@ -388,8 +395,12 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         address fresh2 = address(uint160(uint256(keccak256(abi.encode(s.orgId, "qj-join2")))));
         vm.prank(s.executor);
         IMembershipAuthority(authority).mintHat(_memberSubject, fresh2);
-        require(IMembershipAuthority(authority).isMember(_memberSubject, fresh2), "authority.mintHat did not create member");
-        console.log("  probe QuickJoin join path: OK (QJ unauthorized on this Executor; terminal mintHat surface verified)");
+        require(
+            IMembershipAuthority(authority).isMember(_memberSubject, fresh2), "authority.mintHat did not create member"
+        );
+        console.log(
+            "  probe QuickJoin join path: OK (QJ unauthorized on this Executor; terminal mintHat surface verified)"
+        );
     }
 
     function _probePT(OrgSpec memory s, address authority, address[] memory candidates) internal view {
@@ -400,7 +411,9 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             if (holder == address(0)) continue;
             require(a.hasPerm(holder, AccessV2PermKeys.PT_MEMBER, bytes32(0)) != 0, "PT_MEMBER empty for a PT member");
             address stranger = address(uint160(uint256(keccak256(abi.encode(s.orgId, "pt-stranger")))));
-            require(a.hasPerm(stranger, AccessV2PermKeys.PT_MEMBER, bytes32(0)) == 0, "PT_MEMBER nonzero for a stranger");
+            require(
+                a.hasPerm(stranger, AccessV2PermKeys.PT_MEMBER, bytes32(0)) == 0, "PT_MEMBER nonzero for a stranger"
+            );
             console.log("  probe ParticipationToken gate: OK (member allowed, stranger denied)");
             return;
         }
@@ -415,9 +428,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
 
         IExecutor.Call[] memory rb = new IExecutor.Call[](1);
         rb[0] = IExecutor.Call({
-            target: s.dd,
-            value: 0,
-            data: abi.encodeWithSignature("setMembershipAuthority(address)", address(0))
+            target: s.dd, value: 0, data: abi.encodeWithSignature("setMembershipAuthority(address)", address(0))
         });
         vm.prank(s.votingContract);
         IExecMig(s.executor).execute(2, rb);
@@ -501,104 +512,126 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
     }
 }
 
-/* ════════════════════════════ Per-org rehearsals (org atlas, waveD-recon.md) ════════════════════════════ */
+/* ════════════════════════════ Org catalog (org atlas, waveD-recon.md) ════════════════════════════ */
 
-contract RehearseTest6 is RehearseMigrationBase {
-    function run() public {
-        _rehearse(
-            OrgSpec({
-                name: "Test6",
-                orgId: 0x263b2b29f392647f0fb8ddbb26f099e812ab4ba2777e5e07b906277164181f6b,
-                gnosis: true,
-                executor: 0xA09F1035Ff97d17ccA40048F027c654b66B83183,
-                votingContract: 0xF642DdE77848dC195c8089F4042A311Ed650d7a6,
-                dd: 0xd2667117ED47aD259fEf73F54f31a3eF9A5D889F,
-                hv: 0xF642DdE77848dC195c8089F4042A311Ed650d7a6,
-                tm: 0x3d93f0D090356D25E7a1614F0F8764b103ca99bc,
-                pt: 0x6083c52b2F5861F327526bD646EaA754edDD5cCf,
-                edu: 0x6a29222E29FDc0000AbA55329DfF0a50D9a8e8F9,
-                qj: 0x09d7006724C2Ba9bf9084ad9db6DbB09B990843d,
-                eligibilityModule: 0xf01F2bDd5C86E7B676117cB0d6E2c07aa36E8c8B,
-                toggleModule: 0x7653674711Bf5d53FC10F17fE9aA66431c586512,
-                paymentManager: 0x10E96701746B567882b74E39a24AEe7267c22Bb5,
-                zkEmailInvites: 0xADAf24f05EE0D647A7c2AF5cAD0F377F1B159FD2,
-                vouchVerbatim: false // Test6 uses zk-email continuity; vouch AMNESTY (recorded)
-            })
-        );
+abstract contract OrgCatalog is RehearseMigrationBase {
+    function _specByKey(string memory key) internal pure returns (OrgSpec memory) {
+        bytes32 h = keccak256(bytes(key));
+        if (h == keccak256("TEST6")) return _test6Spec();
+        if (h == keccak256("DP")) return _decentralParkSpec();
+        if (h == keccak256("KUBI")) return _kubiSpec();
+        if (h == keccak256("POA")) return _poaSpec();
+        revert("unknown ORG key (TEST6|DP|KUBI|POA)");
+    }
+
+    function _test6Spec() internal pure returns (OrgSpec memory) {
+        return OrgSpec({
+            name: "Test6",
+            orgId: 0x263b2b29f392647f0fb8ddbb26f099e812ab4ba2777e5e07b906277164181f6b,
+            gnosis: true,
+            executor: 0xA09F1035Ff97d17ccA40048F027c654b66B83183,
+            votingContract: 0xF642DdE77848dC195c8089F4042A311Ed650d7a6,
+            dd: 0xd2667117ED47aD259fEf73F54f31a3eF9A5D889F,
+            hv: 0xF642DdE77848dC195c8089F4042A311Ed650d7a6,
+            tm: 0x3d93f0D090356D25E7a1614F0F8764b103ca99bc,
+            pt: 0x6083c52b2F5861F327526bD646EaA754edDD5cCf,
+            edu: 0x6a29222E29FDc0000AbA55329DfF0a50D9a8e8F9,
+            qj: 0x09d7006724C2Ba9bf9084ad9db6DbB09B990843d,
+            eligibilityModule: 0xf01F2bDd5C86E7B676117cB0d6E2c07aa36E8c8B,
+            toggleModule: 0x7653674711Bf5d53FC10F17fE9aA66431c586512,
+            paymentManager: 0x10E96701746B567882b74E39a24AEe7267c22Bb5,
+            zkEmailInvites: 0xADAf24f05EE0D647A7c2AF5cAD0F377F1B159FD2,
+            vouchVerbatim: false // Test6 uses zk-email continuity; vouch AMNESTY (recorded)
+        });
+    }
+
+    function _decentralParkSpec() internal pure returns (OrgSpec memory) {
+        return OrgSpec({
+            name: "DecentralPark",
+            orgId: 0x3721271eb827a52a5adf676136d302efe19c34e72f08e080b07b225eecf27d78,
+            gnosis: true,
+            executor: 0x2A01133997abE2a001862cf0B03B22fe958FA4bC,
+            votingContract: 0x1B80CA1EF7F274E141658A666fc12277957bF7A1,
+            dd: 0xF3e3EB13214D9F98e6115e3C2602aE66340CD575,
+            hv: 0x1B80CA1EF7F274E141658A666fc12277957bF7A1,
+            tm: 0x2D9d397A842B8D691ea2A232062CbC8eF8eBbdB7,
+            pt: 0x1A8b31903C98e514332991a70C00566ec2DeE14e,
+            edu: 0x80a78A0b7E0d491B7cc4cF0bAFe8bce3be9e1454,
+            qj: 0xBEba9EF99aa6E0693c22b60d4Ea5ed7C395F26f1,
+            eligibilityModule: 0xe4A02F20B8282A272879e31479Ee070dab07B015,
+            toggleModule: 0xe4e6A68c43d9d5d4731A44C20f639C76F1913F17,
+            paymentManager: 0xebC2224Dc7Ee7DdcE889e49685dB095780Be17a1,
+            zkEmailInvites: address(0),
+            vouchVerbatim: false // AMNESTY (recorded)
+        });
+    }
+
+    function _kubiSpec() internal pure returns (OrgSpec memory) {
+        return OrgSpec({
+            name: "KUBI",
+            orgId: 0xc0f2765d555e21bfad5c6b05accef86a5758e0dee3e9a5b4ee3c3f3069c2102e,
+            gnosis: true,
+            executor: 0x23f90B3859818A843C3a848627A304Bc53947342,
+            votingContract: 0x13CBd5eD47bF177968B24D84516a75879c23971E,
+            dd: 0xe24Cb844C73095569FA146D673D45c252894200f,
+            hv: 0x13CBd5eD47bF177968B24D84516a75879c23971E,
+            tm: 0xF57024fC77915Fce8f2608afdd027941bCEE3336,
+            pt: 0x23641B4b54E1bf63FD519b242407b9314093B33C,
+            edu: 0x83C7Aa49C0C5a55E22640AC164abA838E6f1f7ae,
+            qj: 0x5dBda3649B7044C8fDd0E540e86E536dDA7926Cf,
+            eligibilityModule: 0x27114Cb757BeDF77E30EeB0Ca635e3368d8C2914,
+            toggleModule: 0xB4da98791573ddf15Bb811D497A4212904eBA3ED,
+            paymentManager: 0x4009c825b38Fb0ebB6391d5FABe4FAf90e178dF1,
+            zkEmailInvites: 0x32cc2D8563e691A3Ca43723A9F558f7AD8dbA9ec,
+            vouchVerbatim: true // KUBI Executive: VERBATIM port (counts + epochs), recon-mandated
+        });
+    }
+
+    function _poaSpec() internal pure returns (OrgSpec memory) {
+        return OrgSpec({
+            name: "Poa",
+            orgId: 0xa71879ef0e38b15fe7080196c0102f859e0ca8e7b8c0703ec8df03c66befd069,
+            gnosis: false,
+            executor: 0xB1ff2Bd0231770ccc91801aa1fae4b3226E1fE41,
+            votingContract: 0x34aa1bD79a3A5eb5d2B208eb4f091ccF6B1081d5,
+            dd: 0xC82b179f5b4e325aC1B77A423FDb266AeBfCA5E8,
+            hv: 0x34aa1bD79a3A5eb5d2B208eb4f091ccF6B1081d5,
+            tm: 0x681f29751724D2bED331d3EB35e0C9B1C57aF9F0,
+            pt: 0x33CD0B9ae54c43C11Fd05fE00afd3DBC71D9603E,
+            edu: 0xe37Db8cCD295C9E4fEbb19a91efe13aCe24ca596,
+            qj: 0x366c605A3064a680fb5c05Bf9EeDa512fdDBF03a,
+            eligibilityModule: 0xE4F9CB9C843D0A5bd5D52e3266138B13A635743b,
+            toggleModule: 0x14Aced4F1B6fB1EF4030E7E7E19A3e6aB0B931a1,
+            paymentManager: 0xAe470B8366AF331F52D9eA26efD7Cb2d276878B3,
+            zkEmailInvites: address(0),
+            vouchVerbatim: false // AMNESTY (recorded)
+        });
     }
 }
 
-contract RehearseDecentralPark is RehearseMigrationBase {
+/* ════════════════════════════ Per-org rehearsals ════════════════════════════ */
+
+contract RehearseTest6 is OrgCatalog {
     function run() public {
-        _rehearse(
-            OrgSpec({
-                name: "DecentralPark",
-                orgId: 0x3721271eb827a52a5adf676136d302efe19c34e72f08e080b07b225eecf27d78,
-                gnosis: true,
-                executor: 0x2A01133997abE2a001862cf0B03B22fe958FA4bC,
-                votingContract: 0x1B80CA1EF7F274E141658A666fc12277957bF7A1,
-                dd: 0xF3e3EB13214D9F98e6115e3C2602aE66340CD575,
-                hv: 0x1B80CA1EF7F274E141658A666fc12277957bF7A1,
-                tm: 0x2D9d397A842B8D691ea2A232062CbC8eF8eBbdB7,
-                pt: 0x1A8b31903C98e514332991a70C00566ec2DeE14e,
-                edu: 0x80a78A0b7E0d491B7cc4cF0bAFe8bce3be9e1454,
-                qj: 0xBEba9EF99aa6E0693c22b60d4Ea5ed7C395F26f1,
-                eligibilityModule: 0xe4A02F20B8282A272879e31479Ee070dab07B015,
-                toggleModule: 0xe4e6A68c43d9d5d4731A44C20f639C76F1913F17,
-                paymentManager: 0xebC2224Dc7Ee7DdcE889e49685dB095780Be17a1,
-                zkEmailInvites: address(0),
-                vouchVerbatim: false // AMNESTY (recorded)
-            })
-        );
+        _rehearse(_test6Spec());
     }
 }
 
-contract RehearseKubi is RehearseMigrationBase {
+contract RehearseDecentralPark is OrgCatalog {
     function run() public {
-        _rehearse(
-            OrgSpec({
-                name: "KUBI",
-                orgId: 0xc0f2765d555e21bfad5c6b05accef86a5758e0dee3e9a5b4ee3c3f3069c2102e,
-                gnosis: true,
-                executor: 0x23f90B3859818A843C3a848627A304Bc53947342,
-                votingContract: 0x13CBd5eD47bF177968B24D84516a75879c23971E,
-                dd: 0xe24Cb844C73095569FA146D673D45c252894200f,
-                hv: 0x13CBd5eD47bF177968B24D84516a75879c23971E,
-                tm: 0xF57024fC77915Fce8f2608afdd027941bCEE3336,
-                pt: 0x23641B4b54E1bf63FD519b242407b9314093B33C,
-                edu: 0x83C7Aa49C0C5a55E22640AC164abA838E6f1f7ae,
-                qj: 0x5dBda3649B7044C8fDd0E540e86E536dDA7926Cf,
-                eligibilityModule: 0x27114Cb757BeDF77E30EeB0Ca635e3368d8C2914,
-                toggleModule: 0xB4da98791573ddf15Bb811D497A4212904eBA3ED,
-                paymentManager: 0x4009c825b38Fb0ebB6391d5FABe4FAf90e178dF1,
-                zkEmailInvites: 0x32cc2D8563e691A3Ca43723A9F558f7AD8dbA9ec,
-                vouchVerbatim: true // KUBI Executive: VERBATIM port (counts + epochs), recon-mandated
-            })
-        );
+        _rehearse(_decentralParkSpec());
     }
 }
 
-contract RehearsePoa is RehearseMigrationBase {
+contract RehearseKubi is OrgCatalog {
     function run() public {
-        _rehearse(
-            OrgSpec({
-                name: "Poa",
-                orgId: 0xa71879ef0e38b15fe7080196c0102f859e0ca8e7b8c0703ec8df03c66befd069,
-                gnosis: false,
-                executor: 0xB1ff2Bd0231770ccc91801aa1fae4b3226E1fE41,
-                votingContract: 0x34aa1bD79a3A5eb5d2B208eb4f091ccF6B1081d5,
-                dd: 0xC82b179f5b4e325aC1B77A423FDb266AeBfCA5E8,
-                hv: 0x34aa1bD79a3A5eb5d2B208eb4f091ccF6B1081d5,
-                tm: 0x681f29751724D2bED331d3EB35e0C9B1C57aF9F0,
-                pt: 0x33CD0B9ae54c43C11Fd05fE00afd3DBC71D9603E,
-                edu: 0xe37Db8cCD295C9E4fEbb19a91efe13aCe24ca596,
-                qj: 0x366c605A3064a680fb5c05Bf9EeDa512fdDBF03a,
-                eligibilityModule: 0xE4F9CB9C843D0A5bd5D52e3266138B13A635743b,
-                toggleModule: 0x14Aced4F1B6fB1EF4030E7E7E19A3e6aB0B931a1,
-                paymentManager: 0xAe470B8366AF331F52D9eA26efD7Cb2d276878B3,
-                zkEmailInvites: address(0),
-                vouchVerbatim: false // AMNESTY (recorded)
-            })
-        );
+        _rehearse(_kubiSpec());
     }
 }
+
+contract RehearsePoa is OrgCatalog {
+    function run() public {
+        _rehearse(_poaSpec());
+    }
+}
+
