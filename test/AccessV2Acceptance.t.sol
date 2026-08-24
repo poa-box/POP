@@ -619,11 +619,13 @@ contract AccessV2AcceptanceTest is Test {
             auth2.seedRules(subs, users, rk, dg);
             auth2.seedMemberships(subs, users);
         }
-        // grace: seeded vouches (voucher-anonymous) meeting a quorum-1 attestor on vouchedRole.
+        // grace: a seeded per-voucher RECORD (records-first, C2) meeting a quorum-1 attestor on
+        // vouchedRole — one real voucher who is a member of the voucher subject.
         address grace = makeAddr("grace");
+        address graceVoucher = makeAddr("graceVoucher");
         auth2.setSubjectDefault(adoptedVoucher, true, false);
         auth2.configureVouchAttestor(vouchedRole, 1, adoptedVoucher);
-        auth2.seedVouches(vouchedRole, _a1(grace), _u8_32(1));
+        auth2.seedVouchers(vouchedRole, grace, _a1(graceVoucher));
 
         // Bind the adopted domain to auth2 (Executor-through-OrgRegistry gate; this == ORG2's Executor).
         router.bindAuthority(ORG2, DOMAIN2, address(auth2));

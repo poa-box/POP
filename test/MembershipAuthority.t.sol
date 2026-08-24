@@ -849,10 +849,84 @@ contract MembershipAuthorityLintTest is MembershipAuthorityBase {
         auth.setMaxMembers(r, 5);
     }
 
-    function testWiringIncompatibleSelfVoucher() public {
-        uint256 r = _role("Titled", 0);
+    // C1: a self-voucher config (voucherSubject == subject) is now LINTED, not reverted.
+    function testSelfVoucherLintedNotReverted() public {
+        uint256 r = _role("Executive", 0);
+        vm.expectEmit(true, false, false, true);
+        emit ConfigLint(r, uint8(AccessV2Types.LintCode.SelfVoucher));
+        auth.configureVouchAttestor(r, 1, r); // voucherSubject == subject — accepted + linted
+        (uint32 quorum, uint256 voucherSubject,) = auth.vouchConfig(r);
+        assertEq(quorum, 1, "self-voucher config landed");
+        assertEq(voucherSubject, r, "voucherSubject == subject persisted");
+    }
+
+    // A vouch config on a GROUP subject stays a hard WiringIncompatible revert.
+    function testWiringIncompatibleOnGroupSubject() public {
+        uint256 role = _role("R", 0);
+        uint256[] memory roles = new uint256[](1);
+        roles[0] = role;
+        uint256 grp = auth.createGroup("G", bytes32(0), "", roles);
         vm.expectRevert(IMembershipAuthority.WiringIncompatible.selector);
-        auth.configureVouchAttestor(r, 1, r); // voucherSubject == subject
+        auth.configureVouchAttestor(grp, 1, role);
+    }
+}
+
+/*═══════════════════════════════ C1: self-voucher runtime + recovery ═══════════════════════════════*/
+
+contract MembershipAuthoritySelfVoucherTest is MembershipAuthorityBase {
+    // Execs-vouch-Execs (KUBI Executive): a member of the self-voucher subject vouches a candidate in.
+    function testSelfVoucherVouchingAmongSeededMembers() public {
+        uint256 exec = _role("Executive", 0);
+        auth.configureVouchAttestor(exec, 2, exec); // self-voucher, quorum 2
+
+        // Seed two existing Executives (grant + membership) — the bootstrap set.
+        _seedMember(exec, bob);
+        _seedMember(exec, carol);
+
+        // A candidate (alice) is not yet eligible; the two seeded Execs vouch her in.
+        assertFalse(auth.eligible(exec, alice), "no vouches yet");
+        vm.prank(bob);
+        auth.vouch(exec, alice);
+        assertFalse(auth.eligible(exec, alice), "1 < quorum 2");
+        vm.prank(carol);
+        auth.vouch(exec, alice);
+        assertTrue(auth.eligible(exec, alice), "quorum met via self-voucher subject");
+        vm.prank(alice);
+        auth.claim(exec);
+        assertTrue(auth.isMember(exec, alice), "alice claimed into the self-voucher role");
+    }
+
+    // Empty-subject self-voucher deadlocks (nobody to cast the first vouch) — recoverable via a
+    // governance grant, exactly like legacy.
+    function testEmptySelfVoucherRecoverableViaGovernanceGrant() public {
+        uint256 exec = _role("Executive", 0);
+        auth.configureVouchAttestor(exec, 1, exec); // self-voucher, but no members exist
+
+        // No member of `exec` exists, so nobody can vouch — the bootstrap deadlock.
+        vm.prank(alice);
+        vm.expectRevert(IMembershipAuthority.NotAuthorizedManager.selector);
+        auth.vouch(exec, bob);
+
+        // Governance seed breaks the deadlock (same recovery as legacy): seed bob as the first member,
+        // who can then vouch others into the self-voucher role.
+        _seedMember(exec, bob);
+        assertTrue(auth.isMember(exec, bob), "governance seeded the first member");
+        vm.prank(bob);
+        auth.vouch(exec, carol);
+        assertTrue(auth.eligible(exec, carol), "quorum-1 self-vouch now satisfiable");
+    }
+
+    function _seedMember(uint256 subject, address user) internal {
+        uint256[] memory subs = new uint256[](1);
+        subs[0] = subject;
+        address[] memory users = new address[](1);
+        users[0] = user;
+        AccessV2Types.RuleKind[] memory rk = new AccessV2Types.RuleKind[](1);
+        rk[0] = AccessV2Types.RuleKind.Grant;
+        bool[] memory dg = new bool[](1);
+        dg[0] = true;
+        auth.seedRules(subs, users, rk, dg);
+        auth.seedMemberships(subs, users);
     }
 }
 
@@ -1001,5 +1075,161 @@ contract MembershipAuthorityVouchClearTest is MembershipAuthorityBase {
 
         assertEq(auth.vouchCount(gated, alice), 0, "no underflow: count stays 0");
         assertFalse(auth.eligible(gated, alice), "no forged eligibility");
+    }
+}
+
+/*═══════════════════════════════ C2: records-first vouch seed (seedVouchers) ═══════════════════════════════*/
+
+contract MembershipAuthoritySeedVouchersTest is MembershipAuthorityBase {
+    uint256 internal voucher;
+    uint256 internal subject;
+
+    event VouchSeeded(uint256 indexed subjectId, address indexed user, uint32 count);
+    event VoucherSeeded(uint256 indexed subjectId, address indexed user, address indexed voucher);
+
+    function setUp() public override {
+        super.setUp();
+        voucher = _defaultAllowRole("Voucher"); // bob/dave can claim membership here
+        subject = _role("Vouched", 0);
+        auth.configureVouchAttestor(subject, 1, voucher);
+        vm.prank(bob);
+        auth.claim(voucher);
+        vm.prank(dave);
+        auth.claim(voucher);
+    }
+
+    function _seedVoucher(address user, address v) internal {
+        address[] memory vs = new address[](1);
+        vs[0] = v;
+        auth.seedVouchers(subject, user, vs);
+    }
+
+    function testSeedVouchersWritesRecordAndCountAndEvents() public {
+        address[] memory vs = new address[](1);
+        vs[0] = bob;
+        vm.expectEmit(true, true, true, false);
+        emit VoucherSeeded(subject, alice, bob);
+        vm.expectEmit(true, true, false, true);
+        emit VouchSeeded(subject, alice, 1);
+        auth.seedVouchers(subject, alice, vs);
+        assertEq(auth.vouchCount(subject, alice), 1, "count = distinct records");
+        assertTrue(auth.eligible(subject, alice), "quorum-1 met via seeded record");
+    }
+
+    function testPortedVoucherCanRevokeAndReconcileFires() public {
+        _seedVoucher(alice, bob);
+        vm.prank(alice);
+        auth.claim(subject);
+        assertTrue(auth.isMember(subject, alice));
+        // The PORTED voucher can withdraw the vouch (record present) — count decrements, and reconcile
+        // evicts alice since she drops below quorum.
+        vm.prank(bob);
+        auth.revokeVouch(subject, alice);
+        assertEq(auth.vouchCount(subject, alice), 0, "count decremented");
+        assertFalse(auth.eligible(subject, alice), "below quorum");
+        assertFalse(auth.isMember(subject, alice), "reconcile evicted the lapsed member");
+    }
+
+    function testPortedVoucherReVouchReverts() public {
+        _seedVoucher(alice, bob);
+        // bob is a member of the voucher subject and already has a seeded record — re-vouch is blocked.
+        vm.prank(bob);
+        vm.expectRevert(IMembershipAuthority.AlreadyVouched.selector);
+        auth.vouch(subject, alice);
+        assertEq(auth.vouchCount(subject, alice), 1, "count NOT double-counted");
+    }
+
+    function testUnportedAddressCanAddFreshVouch() public {
+        _seedVoucher(alice, bob); // count 1 (bob)
+        // dave was NOT ported — a fresh, normal vouch works and increments.
+        vm.prank(dave);
+        auth.vouch(subject, alice);
+        assertEq(auth.vouchCount(subject, alice), 2, "fresh vouch stacks on the ported record");
+    }
+
+    function testSeedVouchersDedupsWithinCall() public {
+        address[] memory vs = new address[](3);
+        vs[0] = bob;
+        vs[1] = bob; // duplicate
+        vs[2] = dave;
+        auth.seedVouchers(subject, alice, vs);
+        assertEq(auth.vouchCount(subject, alice), 2, "duplicate voucher counted once");
+    }
+
+    function testClearUserVouchesStrandsSeededRecord() public {
+        _seedVoucher(alice, bob);
+        vm.prank(alice);
+        auth.claim(subject);
+        // Governance strands alice's vouch state (generation bump) — the seeded record dies forever.
+        auth.clearUserVouches(subject, alice);
+        assertEq(auth.vouchCount(subject, alice), 0);
+        assertFalse(auth.isMember(subject, alice), "reconcile evicted on clear");
+        // The stale seeded record cannot be revoked (gen mismatch) and cannot underflow the count.
+        vm.prank(bob);
+        vm.expectRevert(IMembershipAuthority.HasNotVouched.selector);
+        auth.revokeVouch(subject, alice);
+        assertEq(auth.vouchCount(subject, alice), 0, "no underflow");
+        // A fresh vouch after clear resets cleanly at the new generation.
+        vm.prank(dave);
+        auth.vouch(subject, alice);
+        assertEq(auth.vouchCount(subject, alice), 1, "fresh vouch at new gen");
+    }
+
+    function testSeedVouchersRejectsZeroUser() public {
+        address[] memory vs = new address[](1);
+        vs[0] = bob;
+        vm.expectRevert(); // ZeroAddress
+        auth.seedVouchers(subject, address(0), vs);
+    }
+}
+
+/*═══════════════════════════════ C3: seed acceptedAt = epoch(1), anti-packing survives ═══════════════════════════════*/
+
+contract MembershipAuthoritySeedAcceptedAtTest is MembershipAuthorityBase {
+    function _seedMember(uint256 subject, address user) internal {
+        uint256[] memory subs = new uint256[](1);
+        subs[0] = subject;
+        address[] memory users = new address[](1);
+        users[0] = user;
+        AccessV2Types.RuleKind[] memory rk = new AccessV2Types.RuleKind[](1);
+        rk[0] = AccessV2Types.RuleKind.Grant;
+        bool[] memory dg = new bool[](1);
+        dg[0] = true;
+        auth.seedRules(subs, users, rk, dg);
+        auth.seedMemberships(subs, users);
+    }
+
+    function testSeededMemberAcceptedAtIsEpochOne() public {
+        vm.warp(1_000_000); // seed happens at a real timestamp
+        uint256 subject = _role("Titled", 0);
+        _seedMember(subject, alice);
+        (,, uint64 acceptedAt,) = auth.getStatus(subject, alice);
+        assertEq(acceptedAt, 1, "seeded acceptedAt = epoch 1, not block.timestamp");
+        assertEq(auth.activeMemberSince(subject, alice), 1, "activeMemberSince = 1");
+    }
+
+    function testClaimMemberAcceptedAtIsBlockTimestamp() public {
+        uint256 open = _defaultAllowRole("Open");
+        vm.warp(1_500_000);
+        vm.prank(bob);
+        auth.claim(open);
+        (,, uint64 acceptedAt,) = auth.getStatus(open, bob);
+        assertEq(acceptedAt, 1_500_000, "post-cutover claim acceptedAt = now");
+    }
+
+    // The anti-packing property: a proposal created AFTER the seed (createdAt >= 1) is votable by a
+    // seeded member (activeMemberSince = 1 <= createdAt) but NOT by a post-cutover claim() member
+    // (activeMemberSince = claim time > createdAt).
+    function testAntiPackingPropertySurvives() public {
+        uint256 subject = _defaultAllowRole("Open");
+        vm.warp(500);
+        _seedMember(subject, alice); // acceptedAt = 1
+        uint64 proposalCreatedAt = 1000;
+        vm.warp(2000);
+        vm.prank(bob);
+        auth.claim(subject); // acceptedAt = 2000
+
+        assertLe(auth.activeMemberSince(subject, alice), uint64(proposalCreatedAt), "seeded member CAN vote");
+        assertGt(auth.activeMemberSince(subject, bob), uint64(proposalCreatedAt), "post-cutover claimer CANNOT vote");
     }
 }

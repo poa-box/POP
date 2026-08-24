@@ -108,9 +108,10 @@ interface IMembershipAuthority {
     error RuleNotDelegable(); // delegated write on a delegable=false governance rule
     error ForceRequired(); // default ALLOW→DENY flip while memberCount > 0 without force
 
-    /// @notice STRUCTURALLY INCOHERENT wiring only — e.g. a vouch config whose voucherSubject is the
-    ///         subject itself (bootstrap deadlock) or a vouch config on a GROUP subject. The §2 LINT
-    ///         SET does NOT revert (ruling 4).
+    /// @notice STRUCTURALLY INCOHERENT wiring only — a vouch config on a GROUP subject (groups have no
+    ///         acceptance). A self-referential voucher config (voucherSubject == subject) is NO LONGER a
+    ///         revert (C1): it is a real live semantic (KUBI Execs-vouch-Execs), emitted as the
+    ///         SelfVoucher lint instead. The §2 LINT SET does NOT revert (ruling 4).
     error WiringIncompatible();
 
     // Vouch runtime / admin guards (§2 attestor — ruling 2)
@@ -155,6 +156,7 @@ interface IMembershipAuthority {
     event UserVouchesCleared(uint256 indexed subjectId, address indexed user);
     event MaxDailyVouchesSet(uint32 maxDailyVouches);
     event VouchSeeded(uint256 indexed subjectId, address indexed user, uint32 count);
+    event VoucherSeeded(uint256 indexed subjectId, address indexed user, address indexed voucher);
 
     // ── Six DISJOINT lifecycle events + RoleClaimed (§5) ──
     event RoleOffered(uint256 indexed subjectId, address indexed user, address actor, bool delegated);
@@ -338,7 +340,10 @@ interface IMembershipAuthority {
         uint256[] calldata words
     ) external;
 
-    function seedVouches(uint256 subject, address[] calldata users, uint32[] calldata counts) external;
+    /// @notice RECORDS-FIRST vouch seed (C2): port one wearer's ACTUAL per-voucher records (not a bare
+    ///         count) so a ported voucher can revoke and cannot double-vouch. Sets currentVouchCount to
+    ///         the number of distinct records + wearerVouchEpoch to the current epoch.
+    function seedVouchers(uint256 subject, address user, address[] calldata vouchers) external;
 
     function seedEmailVerified(uint256 subject, address[] calldata users) external;
 

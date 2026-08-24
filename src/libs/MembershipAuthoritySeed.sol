@@ -20,11 +20,13 @@ library MembershipAuthoritySeed {
     // Errors reverted directly here (selectors are signature-derived, so identical to the interface's).
     error ArrayLengthMismatch();
     error AlreadyMember();
+    error ZeroAddress();
 
     // Events emitted directly here (topic0 is signature-derived, so identical to the interface's).
     event SubjectDefaultSet(uint256 indexed subjectId, bool allow);
     event RoleGranted(uint256 indexed subjectId, address indexed user, address actor, bool delegated);
     event VouchSeeded(uint256 indexed subjectId, address indexed user, uint32 count);
+    event VoucherSeeded(uint256 indexed subjectId, address indexed user, address indexed voucher);
     event EmailVerifiedSet(uint256 indexed subjectId, address indexed user, bool verified);
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
 
@@ -158,7 +160,11 @@ library MembershipAuthoritySeed {
         if (users.length != n) revert ArrayLengthMismatch();
         for (uint256 i; i < n;) {
             if (!l.membership[subjects[i]][users[i]].accepted) {
-                Logic._flipOn(l, subjects[i], users[i]);
+                // acceptedAt = 1 (epoch), NOT block.timestamp (ruling R7): seeded members are
+                // pre-existing, so activeMemberSince = 1 <= any in-flight proposal's createdAt keeps
+                // those proposals votable, while post-cutover claim() members (acceptedAt = now) stay
+                // gated out of pre-claim proposals — the anti-packing property survives.
+                Logic._flipOnAt(l, subjects[i], users[i], 1);
                 emit RoleGranted(subjects[i], users[i], msg.sender, false);
             }
             unchecked {
@@ -185,20 +191,40 @@ library MembershipAuthoritySeed {
         }
     }
 
-    function seedVouches(uint256 subject, address[] calldata users, uint32[] calldata counts) external {
+    /// @notice RECORDS-FIRST vouch seed (C2): port the ACTUAL per-voucher records for one wearer, not a
+    ///         bare count. For each `voucher`, write the `vouchers[subject][user][voucher]` record at the
+    ///         CURRENT epoch + generation, then set `currentVouchCount = #distinct records` and
+    ///         `wearerVouchEpoch = currentEpoch`. This is what makes the ported state runtime-sound: a
+    ///         legacy voucher can `revokeVouch` (record present ⇒ count decrements ⇒ reconcile fires
+    ///         below quorum) and CANNOT re-`vouch` on top (record present ⇒ AlreadyVouched), so the old
+    ///         count-only seed's two bugs — un-revokable ghosts and re-vouch double-counting — are gone.
+    /// @dev Dedups within the call (a repeated voucher is counted once), so the count can never be
+    ///      inflated past the number of distinct real vouchers.
+    function seedVouchers(uint256 subject, address user, address[] calldata vouchers) external {
         Logic.Layout storage l = Logic.layout();
         Logic._onlyExecutor(l);
-        uint256 n = users.length;
-        if (counts.length != n) revert ArrayLengthMismatch();
+        if (user == address(0)) revert ZeroAddress();
         uint64 epoch = l.vouchEpoch[subject];
-        for (uint256 i; i < n;) {
-            l.currentVouchCount[subject][users[i]] = counts[i];
-            l.wearerVouchEpoch[subject][users[i]] = epoch;
-            emit VouchSeeded(subject, users[i], counts[i]);
+        uint64 gen = l.userVouchGen[subject][user];
+        uint32 written;
+        for (uint256 i; i < vouchers.length;) {
+            address v = vouchers[i];
+            if (!l.vouchers[subject][user][v]) {
+                l.vouchers[subject][user][v] = true;
+                l.voucherRecordEpoch[subject][user][v] = epoch;
+                l.voucherRecordGen[subject][user][v] = gen;
+                emit VoucherSeeded(subject, user, v);
+                unchecked {
+                    ++written;
+                }
+            }
             unchecked {
                 ++i;
             }
         }
+        l.currentVouchCount[subject][user] = written;
+        l.wearerVouchEpoch[subject][user] = epoch;
+        emit VouchSeeded(subject, user, written);
     }
 
     function seedEmailVerified(uint256 subject, address[] calldata users) external {

@@ -77,7 +77,10 @@ library AccessV2Types {
         QuorumNoOp, // 1 — default-ALLOW + vouch-attestor on the same subject (M-03 heir)
         VouchWithMaxMembers, // 2 — vouch-attestor + nonzero maxMembers (quorum-lapse ghosts vs cap)
         DefaultAllowStrongPerms, // 3 — default-ALLOW on a subject with voting/TM-mask/budget power (H-03 heir)
-        GroupFanout // 4 — perm key attached to many GROUP subjects (§3 composed cost)
+        GroupFanout, // 4 — perm key attached to many GROUP subjects (§3 composed cost)
+        SelfVoucher // 5 — vouch config whose voucherSubject IS the subject (e.g. KUBI Execs-vouch-Execs);
+        // LEGAL (a real live semantic), only the EMPTY-subject bootstrap deadlocks — recoverable
+        // via a governance grant/seed exactly like legacy (C1 / ruling: relax the old revert to a lint)
     }
 
     /// @notice Genesis seed payload — ONE declaration shared by IMembershipAuthority.InitConfig and

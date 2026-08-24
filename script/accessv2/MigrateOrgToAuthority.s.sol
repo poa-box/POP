@@ -19,9 +19,11 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
  * Three surfaces, all env-driven by ORG = TEST6 | DP | KUBI | POA:
  *
  *  1. PredeployAuthority (BROADCAST, any EOA): CREATE2-deploy the org's
- *     MembershipAuthority BeaconProxy UNINITIALIZED via the DeterministicDeployer —
- *     salt ("MembershipAuthorityProxy:<Org>", "v1") — so the address is knowable
- *     BEFORE the governance proposals that reference it are crafted.
+ *     MembershipAuthority BeaconProxy via the DeterministicDeployer, ATOMICALLY
+ *     INITIALIZED with an empty-genesis config (executor/orgId/paused) in the deploy
+ *     tx (C5 — front-run grief close) — salt ("MembershipAuthorityProxy:<Org>", "v1")
+ *     — so the address is knowable BEFORE the governance proposals reference it, and
+ *     no attacker can initialize the slot first during the seed-proposal vote window.
  *       ORG=TEST6 forge script .../MigrateOrgToAuthority.s.sol:PredeployAuthority \
  *         --rpc-url gnosis --broadcast --slow    (FOUNDRY_PROFILE=production)
  *
@@ -74,7 +76,11 @@ abstract contract MigrateOrgBase is OrgCatalog {
     function _proxyInitCode(OrgSpec memory s) internal view returns (bytes memory) {
         address beacon = IPoaManagerMig(_poaManager(s)).getBeaconById(MEMBERSHIP_AUTHORITY_TYPEID);
         require(beacon != address(0), "MA beacon not registered (run protocol wave first)");
-        return abi.encodePacked(type(BeaconProxy).creationCode, abi.encode(beacon, bytes("")));
+        // C5 (specOrder-5 front-run grief close): deploy the proxy WITH init data so it lands
+        // ATOMICALLY initialized (empty-genesis: executor/orgId/paused). An attacker can no longer
+        // initialize the predicted CREATE2 slot first during the seed-proposal voting window.
+        bytes memory initData = abi.encodeCall(IMembershipAuthority.initialize, (_minimalInit(s)));
+        return abi.encodePacked(type(BeaconProxy).creationCode, abi.encode(beacon, initData));
     }
 
     function _predictedAuthority(OrgSpec memory s) internal view returns (address) {
@@ -244,7 +250,7 @@ interface HVAnnounce {
 
 /* ════════════════════════════ 1. Predeploy (broadcast) ════════════════════════════ */
 
-/// @notice BROADCAST: CREATE2-deploy the ORG's authority proxy (uninitialized) at its predicted
+/// @notice BROADCAST: CREATE2-deploy the ORG's authority proxy (atomically initialized) at its predicted
 ///         address. Env: ORG=TEST6|DP|KUBI|POA. Signer MUST be the DeterministicDeployer owner
 ///         (Hudson — deploy is onlyOwner). Safe to re-run (no-op once deployed).
 contract PredeployAuthority is MigrateOrgBase {
@@ -258,7 +264,9 @@ contract PredeployAuthority is MigrateOrgBase {
         address authority = _ddDeployAuthority(s);
         vm.stopBroadcast();
         require(authority == predicted && authority.code.length > 0, "predeploy failed");
-        console.log("  deployed (uninitialized, awaiting seed proposal #1):", authority);
+        require(IMembershipAuthority(authority).executor() == s.executor, "predeploy not atomically initialized");
+        require(IMembershipAuthority(authority).paused(), "predeploy authority must be born paused");
+        console.log("  deployed (atomically initialized, PAUSED; awaiting seed proposal #1):", authority);
     }
 }
 

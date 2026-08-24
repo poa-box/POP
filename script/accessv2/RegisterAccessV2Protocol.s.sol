@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {MembershipAuthority} from "../../src/MembershipAuthority.sol";
 import {AuthorityRouter} from "../../src/AuthorityRouter.sol";
 import {IAuthorityRouter} from "../../src/interfaces/IAuthorityRouter.sol";
+import {CutoverVerifier} from "../../src/CutoverVerifier.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
 import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.sol";
 
@@ -133,9 +134,15 @@ abstract contract AccessV2RegisterBase is Script {
     // even though each chain's init data differs (orgRegistry / paymasterHub).
     string internal constant ROUTER_SINGLETON_TYPE = "AuthorityRouterProxy";
     string internal constant ROUTER_SINGLETON_VERSION = "v1";
+    // CutoverVerifier — stateless per-chain singleton (immutable hats + orgRegistry baked in). Its own
+    // (typeName,version) CREATE3 namespace; deterministic address is chain-independent (salt-only) even
+    // though each chain's constructor pins that chain's orgRegistry.
+    string internal constant CUTOVER_VERIFIER_TYPE = "CutoverVerifier";
+    string internal constant CUTOVER_VERIFIER_VERSION = "v1";
 
     bytes32 internal constant MEMBERSHIP_AUTHORITY_ID = keccak256("MembershipAuthority");
     bytes32 internal constant AUTHORITY_ROUTER_ID = keccak256("AuthorityRouter");
+    bytes32 internal constant CUTOVER_VERIFIER_ID = keccak256("CutoverVerifier");
     bytes32 internal constant PAYMASTER_HUB_ID = keccak256("PaymasterHub");
 
     /// @dev CREATE3-deploy `code` at the deterministic (typeName,version) address; idempotent.
@@ -156,6 +163,19 @@ abstract contract AccessV2RegisterBase is Script {
     function _routerSingletonAddress() internal view returns (address) {
         DeterministicDeployer dd = DeterministicDeployer(DD);
         return dd.computeAddress(dd.computeSalt(ROUTER_SINGLETON_TYPE, ROUTER_SINGLETON_VERSION));
+    }
+
+    /// @dev The predicted CutoverVerifier address (deterministic, chain-independent — salt-only).
+    function _cutoverVerifierAddress() internal view returns (address) {
+        DeterministicDeployer dd = DeterministicDeployer(DD);
+        return dd.computeAddress(dd.computeSalt(CUTOVER_VERIFIER_TYPE, CUTOVER_VERIFIER_VERSION));
+    }
+
+    /// @dev CREATE3-deploy (idempotently) the CutoverVerifier for this chain, pinning `hats` (canonical)
+    ///      + this chain's `orgRegistry` as immutables.
+    function _deployCutoverVerifier(address orgRegistry) internal returns (address verifier) {
+        bytes memory code = abi.encodePacked(type(CutoverVerifier).creationCode, abi.encode(HATS, orgRegistry));
+        verifier = _ddDeploy(CUTOVER_VERIFIER_TYPE, CUTOVER_VERIFIER_VERSION, code);
     }
 
     /// @dev Deploy (idempotently) the AuthorityRouter singleton ERC1967Proxy at its CREATE3 address,
@@ -211,6 +231,7 @@ abstract contract AccessV2RegisterBase is Script {
         ISatelliteAdmin sat = ISatelliteAdmin(GNOSIS_SATELLITE);
         sat.addContractType("MembershipAuthority", maImpl);
         sat.addContractType("AuthorityRouter", routerImpl);
+        sat.addContractType("CutoverVerifier", _deployCutoverVerifier(GNOSIS_ORG_REGISTRY));
         routerProxy = _deployRouterSingleton(routerImpl, GNOSIS_ORG_REGISTRY, GNOSIS_PAYMASTER);
         sat.upgradeBeaconDirect("PaymasterHub", pmImpl, PM_VERSION);
         sat.adminCall(GNOSIS_PAYMASTER, _setHatsCalldata(routerProxy));
@@ -224,6 +245,7 @@ abstract contract AccessV2RegisterBase is Script {
         IHubAdmin hub = IHubAdmin(ARB_HUB);
         hub.addContractType("MembershipAuthority", maImpl);
         hub.addContractType("AuthorityRouter", routerImpl);
+        hub.addContractType("CutoverVerifier", _deployCutoverVerifier(ARB_ORG_REGISTRY));
         routerProxy = _deployRouterSingleton(routerImpl, ARB_ORG_REGISTRY, ARB_PAYMASTER);
         hub.upgradeBeaconLocal("PaymasterHub", pmImpl, PM_VERSION);
         hub.adminCall(ARB_PAYMASTER, _setHatsCalldata(routerProxy));
@@ -253,6 +275,17 @@ abstract contract AccessV2RegisterBase is Script {
             IPoaManagerView(poaManager).getCurrentImplementationById(PAYMASTER_HUB_ID) == pmImpl,
             "PaymasterHub beacon not upgraded to v20"
         );
+
+        // CutoverVerifier registered at its deterministic address, pinning THIS chain's deps.
+        address verifier = _cutoverVerifierAddress();
+        require(_beacon(poaManager, CUTOVER_VERIFIER_ID) != address(0), "CutoverVerifier beacon not registered");
+        require(
+            IPoaManagerView(poaManager).getCurrentImplementationById(CUTOVER_VERIFIER_ID) == verifier,
+            "CutoverVerifier v1 impl mismatch"
+        );
+        require(verifier.code.length > 0, "CutoverVerifier has no code");
+        require(CutoverVerifier(verifier).hats() == HATS, "CutoverVerifier hats mismatch");
+        require(CutoverVerifier(verifier).orgRegistry() == orgRegistry, "CutoverVerifier orgRegistry mismatch");
 
         // Router singleton wired to this chain's dependencies (zero bindings at birth).
         require(routerProxy.code.length > 0, "router singleton has no code");

@@ -45,6 +45,10 @@ Each org: three ops surfaces in `MigrateOrgToAuthority.s.sol`, env-driven `ORG=T
      --rpc-url gnosis --broadcast --slow
    ```
    CREATE2 salt `("MembershipAuthorityProxy:<Org>", "v1")` → address knowable before proposals.
+   **C5 (front-run grief close):** the proxy is deployed WITH init data — it lands ATOMICALLY
+   INITIALIZED (empty genesis: executor/orgId/paused only) in the deploy tx, so no attacker can
+   initialize the predicted slot first during the seed-proposal vote window. The predeploy script
+   asserts `executor == org Executor` and `paused == true` after deploy.
 
 2. **Generate proposal JSON** (fork, no broadcast):
    ```sh
@@ -63,9 +67,11 @@ Each org: three ops surfaces in `MigrateOrgToAuthority.s.sol`, env-driven `ORG=T
    cast send <HV> 'announceWinner(uint256)' <id> --gas-limit <figure below>
    ```
 
-4. **Verify**: re-run the org's governed sim (below) BEFORE step 3, and after cutover check the
-   §6 verification reads (the cutover batch itself `require()`s membership counts and
-   router-through resolution — a failed check reverts the whole batch, nothing half-lands).
+4. **Verify**: re-run the org's governed sim (below) BEFORE step 3. The §6 verification reads are
+   realized by `CutoverVerifier.verify` (C4) appended as the LAST call of the cutover batch — it
+   `require()`s per-subject memberCount == the generation-time count, memberCount <= canonical Hats
+   supply, and router-through resolution of the admin id; a failed check reverts the WHOLE batch, so
+   nothing half-lands. See the CutoverVerifier note below for the full check set.
 
 ### Measured announceWinner gas (fork rehearsal, production profile)
 
@@ -82,9 +88,14 @@ Each org: three ops surfaces in `MigrateOrgToAuthority.s.sol`, env-driven `ORG=T
   **sticky** (`delegable=false`). Encoded in the seed builder; change requires editing
   `AccessV2MigrationBase._buildMembershipsAndTighten` before generation.
 - **vouch**: Test6, Decentral Park, Poa → AMNESTY (members hold seeded explicit grants; re-vouch
-  later if lapse semantics wanted). **KUBI → VERBATIM port** (counts into the current epoch;
-  parity-asserted in rehearsal). Legacy self-voucher configs (voucherSubject == subject) are NOT
-  ported — a v2 bootstrap deadlock; governance reconfigures a valid voucher subject post-cutover.
+  later if lapse semantics wanted). **KUBI → VERBATIM port** — RECORDS-FIRST (C2): the seed
+  reconstructs each member's ACTUAL per-voucher records from the legacy EligibilityModule (probing
+  `vouchers(subject, wearer, candidate)` across the candidate set) and ports them via
+  `seedVouchers(subject, user, vouchers[])`, NOT a bare count — so a ported voucher can revoke and
+  cannot re-vouch to double-count. **Self-voucher configs (voucherSubject == subject) ARE now
+  ported** (C1): the authority accepts them (emits the `SelfVoucher` lint, no revert), so KUBI's
+  Executives-vouch-Executives officer gate survives verbatim. Only an EMPTY subject bootstrap-
+  deadlocks, recoverable via a governance seed/grant exactly like legacy.
 - **maxMembers**: titled roles tightened to live active count; the open member role stays
   UNLIMITED (capping it would brick QuickJoin).
 
@@ -115,3 +126,35 @@ code paths) ships only after the LAST org migrates and soaks.
   feature-detects per module).
 - Legacy EM/QuickJoin rulebook entries stay (superset discipline) until the last legacy org
   migrates; then a cleanup `setGlobalRulesBatch` may retire them.
+
+## Access-v2 contract-surface notes (Wave D FIX-B)
+
+- **CutoverVerifier (C4)** — a stateless protocol singleton (`src/CutoverVerifier.sol`, immutable
+  `hats` + `orgRegistry`, ZERO storage) registered per chain in the Phase-0 wave
+  (`addContractType("CutoverVerifier", …)`, deterministic CREATE3 address). Its single view-revert
+  entrypoint `verify(orgId, authority, router, subjects[], expectedCounts[])` belongs as the LAST
+  call of the cutover Executor batch: it `require()`s (a) `router.authorityOf(subject) == authority`
+  for every subject (bind landed, no spoof), (b) `authority.paused() == false`, (c) per subject
+  `memberCount == expectedCounts[i]` (generation-time counts baked into the batch — drift between
+  generation and `announceWinner` reverts the whole batch, enforcing regenerate-before-cutover
+  on-chain) AND `memberCount <= hats.hatSupply(subject)` via the CANONICAL Hats (enumeration-
+  independent upper bound — closes the self-referential-parity gap), and (d) the admin (topHat) id
+  resolves THROUGH THE ROUTER (`isWearerOfHat(orgExecutor, subjects[0])` + `viewHat(...).active`).
+  `subjects[0]` MUST be the admin (topHat) id.
+- **Seed acceptedAt = epoch 1 (C3, ruling R7)** — `seedMemberships` writes `acceptedAt = 1`, NOT
+  `block.timestamp`. Seeded members are pre-existing, so `activeMemberSince = 1 <=` any in-flight
+  proposal's `createdAt`, keeping those proposals votable across the cutover; post-cutover `claim()`
+  members get `acceptedAt = now` and stay gated out of pre-claim proposals (the §4 anti-packing
+  property survives).
+
+## SPEC ERRATA (appended per C5)
+
+**§6 step 1 register-before-initialize → register-before-SUBJECT.** The authority proxy is now
+deployed WITH init data (atomic initialize in the deploy tx — C5, front-run grief close), so
+`initialize`'s two config events (`MembershipAuthorityInitialized`, `PausedSet`) necessarily PREDATE
+`registerOrgContract`. This is the ONE accepted consequence: those config events are
+subgraph-derivable from the Organization entity (executor/orgId/paused) with NO `eth_call`, so no
+indexing fidelity is lost. The `initialize` genesis is EMPTY (no subjects), so ALL subject events —
+the ones that actually matter for the per-org template — are emitted by the seed batches AFTER
+`registerOrgContract` leads seed batch 1. The register-before-initialize discipline therefore now
+applies to SUBJECT events, which is what matters.

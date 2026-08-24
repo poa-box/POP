@@ -380,8 +380,8 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
     }
 
     /// @inheritdoc IMembershipAuthority
-    function seedVouches(uint256 subject, address[] calldata users, uint32[] calldata counts) external {
-        Seed.seedVouches(subject, users, counts);
+    function seedVouchers(uint256 subject, address user, address[] calldata vouchers) external {
+        Seed.seedVouchers(subject, user, vouchers);
     }
 
     /// @inheritdoc IMembershipAuthority

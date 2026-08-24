@@ -666,10 +666,15 @@ library MembershipAuthorityLogic {
         SubjectRec storage s = l.subjects[subject];
         if (!s.exists) revert UnknownSubject();
         if (s.kind == AccessV2Types.SubjectKind.Group) revert WiringIncompatible();
-        if (quorum != 0 && voucherSubject == subject) revert WiringIncompatible();
+        // C1: a self-referential voucher config (voucherSubject == subject) is a REAL live semantic —
+        // KUBI's Executive role is Execs-vouch-Execs. It is NOT structurally incoherent: only an EMPTY
+        // subject bootstrap-deadlocks (nobody is a member to cast the first vouch), and that is
+        // recoverable via a governance grant/seed exactly like legacy. So it is a NON-REVERTING lint
+        // (ruling 4 lint discipline), not a WiringIncompatible revert.
         l.vouchConfigs[subject] = VouchCfg({quorum: quorum, voucherSubject: voucherSubject});
         emit VouchConfigured(subject, quorum, voucherSubject);
         if (quorum != 0) {
+            if (voucherSubject == subject) emit ConfigLint(subject, uint8(AccessV2Types.LintCode.SelfVoucher));
             if (s.defaultAllow) emit ConfigLint(subject, uint8(AccessV2Types.LintCode.QuorumNoOp));
             if (s.maxMembers != 0) emit ConfigLint(subject, uint8(AccessV2Types.LintCode.VouchWithMaxMembers));
         }
@@ -884,6 +889,14 @@ library MembershipAuthorityLogic {
     }
 
     function _flipOn(Layout storage l, uint256 subject, address user) internal {
+        _flipOnAt(l, subject, user, uint64(block.timestamp));
+    }
+
+    /// @dev Accepted-flip with an EXPLICIT activation timestamp. Runtime paths pass block.timestamp
+    ///      (via {_flipOn}); the SEED path passes `1` (epoch) so pre-existing seeded members predate
+    ///      any in-flight proposal's createdAt — keeping those proposals votable — while the §4
+    ///      activation gate still binds post-cutover claim() members (acceptedAt = now). (Ruling R7.)
+    function _flipOnAt(Layout storage l, uint256 subject, address user, uint64 at) internal {
         if (user == address(0)) revert ZeroAddress();
         MembershipRec storage m = l.membership[subject][user];
         if (m.accepted) revert AlreadyMember();
@@ -892,7 +905,7 @@ library MembershipAuthorityLogic {
         SubjectRec storage s = l.subjects[subject];
         if (s.maxMembers != 0 && s.memberCount >= s.maxMembers) revert SubjectFull(subject, _findLapsed(l, subject));
         m.accepted = true;
-        m.acceptedAt = uint64(block.timestamp);
+        m.acceptedAt = at;
         unchecked {
             ++s.memberCount;
         }

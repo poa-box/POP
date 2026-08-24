@@ -20,10 +20,11 @@ import {IExecutor} from "../../src/Executor.sol";
  * and RehearseMigration (end-to-end fork rehearsal). Implements the §6 per-org
  * ceremony EXACTLY:
  *
- *   (a) PREDEPLOY (§6 step 1-2): deploy the org's MembershipAuthority BeaconProxy
- *       UNINITIALIZED, register it in OrgRegistry (register-before-initialize so the
- *       subgraph template precedes the init events), initialize it PAUSED, then SEED
- *       roles / defaults / perms / rules / memberships / vouch-state / email flags
+ *   (a) PREDEPLOY (§6 step 1-2, C5): deploy the org's MembershipAuthority BeaconProxy
+ *       ATOMICALLY INITIALIZED with an EMPTY genesis (executor/orgId/paused only) in the
+ *       deploy tx (front-run grief close), register it in OrgRegistry (register-before-
+ *       SUBJECT so the subgraph template precedes every subject event), then SEED the
+ *       admin subject + roles / defaults / perms / rules / memberships / vouch-state / email flags
  *       from the org's LIVE Hats + EligibilityModule + module perm-list state (adopting
  *       legacy hatIds VERBATIM as subject ids). The SEED INVARIANT (every seeded
  *       membership carries an eligibility source in the same batch) is hard-require()'d.
@@ -61,6 +62,7 @@ interface IEMMig {
 
     function getVouchConfig(uint256 hatId) external view returns (VouchCfg memory);
     function currentVouchCount(uint256 hatId, address wearer) external view returns (uint32);
+    function vouchers(uint256 hatId, address wearer, address voucher) external view returns (bool);
     function isEmailVerified(address wearer, uint256 hatId) external view returns (bool);
     function getMaxDailyVouches() external view returns (uint32);
 }
@@ -280,43 +282,43 @@ abstract contract AccessV2MigrationBase is Script {
 
     /*═══════════════════════════════ PREDEPLOY (§6 step 1) ═══════════════════════════════*/
 
-    /// @notice Deploy the authority BeaconProxy UNINITIALIZED (permissionless; empty init data so the
-    ///         governance batch can order registerOrgContract BEFORE initialize). Register/init/seed
-    ///         all live in the SEED BATCH (built by _buildSeedBatches, executed by the Executor).
+    /// @notice Deploy the authority BeaconProxy WITH init data in the SAME transaction (C5 —
+    ///         front-run grief close, finding specOrder-5). The proxy is created via
+    ///         `BeaconProxy(beacon, abi.encodeCall(initialize, EMPTY-GENESIS cfg))` so it lands
+    ///         ATOMICALLY initialized (executor/orgId/paused) — an attacker can no longer initialize
+    ///         the predicted CREATE2 address first (poisoning the slot) during the seed-proposal
+    ///         voting window. The EMPTY genesis creates NO subjects, so ALL subject events index
+    ///         AFTER registerOrgContract (which leads seed batch 1); only initialize's config events
+    ///         predate registration and are subgraph-derivable from the Organization entity (runbook
+    ///         SPEC ERRATA). Register + seed still live in the SEED BATCH (built by _buildSeedBatches).
     function _predeployAuthority(OrgSpec memory s) internal returns (address authority) {
         address beacon = IPoaManagerMig(_poaManager(s)).getBeaconById(MEMBERSHIP_AUTHORITY_TYPEID);
         require(beacon != address(0), "MA beacon not registered (run protocol wave first)");
-        authority = address(new BeaconProxy(beacon, ""));
+        authority = address(new BeaconProxy(beacon, abi.encodeCall(IMembershipAuthority.initialize, (_minimalInit(s)))));
     }
 
-    /// @dev Minimal InitConfig: exactly the admin (topHat) subject — deny-default, unlimited. The
-    ///      full role set + memberships + rules + vouch/email are applied by the seed batches below
-    ///      (all executor writes, pause-exempt), matching the multi-batch §6 seed choreography.
+    /// @dev Minimal EMPTY-GENESIS InitConfig (C5): sets ONLY executor/paymasterHub/orgId — NO subjects.
+    ///      The admin (topHat) subject, the full role set, memberships, rules, vouch and email are all
+    ///      applied by the seed batches below (executor writes, pause-exempt) so every subject event is
+    ///      emitted AFTER the org registers the proxy in OrgRegistry (register-before-SUBJECT discipline).
     function _minimalInit(OrgSpec memory s) internal view returns (IMembershipAuthority.InitConfig memory cfg) {
         cfg.executor = s.executor;
         cfg.paymasterHub = _paymaster(s);
         cfg.orgId = s.orgId;
 
-        uint256[] memory ids = new uint256[](1);
-        ids[0] = _topHatId(s);
-        AccessV2Types.SubjectKind[] memory kinds = new AccessV2Types.SubjectKind[](1);
-        kinds[0] = AccessV2Types.SubjectKind.Role;
-        string[] memory names = new string[](1);
-        names[0] = "Admin";
-        uint32[] memory maxm = new uint32[](1);
-        maxm[0] = 0;
-        bool[] memory defs = new bool[](1);
-        defs[0] = false;
-        uint256[][] memory grp = new uint256[][](1);
-        grp[0] = new uint256[](0);
-
-        cfg.seed.subjectIds = ids;
-        cfg.seed.subjectKinds = kinds;
-        cfg.seed.subjectNames = names;
-        cfg.seed.subjectMaxMembers = maxm;
-        cfg.seed.subjectDefaults = defs;
-        cfg.seed.groupMemberRoles = grp;
-        // vouch / perm arrays left empty (applied via seed batches).
+        cfg.seed.subjectIds = new uint256[](0);
+        cfg.seed.subjectKinds = new AccessV2Types.SubjectKind[](0);
+        cfg.seed.subjectNames = new string[](0);
+        cfg.seed.subjectMaxMembers = new uint32[](0);
+        cfg.seed.subjectDefaults = new bool[](0);
+        cfg.seed.groupMemberRoles = new uint256[][](0);
+        cfg.seed.vouchSubjects = new uint256[](0);
+        cfg.seed.vouchQuorums = new uint32[](0);
+        cfg.seed.vouchVoucherSubjects = new uint256[](0);
+        cfg.seed.permSubjects = new uint256[](0);
+        cfg.seed.permKeys = new bytes32[](0);
+        cfg.seed.permCtxs = new bytes32[](0);
+        cfg.seed.permWords = new uint256[](0);
     }
 
     /*═══════════════════════════════ SEED BATCH (§6 step 2) ═══════════════════════════════*/
@@ -361,7 +363,11 @@ abstract contract AccessV2MigrationBase is Script {
         address beacon = IPoaManagerMig(_poaManager(s)).getBeaconById(MEMBERSHIP_AUTHORITY_TYPEID);
         uint256 topHat = _topHatId(s);
 
-        /*── Batch 1: register → init(PAUSED) → admin → subjects → defaults → rename → perms ──*/
+        /*── Batch 1: register → admin subject → admin membership → subjects → defaults → rename → perms ──*/
+        // NOTE (C5): the proxy was ALREADY initialized ATOMICALLY at deploy with an EMPTY genesis
+        // (executor/orgId/paused only — front-run grief close, specOrder-5). So batch 1 does NOT call
+        // initialize; the admin SUBJECT is created here (seedSubjects), AFTER registerOrgContract, so
+        // its SubjectCreated event indexes post-registration.
         _newBatch();
         _push(
             _orgRegistry(s),
@@ -370,9 +376,10 @@ abstract contract AccessV2MigrationBase is Script {
                 (s.orgId, MEMBERSHIP_AUTHORITY_TYPEID, authority, beacon, true, s.executor, false)
             )
         );
-        _push(authority, abi.encodeCall(IMembershipAuthority.initialize, (_minimalInit(s))));
 
-        // (0) ADMIN membership FIRST (lock-out guard).
+        // (0) ADMIN subject + membership LEAD the batch (lock-out guard): create the topHat subject,
+        //     then grant + accept the Executor as its sole member, before any other subject/rule.
+        _pushAdminSubject(authority, topHat);
         _pushSeedSlice(authority, topHat, _single(s.executor), true);
 
         // (1) Role subjects (maxMembers=0 during seeding; tightened after memberships).
@@ -417,8 +424,23 @@ abstract contract AccessV2MigrationBase is Script {
         arr[0] = x;
     }
 
+    /// @dev Create the ADMIN (topHat) subject as the first authority write of seed batch 1 (C5).
+    ///      Empty-genesis initialize created NO subjects, so the admin subject is materialized here —
+    ///      AFTER registerOrgContract — as a deny-default, unlimited ROLE named "Admin".
+    function _pushAdminSubject(address authority, uint256 topHat) internal {
+        uint256[] memory ids = new uint256[](1);
+        AccessV2Types.SubjectKind[] memory kinds = new AccessV2Types.SubjectKind[](1);
+        string[] memory names = new string[](1);
+        uint32[] memory maxm = new uint32[](1);
+        ids[0] = topHat;
+        kinds[0] = AccessV2Types.SubjectKind.Role;
+        names[0] = "Admin";
+        maxm[0] = 0;
+        _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
+    }
+
     function _pushRoleSubjects(address authority) internal {
-        // skip index 0 (admin subject — created by initialize's genesis seed)
+        // skip index 0 (admin subject — created by _pushAdminSubject at the head of seed batch 1)
         uint256 count = _subjects.length - 1;
         if (count == 0) return;
         uint256[] memory ids = new uint256[](count);
@@ -525,18 +547,41 @@ abstract contract AccessV2MigrationBase is Script {
                 abi.encodeCall(IMembershipAuthority.configureVouchAttestor, (subject, vc.quorum, vc.membershipHatId))
             );
             if (!s.vouchVerbatim) continue; // AMNESTY: members already hold explicit grants; re-vouch later
-            // VERBATIM: port each current member's received-vouch COUNT into the current epoch.
+            // VERBATIM (C2 — records-first): reconstruct each current member's ACTUAL per-voucher
+            // records from the legacy EligibilityModule (which exposes vouchers(subject, wearer,
+            // voucher) but no enumeration) by probing every candidate as a potential voucher, then
+            // seed those records via seedVouchers. Porting real records — not a bare count — is what
+            // lets a ported voucher revoke and blocks re-vouch double-counting post-cutover.
             address[] memory members = _currentMembers(s, subject, candidates);
-            uint32[] memory counts = new uint32[](members.length);
-            uint256 nonzero;
             for (uint256 j; j < members.length; ++j) {
-                counts[j] = IEMMig(s.eligibilityModule).currentVouchCount(subject, members[j]);
-                if (counts[j] > 0) nonzero++;
-            }
-            if (nonzero > 0) {
-                _push(authority, abi.encodeCall(IMembershipAuthority.seedVouches, (subject, members, counts)));
+                address[] memory vs = _reconstructVouchers(s, subject, members[j], candidates);
+                if (vs.length > 0) {
+                    _push(authority, abi.encodeCall(IMembershipAuthority.seedVouchers, (subject, members[j], vs)));
+                }
             }
         }
+    }
+
+    /// @dev Reconstruct the actual voucher set for `wearer` on `subject` by probing the legacy EM's
+    ///      `vouchers(subject, wearer, candidate)` record for every candidate (the EM stores records
+    ///      but exposes no per-wearer enumeration). Returns the tightly-sized voucher list.
+    function _reconstructVouchers(OrgSpec memory s, uint256 subject, address wearer, address[] memory candidates)
+        internal
+        view
+        returns (address[] memory)
+    {
+        address[] memory tmp = new address[](candidates.length);
+        uint256 n;
+        for (uint256 i; i < candidates.length; ++i) {
+            if (IEMMig(s.eligibilityModule).vouchers(subject, wearer, candidates[i])) {
+                tmp[n++] = candidates[i];
+            }
+        }
+        address[] memory out = new address[](n);
+        for (uint256 i; i < n; ++i) {
+            out[i] = tmp[i];
+        }
+        return out;
     }
 
     function _ensureSubjectPushed(address authority, uint256 id) internal {
