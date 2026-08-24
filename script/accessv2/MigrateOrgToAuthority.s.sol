@@ -92,6 +92,21 @@ abstract contract MigrateOrgBase is OrgCatalog {
         if (authority.code.length == 0) {
             address deployed = DeterministicDeployer(DD_DEPLOYER).deploy(_proxySalt(s), _proxyInitCode(s));
             require(deployed == authority, "DD address mismatch");
+        } else {
+            // A7 (simVsBroadcast-5 / CLAUDE.md point 6): the CREATE2 slot is already occupied. Adopting it
+            // blindly would let the ceremony bind FOREIGN bytecode (a colliding salt, or stale code
+            // registered under a different version) as the org's authority. Confirm the occupant is THIS
+            // org's atomically-initialized authority proxy (executor + paused match the empty-genesis init)
+            // before reusing it; foreign bytecode makes executor() revert or mismatch → fail loudly.
+            try IMembershipAuthority(authority).executor() returns (address ex) {
+                require(ex == s.executor, "CREATE2 slot occupied by a DIFFERENT org's authority (wrong executor)");
+                require(
+                    IMembershipAuthority(authority).paused(),
+                    "CREATE2 slot occupant not born-paused (not our empty-genesis predeploy)"
+                );
+            } catch {
+                revert("CREATE2 slot occupied by FOREIGN bytecode (executor() reverted)");
+            }
         }
     }
 
@@ -102,7 +117,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
     ///      with an explicit stipend (measured — the ops gas-limit figure). Reverts if invalid.
     function _govern(OrgSpec memory s, IExecutor.Call[] memory batch, string memory title, address[] memory candidates)
         internal
-        returns (uint256 id, uint256 gasUsed)
+        returns (uint256 id, uint256 gasUsed, uint256 createGas)
     {
         address creator = _findLegacyCreator(s, candidates);
         require(creator != address(0), "no live creator-hat wearer among candidates");
@@ -110,8 +125,14 @@ abstract contract MigrateOrgBase is OrgCatalog {
         IExecutor.Call[][] memory batches = new IExecutor.Call[][](1);
         batches[0] = batch;
         id = IHVGov(s.hv).proposalsCount();
+        // A7 (simVsBroadcast-7): HybridVotingProposals._initProposal SSTOREs the ENTIRE batches calldata,
+        // so createProposal — not announceWinner — is often the most expensive tx in the ceremony and is
+        // the one orgs pay for via a sponsored passkey userOp. Measure it so ops can size the userOp gas
+        // and confirm the HV createProposal rulebook hint (0 == uncapped) cannot hint-reject it.
+        uint256 c0 = gasleft();
         vm.prank(creator);
         IHVGov(s.hv).createProposal(bytes(title), bytes32(0), VOTE_MINUTES, 1, batches, new uint256[](0));
+        createGas = c0 - gasleft();
 
         // Vote with every candidate who can (quorum is participation-based; cast the widest net).
         uint8[] memory idxs = new uint8[](1);
@@ -137,6 +158,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
         require(valid, "proposal did not reach a valid outcome (quorum?)");
         console.log(string.concat("  [gov] ", title, " proposal #"), id);
         console.log("        voters:", voted, "announceWinner gas:", gasUsed);
+        console.log("        createProposal gas:", createGas);
     }
 
     function _findLegacyCreator(OrgSpec memory s, address[] memory candidates) internal view returns (address) {
@@ -171,10 +193,23 @@ abstract contract MigrateOrgBase is OrgCatalog {
         // Seed batches — each one a REAL governance proposal (and emitted as proposal JSON, so the
         // sim-verified batches double as the reviewable out/ artifacts).
         IExecutor.Call[][] memory seedBatches = _buildSeedBatches(s, authority, candidates);
+        // A7 (simVsBroadcast-7): track the LARGEST createProposal cost across the seed batches — the
+        // proposal orgs author via a sponsored passkey userOp — and report it against the HV createProposal
+        // rulebook hint (0 == uncapped) so ops can confirm no hint-rejection and size the userOp.
+        uint256 maxCreateGas;
+        uint256 maxCreateBatch;
         for (uint256 b; b < seedBatches.length; ++b) {
             _writeBatchJson(s, "seed", b + 1, seedBatches[b], authority);
-            _govern(s, seedBatches[b], string.concat("access-v2 seed ", vm.toString(b + 1)), candidates);
+            (,, uint256 createGas) =
+                _govern(s, seedBatches[b], string.concat("access-v2 seed ", vm.toString(b + 1)), candidates);
+            if (createGas > maxCreateGas) {
+                maxCreateGas = createGas;
+                maxCreateBatch = b + 1;
+            }
         }
+        console.log("  [A7] LARGEST seed createProposal gas:", maxCreateGas);
+        console.log("       (seed batch #):", maxCreateBatch);
+        console.log("       HV createProposal rulebook hint is 0 (UNCAPPED) -> no hint under-fund possible");
         require(IMembershipAuthority(authority).paused(), "authority must be paused after seeding");
         uint256 seeded = _assertSeedInvariant(s, authority, candidates);
         console.log("  SEED INVARIANT ok; seeded memberships:", seeded);

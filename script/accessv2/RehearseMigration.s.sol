@@ -12,7 +12,8 @@ import {
     IDDMig,
     IEMMig,
     IPTMig,
-    IPaymasterMig
+    IPaymasterMig,
+    IPoaManagerMig
 } from "./AccessV2MigrationBase.sol";
 import {IMembershipAuthority} from "../../src/interfaces/IMembershipAuthority.sol";
 import {IAuthorityRouter} from "../../src/interfaces/IAuthorityRouter.sol";
@@ -164,9 +165,22 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         address routerImpl = address(new AuthorityRouter());
         address pmImpl = address(new PaymasterHub());
 
-        bytes memory routerInit =
-            abi.encodeCall(AuthorityRouter.initialize, (HATS, _orgRegistry(s), _paymaster(s), HUDSON));
-        routerProxy = address(new ERC1967Proxy(routerImpl, routerInit));
+        // A7 (simVsBroadcast-2): IDEMPOTENT protocol setup so the sim also runs on a POST-Phase-0 fork
+        // (the runbook mandates re-running the governed sim right before each org's proposals). Guards:
+        //  - addContractType reverts TypeExists once a type is registered → only add when its beacon is
+        //    absent (getBeaconById == 0);
+        //  - if the router singleton is already live (hub.HATS() resolves as a router), REUSE it and skip
+        //    both the second ERC1967Proxy deploy and the setHats admin call.
+        // Pre-Phase-0 (today's live fork: MA type count == 0 both chains) every guard is false → the
+        // original fresh path runs byte-for-byte unchanged.
+        bool routerLive = _looksLikeRouter(IPaymasterMig(_paymaster(s)).HATS());
+        if (routerLive) {
+            routerProxy = IPaymasterMig(_paymaster(s)).HATS();
+        } else {
+            bytes memory routerInit =
+                abi.encodeCall(AuthorityRouter.initialize, (HATS, _orgRegistry(s), _paymaster(s), HUDSON));
+            routerProxy = address(new ERC1967Proxy(routerImpl, routerInit));
+        }
 
         // Fresh dual-path module impls (the D1 module wave).
         address ddI = address(new DirectDemocracyVoting());
@@ -179,8 +193,8 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
 
         if (s.gnosis) {
             ISatelliteAdmin sat = ISatelliteAdmin(GNOSIS_SATELLITE);
-            sat.addContractType("MembershipAuthority", maImpl);
-            sat.addContractType("AuthorityRouter", routerImpl);
+            if (!_typeRegistered(s, "MembershipAuthority")) sat.addContractType("MembershipAuthority", maImpl);
+            if (!_typeRegistered(s, "AuthorityRouter")) sat.addContractType("AuthorityRouter", routerImpl);
             sat.upgradeBeaconDirect("PaymasterHub", pmImpl, SIM_VERSION);
             sat.upgradeBeaconDirect("DirectDemocracyVoting", ddI, SIM_VERSION);
             sat.upgradeBeaconDirect("HybridVoting", hvI, SIM_VERSION);
@@ -189,11 +203,11 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             sat.upgradeBeaconDirect("EducationHub", eduI, SIM_VERSION);
             sat.upgradeBeaconDirect("QuickJoin", qjI, SIM_VERSION);
             sat.upgradeBeaconDirect("Executor", exI, SIM_VERSION);
-            sat.adminCall(_paymaster(s), abi.encodeWithSignature("setHats(address)", routerProxy));
+            if (!routerLive) sat.adminCall(_paymaster(s), abi.encodeWithSignature("setHats(address)", routerProxy));
         } else {
             IHubAdmin hub = IHubAdmin(ARB_HUB);
-            hub.addContractType("MembershipAuthority", maImpl);
-            hub.addContractType("AuthorityRouter", routerImpl);
+            if (!_typeRegistered(s, "MembershipAuthority")) hub.addContractType("MembershipAuthority", maImpl);
+            if (!_typeRegistered(s, "AuthorityRouter")) hub.addContractType("AuthorityRouter", routerImpl);
             hub.upgradeBeaconLocal("PaymasterHub", pmImpl, SIM_VERSION);
             hub.upgradeBeaconLocal("DirectDemocracyVoting", ddI, SIM_VERSION);
             hub.upgradeBeaconLocal("HybridVoting", hvI, SIM_VERSION);
@@ -202,17 +216,43 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             hub.upgradeBeaconLocal("EducationHub", eduI, SIM_VERSION);
             hub.upgradeBeaconLocal("QuickJoin", qjI, SIM_VERSION);
             hub.upgradeBeaconLocal("Executor", exI, SIM_VERSION);
-            hub.adminCall(_paymaster(s), abi.encodeWithSignature("setHats(address)", routerProxy));
+            if (!routerLive) hub.adminCall(_paymaster(s), abi.encodeWithSignature("setHats(address)", routerProxy));
         }
         vm.stopPrank();
 
         require(IPaymasterMig(_paymaster(s)).HATS() == routerProxy, "hub setHats(router) did not land");
-        require(IAuthorityRouter(routerProxy).authorityOf(_topHatId(s)) == address(0), "router must be empty at birth");
+        // The org being migrated must not already be bound (un-migrated org → authorityOf(topHat) == 0),
+        // whether the router is fresh or a reused post-Phase-0 singleton carrying OTHER orgs' binds.
+        require(
+            IAuthorityRouter(routerProxy).authorityOf(_topHatId(s)) == address(0),
+            "org already bound on the router (already migrated?)"
+        );
 
         // Deploy the stateless CutoverVerifier (immutable hats + orgRegistry, ZERO storage) so the
         // cutover batch carries its in-batch verify() as the LAST call (§6, C4). Fresh instance per sim
         // mirrors the Phase-0 protocol singleton; production resolves the registered per-chain address.
         _verifier = address(new CutoverVerifier(HATS, _orgRegistry(s)));
+    }
+
+    /// @dev A7 idempotency helper: has PoaManager registered a beacon for this contract type yet?
+    ///      getBeaconById REVERTS TypeUnknown() for an unregistered type (it does not return zero), so the
+    ///      revert IS the "not registered" signal.
+    function _typeRegistered(OrgSpec memory s, string memory name) internal view returns (bool) {
+        try IPoaManagerMig(_poaManager(s)).getBeaconById(keccak256(bytes(name))) returns (address beacon) {
+            return beacon != address(0);
+        } catch {
+            return false;
+        }
+    }
+
+    /// @dev A7 idempotency helper: does `r` resolve as an AuthorityRouter (Phase-0 already landed)?
+    function _looksLikeRouter(address r) internal view returns (bool) {
+        if (r == address(0) || r == HATS) return false;
+        try IAuthorityRouter(r).authorityOf(0) returns (address) {
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     /*═══════════════════════════════ (iii) bind-before-toggle ═══════════════════════════════*/
@@ -405,8 +445,12 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         // Probe B — TaskManager permission resolution for a real permission-holder (the exact TM read).
         _probeTM(s, authority, candidates);
 
-        // Probe C — QuickJoin legacy-compat mint path (Executor.mintHatsForUser → authority.mintHat).
-        _probeQuickJoin(s, authority);
+        // Probe C — per-org QuickJoin/join semantics (A1): open-join (DP), gated stranger-claim rejection
+        //           (Test6/KUBI), vouch->claim continuity (KUBI), governance-only (Poa).
+        _probeQuickJoin(s, authority, candidates);
+
+        // Probe C2 — legacy bans ported (A3): banned wearers stay ineligible/non-claimable post-cutover.
+        _assertBansPorted(s, authority, candidates);
 
         // Probe D — ParticipationToken transfer/membership gate (the exact PT hasPerm read).
         _probePT(s, authority, candidates);
@@ -441,33 +485,124 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         console.log("  probe TaskManager permission: no TM permission-holder among candidates (skipped)");
     }
 
-    function _probeQuickJoin(OrgSpec memory s, address authority) internal {
-        if (_memberSubject == 0) return;
-        address fresh = address(uint160(uint256(keccak256(abi.encode(s.orgId, "qj-join")))));
-        require(!IMembershipAuthority(authority).isMember(_memberSubject, fresh), "fresh user already a member");
-        // The post-cutover QuickJoin mint chain ends in Executor.mintHatsForUser → l.hats(authority).mintHat.
-        // QuickJoin is an authorized hat minter on the Executor; prank it to exercise the exact chain.
-        uint256[] memory hatIds = new uint256[](1);
-        hatIds[0] = _memberSubject;
-        vm.prank(s.qj);
-        try IExecMig(s.executor).mintHatsForUser(fresh, hatIds) {
-            require(
-                IMembershipAuthority(authority).isMember(_memberSubject, fresh), "QuickJoin mint did not create member"
-            );
-            console.log("  probe QuickJoin join path: OK (QJ->Executor.mintHatsForUser->authority.mintHat)");
+    /// @dev A1 (specOrder-0 / seedCompleteness-1): PER-ORG join semantics. The member role's LIVE default
+    ///      verdict drives the assertion — OPEN (DP): a fresh user joins through the exact QJ chain; GATED
+    ///      (Test6 zk / KUBI vouch): a stranger CANNOT claim or be minted the role (the security
+    ///      regression the audit caught — prove it closed), and for a VERBATIM vouch org the vouch->claim
+    ///      continuity path works. Governance-only (Poa): no member subject, nothing claimable.
+    function _probeQuickJoin(OrgSpec memory s, address authority, address[] memory candidates) internal {
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        if (_memberSubject == 0) {
+            console.log("  probe QuickJoin join path: OK (governance-only org; no open member subject)");
             return;
-        } catch {}
-        // Fallback: QJ is not an authorized minter on THIS org's Executor (org-specific wiring) — prove
-        // the terminal §4.6 legacy-compat surface directly (authority.mintHat, executor-gated).
-        address fresh2 = address(uint160(uint256(keccak256(abi.encode(s.orgId, "qj-join2")))));
+        }
+        bool openMember = _liveDefaultAllow(s, _memberSubject);
+        address fresh = address(uint160(uint256(keccak256(abi.encode(s.orgId, "qj-join")))));
+        require(!a.isMember(_memberSubject, fresh), "fresh user already a member");
+
+        if (openMember) {
+            // OPEN member role (DP): the fresh user joins via QJ->Executor.mintHatsForUser->authority.mintHat
+            // (or the terminal executor-gated mint if QJ is not an authorized minter on this Executor).
+            uint256[] memory hatIds = new uint256[](1);
+            hatIds[0] = _memberSubject;
+            vm.prank(s.qj);
+            try IExecMig(s.executor).mintHatsForUser(fresh, hatIds) {
+                require(a.isMember(_memberSubject, fresh), "open QuickJoin mint did not create member");
+                console.log("  probe QuickJoin join path: OK (OPEN member; QJ->Executor->authority.mintHat)");
+            } catch {
+                vm.prank(s.executor);
+                IMembershipAuthority(authority).mintHat(_memberSubject, fresh);
+                require(a.isMember(_memberSubject, fresh), "open authority.mintHat did not create member");
+                console.log("  probe QuickJoin join path: OK (OPEN member; terminal executor-gated mint)");
+            }
+            return;
+        }
+
+        // GATED member role (Test6 zk / KUBI vouch): a stranger MUST NOT be able to claim or be minted in.
+        vm.prank(fresh);
+        try IMembershipAuthority(authority).claim(_memberSubject) {
+            revert("SECURITY REGRESSION: stranger claimed a GATED member role");
+        } catch (bytes memory err) {
+            require(bytes4(err) == IMembershipAuthority.NotClaimable.selector, "gated stranger-claim wrong revert");
+        }
+        address fresh2 = address(uint160(uint256(keccak256(abi.encode(s.orgId, "qj-join-gated")))));
         vm.prank(s.executor);
-        IMembershipAuthority(authority).mintHat(_memberSubject, fresh2);
-        require(
-            IMembershipAuthority(authority).isMember(_memberSubject, fresh2), "authority.mintHat did not create member"
-        );
-        console.log(
-            "  probe QuickJoin join path: OK (QJ unauthorized on this Executor; terminal mintHat surface verified)"
-        );
+        try IMembershipAuthority(authority).mintHat(_memberSubject, fresh2) returns (bool) {
+            revert("SECURITY REGRESSION: executor minted a GATED member role to an ineligible fresh user");
+        } catch {}
+        require(!a.isMember(_memberSubject, fresh2), "gated mint created a member for an ineligible fresh user");
+        console.log("  probe QuickJoin join path: OK (GATED member; stranger claim+mint both reverted)");
+
+        // VERBATIM vouch org (KUBI): vouch->claim continuity — a fresh user vouched to quorum CAN claim.
+        if (s.vouchVerbatim) _probeVouchClaim(s, authority, candidates);
+    }
+
+    /// @dev A1 KUBI arm: a fresh user vouched to quorum by members of the member role's voucher subject
+    ///      becomes eligible for (and can claim) the otherwise-gated member role — proving the gate is a
+    ///      real vouch gate, not a dead deny. Only a maxMembers capacity cap may block the actual flip.
+    function _probeVouchClaim(OrgSpec memory s, address authority, address[] memory candidates) internal {
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        (uint32 quorum, uint256 voucherSubject,) = a.vouchConfig(_memberSubject);
+        require(quorum > 0 && voucherSubject != 0, "VERBATIM: member role has no vouch config to exercise");
+        address[] memory vouchers = new address[](quorum);
+        uint256 found;
+        for (uint256 j; j < candidates.length && found < quorum; ++j) {
+            if (a.isMember(voucherSubject, candidates[j])) vouchers[found++] = candidates[j];
+        }
+        require(found == quorum, "VERBATIM: could not assemble a voucher quorum from candidates");
+        address freshVouched = address(uint160(uint256(keccak256(abi.encode(s.orgId, "vouch-claim-fresh")))));
+        require(!a.isMember(_memberSubject, freshVouched), "vouched-fresh already a member");
+        for (uint256 v; v < quorum; ++v) {
+            vm.prank(vouchers[v]);
+            a.vouch(_memberSubject, freshVouched);
+        }
+        vm.prank(freshVouched);
+        try IMembershipAuthority(authority).claim(_memberSubject) {
+            require(a.isMember(_memberSubject, freshVouched), "vouched claim did not create member");
+            console.log("  probe vouch->claim: OK (vouched-to-quorum fresh user CLAIMED gated member role)");
+        } catch {
+            (, bool eligible,,) = a.getStatus(_memberSubject, freshVouched);
+            require(eligible, "vouched-to-quorum fresh user is NOT eligible (vouch gate is dead)");
+            console.log("  probe vouch->claim: OK (vouch made fresh user ELIGIBLE; flip capped by maxMembers)");
+        }
+    }
+
+    /// @dev A3 (specOrder-1 / seedCompleteness-1): every legacy explicit-DENY/kick must be ported as a
+    ///      RuleKind.Ban that keeps the wearer ineligible and non-claimable post-cutover. Loudly asserts
+    ///      KUBI's >=2 live kicks landed; logs per-org ban counts.
+    function _assertBansPorted(OrgSpec memory s, address authority, address[] memory candidates) internal {
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        uint256 total;
+        address firstBanned;
+        uint256 firstBanSubject;
+        for (uint256 si; si < _subjects.length; ++si) {
+            uint256 subject = _subjects[si];
+            for (uint256 j; j < candidates.length; ++j) {
+                if (!_isLegacyBanned(s, candidates[j], subject)) continue;
+                total++;
+                (, bool eligible,, AccessV2Types.RuleKind kind) = a.getStatus(subject, candidates[j]);
+                require(kind == AccessV2Types.RuleKind.Ban, "legacy ban not ported as RuleKind.Ban");
+                require(!eligible, "ported ban: wearer still eligible post-cutover");
+                require(!a.isMember(subject, candidates[j]), "ported ban: wearer is a member");
+                if (firstBanned == address(0)) {
+                    firstBanned = candidates[j];
+                    firstBanSubject = subject;
+                }
+            }
+        }
+        console.log("  BANS ported+verified:", total);
+        // Defense-in-depth: a ported-banned wearer's claim reverts even where the subject is default-ALLOW.
+        if (firstBanned != address(0)) {
+            vm.prank(firstBanned);
+            try IMembershipAuthority(authority).claim(firstBanSubject) {
+                revert("ported ban: banned wearer could still claim");
+            } catch (bytes memory err) {
+                require(bytes4(err) == IMembershipAuthority.NotClaimable.selector, "banned-claim wrong revert");
+            }
+        }
+        if (keccak256(bytes(s.name)) == keccak256("KUBI")) {
+            require(total >= 2, "KUBI: expected >=2 live kicks ported (A3)");
+        }
     }
 
     function _probePT(OrgSpec memory s, address authority, address[] memory candidates) internal view {

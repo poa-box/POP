@@ -98,6 +98,14 @@ interface IEMMig {
     function vouchers(uint256 hatId, address wearer, address voucher) external view returns (bool);
     function isEmailVerified(address wearer, uint256 hatId) external view returns (bool);
     function getMaxDailyVouches() external view returns (uint32);
+    // A1/A3 live-state reads (BOTH present on the DEPLOYED EM impls — getWearerRuleFlags is NOT: it
+    // reverts on the live older bytecode, so ban detection uses hasSpecificWearerRules + getWearerRules):
+    //  - getWearerRules(fresh, hat).eligible == the subject's LIVE default verdict for a fresh address
+    //    (A1 live-default adoption: DP member true; Test6/KUBI member FALSE — zk/vouch gated).
+    //  - hasSpecificWearerRules(user, hat) == an EXPLICIT per-wearer rule exists; combined with
+    //    getWearerRules(user, hat) NOT (eligible && standing) it identifies a legacy BAN/kick (A3).
+    function getWearerRules(address wearer, uint256 hatId) external view returns (bool eligible, bool standing);
+    function hasSpecificWearerRules(address wearer, uint256 hatId) external view returns (bool);
 }
 
 interface IDDMig {
@@ -485,10 +493,17 @@ abstract contract AccessV2MigrationBase is Script {
         // (1) Role subjects (maxMembers=0 during seeding; tightened after memberships).
         _pushRoleSubjects(authority);
 
-        // (2) Default-ALLOW on the open member role (QuickJoin keeps working).
-        if (_memberSubject != 0) {
-            _push(authority, abi.encodeCall(IMembershipAuthority.setSubjectDefault, (_memberSubject, true, false)));
-        }
+        // (2) LIVE-ADOPTED default eligibility (A1 / specOrder-0 / seedCompleteness-1). Do NOT force the
+        //     QuickJoin member role open: probe the LEGACY EligibilityModule default for a FRESH address
+        //     per subject and seed default-ALLOW ONLY where the gate is genuinely open TODAY. DP's member
+        //     hat is open (true); Test6's (zk-email) and KUBI's (vouch) member hats deny a fresh address
+        //     (false) — force-opening them made org membership permissionlessly claimable post-cutover
+        //     (a stranger could authority.claim() the member subject with sponsored gas). Adopting the
+        //     live verdict keeps QuickJoin/claim succeeding exactly where it does today and failing where
+        //     it fails today (the mint/claim gate then denies the ineligible fresh address, as legacy Hats
+        //     + EM do). QJ_AUTOJOIN stays attached to the legacy QJ member hats (below): with the correct
+        //     deny-default the post-cutover mint reverts precisely where legacy hats.mintHat reverts.
+        _seedLiveDefaults(s, authority);
 
         // (3) SUBJECT_RENAME from live metadataAdmin wearership.
         _pushPerm(authority, _metadataAdminHat, AccessV2PermKeys.SUBJECT_RENAME, _boolWord());
@@ -496,13 +511,104 @@ abstract contract AccessV2MigrationBase is Script {
         // (4) Perm table from the audited module inventory.
         _buildPerms(s, authority);
 
-        /*── Batch 2+: memberships (chunked; rule+membership same chunk) → tighten → vouch → email ──*/
+        /*── Batch 2+: memberships → tighten → BANS → vouch → email ──*/
         _newBatch();
         _buildMembershipsAndTighten(s, authority, candidates);
+        _buildBans(s, authority, candidates);
         _buildVouch(s, authority, candidates);
         if (s.zkEmailInvites != address(0)) _buildEmail(s, authority, candidates);
 
         return _batches;
+    }
+
+    /// @dev A1 (live-default adoption): seed each subject's default-ALLOW verdict from the LIVE legacy
+    ///      EligibilityModule (a FRESH address's getWearerRules().eligible == the subject default). The
+    ///      admin (topHat) subject is intentionally skipped — it is deny-default with the Executor as its
+    ///      sole EXPLICIT member (root-by-address). Only default-ALLOW is emitted (the authority default
+    ///      is already deny), so a gated legacy role stays gated post-cutover.
+    function _seedLiveDefaults(OrgSpec memory s, address authority) internal {
+        uint256 topHat = _topHatId(s);
+        for (uint256 i; i < _subjects.length; ++i) {
+            uint256 subject = _subjects[i];
+            if (subject == topHat) continue;
+            if (_liveDefaultAllow(s, subject)) {
+                _push(authority, abi.encodeCall(IMembershipAuthority.setSubjectDefault, (subject, true, false)));
+            }
+        }
+    }
+
+    /// @dev The LIVE default eligibility verdict for `subject`: probe the legacy EM with a FRESH,
+    ///      never-seen address (deterministic per org+subject). A fresh address has no explicit rule, so
+    ///      getWearerRules returns the subject's DEFAULT rule flags — .eligible is the open/gated verdict.
+    function _liveDefaultAllow(OrgSpec memory s, uint256 subject) internal view returns (bool) {
+        address fresh = address(uint160(uint256(keccak256(abi.encode(s.orgId, subject, "live-default-probe")))));
+        try IEMMig(s.eligibilityModule).getWearerRules(fresh, subject) returns (bool eligible, bool) {
+            return eligible;
+        } catch {
+            return false;
+        }
+    }
+
+    /// @dev A3 (specOrder-1 / seedCompleteness-1): port legacy explicit-DENY wearer rules (bans/kicks) as
+    ///      governance-authored STICKY RuleKind.Ban rows. §6 step 2 lists "bans" as seed content; without
+    ///      this every legacy ban evaporates and (on any default-ALLOW subject) the banned user can
+    ///      sponsored-claim straight back in. Enumerated candidates × subjects on the fork: a ban is an
+    ///      EXPLICIT per-wearer rule (hasSpecificWearerRules) whose verdict is NOT (eligible && standing).
+    ///      Sticky (delegable=false) so a delegated CAP_REMOVE manager can never clear it. Returns the count.
+    function _buildBans(OrgSpec memory s, address authority, address[] memory candidates)
+        internal
+        returns (uint256 total)
+    {
+        for (uint256 si; si < _subjects.length; ++si) {
+            uint256 subject = _subjects[si];
+            address[] memory tmp = new address[](candidates.length);
+            uint256 n;
+            for (uint256 j; j < candidates.length; ++j) {
+                if (_isLegacyBanned(s, candidates[j], subject)) tmp[n++] = candidates[j];
+            }
+            for (uint256 off; off < n; off += SEED_CHUNK) {
+                uint256 len = n - off;
+                if (len > SEED_CHUNK) len = SEED_CHUNK;
+                uint256[] memory subs = new uint256[](len);
+                address[] memory users = new address[](len);
+                AccessV2Types.RuleKind[] memory kinds = new AccessV2Types.RuleKind[](len);
+                bool[] memory del = new bool[](len);
+                for (uint256 k; k < len; ++k) {
+                    subs[k] = subject;
+                    users[k] = tmp[off + k];
+                    kinds[k] = AccessV2Types.RuleKind.Ban;
+                    del[k] = false; // sticky governance ban
+                }
+                _push(authority, abi.encodeCall(IMembershipAuthority.seedRules, (subs, users, kinds, del)));
+                total += len;
+            }
+        }
+    }
+
+    /// @dev True iff `user` carries a legacy EXPLICIT deny/kick rule on `subject`. getWearerRuleFlags is
+    ///      ABSENT on the deployed EM bytecode (it reverts), so provenance is read via
+    ///      hasSpecificWearerRules (an explicit rule exists) + getWearerRules (its verdict). A current
+    ///      member seeded with an explicit Grant returns (true,true) here → not a ban; a vouch-eligible
+    ///      member has NO explicit rule → not a ban; only a genuine deny/kick is flagged.
+    function _isLegacyBanned(OrgSpec memory s, address user, uint256 subject) internal view returns (bool) {
+        // A ban is a legacy explicit rule that leaves the wearer EFFECTIVELY ineligible today, so it must
+        // NOT overlap the seeded member set. Two facts, both live-verified:
+        //  (1) getWearerRules(user, subject) exposes the RAW per-wearer rule flags, but Hats.isWearerOfHat
+        //      resolves the EM's COMBINED getWearerStatus (rule + vouch/email/hierarchy). A user can carry
+        //      a raw deny (eligible==false) yet remain a combined-eligible wearer (e.g. a standing-only
+        //      rule, or a vouch override). Seeding a Ban for such a user would overwrite their seeded Grant
+        //      → accepted-but-ineligible (SEED INVARIANT trip). So EXCLUDE anyone who is a current wearer.
+        //  (2) A genuine kick/ban is a NON-wearer carrying an explicit deny (hasSpecificWearerRules &&
+        //      raw eligible==false). getWearerRuleFlags is absent on the deployed EM (reverts), hence the
+        //      hasSpecificWearerRules + getWearerRules pair.
+        if (IHatsMin(HATS).isWearerOfHat(user, subject)) return false;
+        try IEMMig(s.eligibilityModule).hasSpecificWearerRules(user, subject) returns (bool hasRule) {
+            if (!hasRule) return false;
+            (bool eligible,) = IEMMig(s.eligibilityModule).getWearerRules(user, subject);
+            return !eligible;
+        } catch {
+            return false;
+        }
     }
 
     /// @dev Push seedRules+seedMemberships for one (subject, member-slice) — the invariant unit.
