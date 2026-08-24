@@ -53,7 +53,7 @@ library DefaultGlobalRules {
 
     /// @notice All default rulebook entries (selector strings match the deployed module ABIs).
     function entries() internal pure returns (Entry[] memory e) {
-        e = new Entry[](61);
+        e = new Entry[](71);
         uint256 i;
 
         // ── QuickJoin (6) ──
@@ -236,6 +236,37 @@ library DefaultGlobalRules {
             ),
             1_200_000
         );
+
+        // ── MembershipAuthority (10) — Access-v2 user-facing + delegated lifecycle selectors ──
+        // Keyed under MEMBERSHIP_AUTHORITY_ID so every migrated org's authority resolves the same
+        // type-keyed whitelist (Mirror mode). MIRRORS the RoleManager wave's reasoning that sponsored
+        // its 5 delegation selectors (kick/finalize/unkick + grantRole/revokeRole): the EXECUTOR path
+        // is never sponsored (governance batches carry their own gas), so only USER-initiated and
+        // MANAGER-DELEGATE-initiated calls appear here. INCLUSIONS / EXCLUSIONS (documented per §6):
+        //   INCLUDED — user self-service: claim (self-claim / offer-accept — a single role-token mint
+        //     + eligibility fold, ~claimHat), renounce (clear accepted + burn); vouch / revokeVouch
+        //     (attestor runtime, member-initiated — mirrors EM vouchFor/revokeVouch, hint 0 like v1).
+        //   INCLUDED — manager-delegate lifecycle: delegatedGrant / delegatedOffer / delegatedRemove
+        //     (create a pending action, manager-hat wearers), delegatedUnremove (rule-restore only,
+        //     ~unkickWearer), finalize (applies the delayed grant/remove — the heavy verb: rule write
+        //     + membership flip + mint/burn), cancel (delete a pending action).
+        //   EXCLUDED — every onlyExecutor write (grant/offer/remove/setRule/config/seed/setPaused/…):
+        //     governance-only, never passkey-sponsored (executor batches fund their own gas), matching
+        //     the RoleManager wave excluding RoleManager's executor path.
+        //   EXCLUDED — reconcile (permissionless keeper repair): not a member-facing gasless flow; left
+        //     unsponsored like v1's absence of a sponsored reconcile path.
+        // Gas hints mirror the v1 delegation-selector calibration (single-subject, bounded writes):
+        t = ModuleTypes.MEMBERSHIP_AUTHORITY_ID;
+        e[i++] = Entry(t, bytes4(keccak256("claim(uint256)")), 300_000); // single mint + fold (~claimHat)
+        e[i++] = Entry(t, bytes4(keccak256("renounce(uint256)")), 200_000); // clear accepted + burn + rule clear
+        e[i++] = Entry(t, bytes4(keccak256("vouch(uint256,address)")), 0); // attestor write (mirrors EM vouchFor)
+        e[i++] = Entry(t, bytes4(keccak256("revokeVouch(uint256,address)")), 200_000); // may drop <quorum → reconcile burn
+        e[i++] = Entry(t, bytes4(keccak256("delegatedGrant(uint256,address)")), 250_000); // create pending grant
+        e[i++] = Entry(t, bytes4(keccak256("delegatedOffer(uint256,address)")), 300_000); // pending + immediate rule + RoleOffered
+        e[i++] = Entry(t, bytes4(keccak256("delegatedRemove(uint256,address,bool)")), 250_000); // create pending remove
+        e[i++] = Entry(t, bytes4(keccak256("delegatedUnremove(uint256,address)")), 200_000); // rule-restore only (~unkickWearer)
+        e[i++] = Entry(t, bytes4(keccak256("finalize(uint256)")), 600_000); // applies delayed grant/remove (heavy verb)
+        e[i++] = Entry(t, bytes4(keccak256("cancel(uint256)")), 200_000); // delete a pending action
 
         assert(i == e.length);
     }

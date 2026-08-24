@@ -23,6 +23,7 @@ import {ZkEmailInvites} from "../src/ZkEmailInvites.sol";
 import {UniversalAccountRegistry} from "../src/UniversalAccountRegistry.sol";
 import {OrgRegistry} from "../src/OrgRegistry.sol";
 import {RoleManager} from "../src/RoleManager.sol";
+import {IMembershipAuthority} from "../src/interfaces/IMembershipAuthority.sol";
 
 /// @title PaymasterGlobalRulesTest
 /// @notice Coverage for the type-keyed GLOBAL RULEBOOK (PaymasterRuleLib): rulebook admin +
@@ -878,7 +879,7 @@ contract PaymasterGlobalRulesTest is Test {
     }
 
     function _expectedRulebookPairs() internal pure returns (bytes32[] memory p) {
-        p = new bytes32[](61);
+        p = new bytes32[](71);
         uint256 n;
         bytes32 t = ModuleTypes.QUICK_JOIN_ID;
         p[n++] = _pair(t, QuickJoin.quickJoinWithUser.selector);
@@ -949,6 +950,17 @@ contract PaymasterGlobalRulesTest is Test {
         p[n++] = _pair(t, ZkEmailInvites.claimRoleByEmail.selector);
         p[n++] = _pair(t, ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector);
         p[n++] = _pair(t, ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector);
+        t = ModuleTypes.MEMBERSHIP_AUTHORITY_ID;
+        p[n++] = _pair(t, IMembershipAuthority.claim.selector);
+        p[n++] = _pair(t, IMembershipAuthority.renounce.selector);
+        p[n++] = _pair(t, IMembershipAuthority.vouch.selector);
+        p[n++] = _pair(t, IMembershipAuthority.revokeVouch.selector);
+        p[n++] = _pair(t, IMembershipAuthority.delegatedGrant.selector);
+        p[n++] = _pair(t, IMembershipAuthority.delegatedOffer.selector);
+        p[n++] = _pair(t, IMembershipAuthority.delegatedRemove.selector);
+        p[n++] = _pair(t, IMembershipAuthority.delegatedUnremove.selector);
+        p[n++] = _pair(t, IMembershipAuthority.finalize.selector);
+        p[n++] = _pair(t, IMembershipAuthority.cancel.selector);
         require(n == p.length, "expected-pair count mismatch");
     }
 
