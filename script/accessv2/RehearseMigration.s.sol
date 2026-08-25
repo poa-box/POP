@@ -11,10 +11,14 @@ import {
     IToggleMig,
     IDDMig,
     IEMMig,
+    IEMWriteMig,
     IPTMig,
     IPaymasterMig,
-    IPoaManagerMig
+    IPoaManagerMig,
+    IZkInvitesMig
 } from "./AccessV2MigrationBase.sol";
+import {ZkEmailProof, IZkEmailGroth16Verifier} from "../../src/zkemail/IVerifier.sol";
+import {IDKIMRegistry} from "../../src/zkemail/IDKIMRegistry.sol";
 import {IMembershipAuthority} from "../../src/interfaces/IMembershipAuthority.sol";
 import {IAuthorityRouter} from "../../src/interfaces/IAuthorityRouter.sol";
 import {AccessV2Types} from "../../src/libs/AccessV2Types.sol";
@@ -130,6 +134,10 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         // Capture the membership EXPECTATION from live Hats BEFORE cutover (toggle-off makes legacy
         // reads go dark; parity must compare the authority against this pre-cutover snapshot).
         _captureExpectations(s, candidates);
+
+        // T1: capture the LEGACY zk-claim baseline (snapshot-isolated) BEFORE the cutover, so the
+        //     post-cutover continuity probe compares against an independent pre-cutover expectation.
+        _zkLegacyBaseline(s);
 
         // (4) Ordering proof (iii) + faithful cutover execution. No drift in the rehearsal → the delta
         //     is empty and bindIdx == 0 (the pre-A5 batch shape).
@@ -453,6 +461,10 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         // Probe C2 — legacy bans ported (A3): banned wearers stay ineligible/non-claimable post-cutover.
         _assertBansPorted(s, authority, candidates);
 
+        // Probe C3 — zk-email continuity (T1): Test6/KUBI's ONLY post-cutover invite channel, driven
+        //             end-to-end through the LIVE ZkEmailInvites bytecode.
+        _probeZkContinuity(s, authority);
+
         // Probe D — ParticipationToken transfer/membership gate (the exact PT hasPerm read).
         _probePT(s, authority, candidates);
 
@@ -699,6 +711,148 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
                     if (!eligible) n++;
                 } catch {}
             }
+        }
+    }
+
+    /*═══════════════════ T1: zk-email continuity (spec "Test6 zkEmail continuity", assertTautology-0) ═══════════════════*/
+
+    /// @dev The live module's domain-leaf kind (ZkEmailInvites.LEAF_DOMAIN).
+    uint8 internal constant ZK_LEAF_DOMAIN = 0;
+    /// @dev Captured PRE-cutover by {_zkLegacyBaseline}: did the org's REAL zk claim path work on the
+    ///      legacy stack? The post-cutover probe asserts PARITY against this, so a dead-before /
+    ///      dead-after channel cannot masquerade as a regression and (more importantly) a live-before /
+    ///      dead-after channel cannot pass.
+    bool internal _zkBaselineRan;
+    bool internal _zkBaselineOk;
+
+    /// @dev Drive the LIVE ZkEmailInvites module's REAL claim entrypoint for `claimer` on `subject`.
+    ///      The ONLY things faked are the two pure crypto oracles the cutover does not touch: the
+    ///      Groth16 verifier and the DKIM registry (vm.mockCall true). Governance activates a
+    ///      single-leaf allowlist whose only entry is (domain, [subject]) — the same
+    ///      `setActiveAllowlist` call an org makes for real — and the org's live root is restored
+    ///      afterwards. Every link the cutover DOES move runs against the deployed module bytecode
+    ///      untouched: executor.hats() -> H-03 open-hat probe -> viewHat[eligibility] ->
+    ///      setEmailVerified -> isEligible -> executor.mintHatsForUser -> mintHat.
+    function _zkClaim(OrgSpec memory s, address claimer, uint256 subject, bytes32 salt)
+        internal
+        returns (bool ok, bytes memory err)
+    {
+        IZkInvitesMig zk = IZkInvitesMig(s.zkEmailInvites);
+        bytes32 prevRoot = zk.merkleRoot();
+        bytes32 prevCid = zk.allowlistCid();
+
+        uint256[] memory hatIds = new uint256[](1);
+        hatIds[0] = subject;
+        bytes32 dh = keccak256(abi.encode(s.orgId, salt, "zk-domain"));
+        bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(ZK_LEAF_DOMAIN, dh, hatIds))));
+
+        vm.prank(s.executor);
+        zk.setActiveAllowlist(leaf, bytes32(uint256(1)));
+        vm.mockCall(
+            zk.domainVerifier(), abi.encodeWithSelector(IZkEmailGroth16Verifier.verifyProof.selector), abi.encode(true)
+        );
+        vm.mockCall(zk.dkimRegistry(), abi.encodeWithSelector(IDKIMRegistry.isKeyHashValid.selector), abi.encode(true));
+
+        ZkEmailProof memory p;
+        p.pubkeyHash = keccak256(abi.encode(salt, "pk"));
+        p.emailNullifier = keccak256(abi.encode(s.orgId, salt, "nullifier"));
+        p.fromDomainHash = dh;
+
+        try zk.claimRoleByDomain(p, claimer, hatIds, new bytes32[](0)) {
+            ok = true;
+        } catch (bytes memory e) {
+            err = e;
+        }
+
+        vm.clearMockedCalls();
+        vm.prank(s.executor);
+        zk.setActiveAllowlist(prevRoot, prevCid);
+    }
+
+    /// @dev PRE-CUTOVER baseline (run inside a snapshot by the orchestrators): does the org's REAL zk
+    ///      claim path mint a fresh invitee on the LEGACY stack today? Establishes the independent
+    ///      expectation the post-cutover probe must reproduce (no self-referential oracle).
+    function _zkLegacyBaseline(OrgSpec memory s) internal {
+        if (s.zkEmailInvites == address(0) || _memberSubject == 0) return;
+        uint256 snap = vm.snapshotState();
+        address invitee = address(uint160(uint256(keccak256(abi.encode(s.orgId, "zk-legacy-baseline")))));
+        (bool ok, bytes memory err) = _zkClaim(s, invitee, _memberSubject, "legacy");
+        bool wears = IHatsMin(HATS).isWearerOfHat(invitee, _memberSubject);
+        // Locals live in memory and survive the state revert; the flags MUST be written after it
+        // (vm.revertToState rolls back this script contract's own storage too).
+        vm.revertToState(snap);
+        _zkBaselineRan = true;
+        _zkBaselineOk = ok && wears;
+        if (_zkBaselineOk) {
+            console.log("  [T1] zk LEGACY baseline: real claim path MINTED a fresh invitee (channel live pre-cutover)");
+        } else {
+            console.log("  [T1] zk LEGACY baseline: real claim path did NOT mint (channel already dead pre-cutover)");
+            console.logBytes(err);
+        }
+    }
+
+    /// @dev POST-CUTOVER zk continuity. Traces + exercises the FULL chain the spec mandates, against the
+    ///      DEPLOYED module bytecode (the sims never upgrade the ZkEmailInvites beacon):
+    ///        (a) WIRING TRACE — executor.hats() == authority (this is the ONLY repoint the module needs:
+    ///            it resolves Hats from the Executor, so cutover call #8 Executor.setMembershipAuthority
+    ///            IS the zk repoint — fork-traced, no module-side setter exists or is required);
+    ///            Executor.isAuthorizedHatMinter(zk) (the gate MembershipAuthority.setEmailVerified
+    ///            applies to a non-executor caller); authority.viewHat(subject)[eligibility] == authority
+    ///            (the address the module will call setEmailVerified ON); and the H-03 open-hat probe
+    ///            answering NOT-open for the gated subject through the authority.
+    ///        (b) EXACT CALL — prank the zk module address calling authority.setEmailVerified: the flag
+    ///            must land ON THE AUTHORITY and flip the invitee from ineligible to eligible.
+    ///        (c) FULL CHAIN — a DIFFERENT fresh invitee with NO pre-grant runs the module's real claim
+    ///            entrypoint and ends up an authority member (the module itself performs (b) internally).
+    ///        (d) PARITY — the outcome matches the pre-cutover legacy baseline.
+    function _probeZkContinuity(OrgSpec memory s, address authority) internal {
+        if (s.zkEmailInvites == address(0)) {
+            console.log("  probe zk-email continuity: org has no ZkEmailInvites (n/a)");
+            return;
+        }
+        require(_memberSubject != 0, "zk continuity: org has a zk module but no member subject");
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        address zk = s.zkEmailInvites;
+        uint256 subject = _memberSubject;
+
+        // (a) wiring trace
+        require(IExecMig(s.executor).hats() == authority, "zk chain: executor.hats() is not the authority");
+        require(IExecMig(s.executor).isAuthorizedHatMinter(zk), "zk chain: module is not an authorized hat minter");
+        (,,, address eligSlot,,,,,) = IMembershipAuthority(authority).viewHat(subject);
+        require(eligSlot == authority, "zk chain: authority.viewHat eligibility slot is not the authority");
+        address claimProbe = address(uint160(uint256(keccak256("poa.zkemailinvites.claim.probe"))));
+        require(!a.isEligible(claimProbe, subject), "zk chain: H-03 open-hat probe reads OPEN through the authority");
+
+        // (b) the module's exact setEmailVerified call, pranked as the module
+        address invitee = address(uint160(uint256(keccak256(abi.encode(s.orgId, "zk-flag-invitee")))));
+        require(!a.isEligible(invitee, subject), "zk probe: fresh invitee already eligible");
+        uint256[] memory one = new uint256[](1);
+        one[0] = subject;
+        vm.prank(zk);
+        IMembershipAuthority(authority).setEmailVerified(invitee, one);
+        require(
+            a.isEligible(invitee, subject), "zk chain: emailVerified flag did NOT flip eligibility on the authority"
+        );
+        console.log("  [T1] zk setEmailVerified: flag landed on the AUTHORITY and flipped eligibility");
+
+        // (c) the full live-module claim, no pre-grant
+        address invitee2 = address(uint160(uint256(keccak256(abi.encode(s.orgId, "zk-claim-invitee")))));
+        require(!a.isMember(subject, invitee2), "zk probe: fresh invitee2 already a member");
+        (bool ok, bytes memory err) = _zkClaim(s, invitee2, subject, "postcutover");
+        if (!ok) {
+            console.logBytes(err);
+        }
+        // (d) parity with the legacy baseline
+        require(_zkBaselineRan, "zk continuity: legacy baseline was never captured");
+        require(
+            ok == _zkBaselineOk,
+            "zk continuity REGRESSION: post-cutover claim outcome differs from the pre-cutover legacy baseline"
+        );
+        if (ok) {
+            require(a.isMember(subject, invitee2), "zk chain: claim succeeded but no authority membership");
+            console.log("  probe zk-email continuity: OK (real claim -> authority membership, legacy parity)");
+        } else {
+            console.log("  probe zk-email continuity: channel dead BOTH sides (parity held) - see bytes above");
         }
     }
 

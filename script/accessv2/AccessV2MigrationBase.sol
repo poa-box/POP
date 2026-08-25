@@ -10,6 +10,7 @@ import {IAuthorityRouter} from "../../src/interfaces/IAuthorityRouter.sol";
 import {AccessV2Types} from "../../src/libs/AccessV2Types.sol";
 import {AccessV2PermKeys} from "../../src/libs/AccessV2PermKeys.sol";
 import {IExecutor} from "../../src/Executor.sol";
+import {ZkEmailProof} from "../../src/zkemail/IVerifier.sol";
 
 /*
  * ============================================================================
@@ -151,6 +152,36 @@ interface IExecMig {
     function setMembershipAuthority(address authority) external;
     function hats() external view returns (address);
     function allowedCaller() external view returns (address);
+    /// @dev The gate BOTH the legacy EligibilityModule.setEmailVerified and the v2
+    ///      MembershipAuthority.setEmailVerified apply to a non-executor caller (T1 zk continuity).
+    function isAuthorizedHatMinter(address minter) external view returns (bool);
+}
+
+/// @dev The LIVE per-org ZkEmailInvites surface exercised by the T1 continuity probe. The deployed
+///      bytecode resolves its Hats instance from `executor.hats()` (fork-traced, 2026-08-25), so the
+///      cutover's `Executor.setMembershipAuthority` IS the zk repoint — there is no module-side setter
+///      to call and none is needed. See _probeZkContinuity for the full traced chain.
+interface IZkInvitesMig {
+    function executor() external view returns (address);
+    function domainVerifier() external view returns (address);
+    function dkimRegistry() external view returns (address);
+    function merkleRoot() external view returns (bytes32);
+    function allowlistCid() external view returns (bytes32);
+    function setActiveAllowlist(bytes32 root, bytes32 cid) external;
+    function claimRoleByDomain(
+        ZkEmailProof calldata proof,
+        address claimer,
+        uint256[] calldata hatIds,
+        bytes32[] calldata merkleProof
+    ) external;
+}
+
+/// @dev The legacy EligibilityModule WRITE surface used by the pre-cutover zk baseline (T1), the
+///      synthetic-ban drill (T3) and the A5 drift drill. superAdmin == the org Executor (verified live).
+interface IEMWriteMig {
+    function setWearerEligibility(address wearer, uint256 hatId, bool eligible, bool standing) external;
+    function mintHatToAddress(uint256 hatId, address wearer) external;
+    function setEmailVerified(address wearer, uint256[] calldata hatIds) external;
 }
 
 interface IToggleMig {

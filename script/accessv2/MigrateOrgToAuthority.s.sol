@@ -230,6 +230,10 @@ abstract contract MigrateOrgBase is OrgCatalog {
         console.log("  SEED INVARIANT ok; seeded memberships:", seeded);
         _captureExpectations(s, candidates);
 
+        // T1: LEGACY zk-claim baseline (snapshot-isolated) — the independent pre-cutover expectation
+        //     the post-cutover continuity probe must reproduce.
+        _zkLegacyBaseline(s);
+
         // A5 DRIFT DRILL (isolated snapshot): a fresh legacy wearer joins after the seed proposals
         // executed; prove the STALE cutover reverts on-chain and a regenerated DELTA cutover ports them.
         _driftDrill(s, authority, router, candidates);
