@@ -33,7 +33,12 @@ flakiness — retry, or switch to `gnosis-drpc`; a real failure reproduces on bo
 
 **Subgraph gate (§6 step-0 item 7):** the v2 subgraph (authority template + fold mirror + pending
 entity) must be published to Studio AND the decentralized gateway on both chains BEFORE the first
-cutover proposal is created (the app reads the gateway, not Studio). Wave E deliverable.
+cutover proposal is created (the app reads the gateway, not Studio).
+STATUS 2026-08-26: **Gnosis LIVE and verified** — Studio serves the post-fix PR-211 build
+(deployment QmUAxz2tPcj3FekGtSKnewauZho1rhEqhsMZWffHKASfmb, 0 indexing errors, synced to head;
+verified by probing a fix-removed field). **Arbitrum still syncing.** Before the FIRST cutover
+proposal on each chain, confirm the GATEWAY (not just Studio) serves this schema — the frontend
+capability probe will refuse the v2 surfaces otherwise (by design).
 
 ## Phase 1 — per-org ceremony (order: Test6 → Decentral Park → Poa → KUBI)
 
