@@ -20,6 +20,11 @@ optimizer = true
 optimizer_runs = 200
 bytecode_hash = "none"
 evm_version = "cancun"
+# Separate artifact/cache dirs so default<->production alternation stops thrashing the compile
+# cache. Measured on this repo: a profile switch over a SHARED out/ forced a ~5.5 min full
+# recompile EVERY time (same-profile no-op = 0.4 s); with per-profile dirs both caches stay warm.
+out = "out-production"
+cache_path = "cache-production"
 
 [rpc_endpoints]
 # Testnets (public dRPC endpoints - no API key needed)
