@@ -162,15 +162,31 @@ code paths) ships only after the LAST org migrates and soaks.
 - **CutoverVerifier (C4)** — a stateless protocol singleton (`src/CutoverVerifier.sol`, immutable
   `hats` + `orgRegistry`, ZERO storage) registered per chain in the Phase-0 wave
   (`addContractType("CutoverVerifier", …)`, deterministic CREATE3 address). Its single view-revert
-  entrypoint `verify(orgId, authority, router, subjects[], expectedCounts[])` belongs as the LAST
-  call of the cutover Executor batch: it `require()`s (a) `router.authorityOf(subject) == authority`
-  for every subject (bind landed, no spoof), (b) `authority.paused() == false`, (c) per subject
-  `memberCount == expectedCounts[i]` (generation-time counts baked into the batch — drift between
-  generation and `announceWinner` reverts the whole batch, enforcing regenerate-before-cutover
-  on-chain) AND `memberCount <= hats.hatSupply(subject)` via the CANONICAL Hats (enumeration-
-  independent upper bound — closes the self-referential-parity gap), and (d) the admin (topHat) id
-  resolves THROUGH THE ROUTER (`isWearerOfHat(orgExecutor, subjects[0])` + `viewHat(...).active`).
-  `subjects[0]` MUST be the admin (topHat) id.
+  entrypoint `verify(orgId, authority, router, subjects[], expectedCounts[], expectedSupplies[])`
+  belongs as the LAST call of the cutover Executor batch: it `require()`s (a)
+  `router.authorityOf(subject) == authority` for every subject (bind landed, no spoof), (b)
+  `authority.paused() == false`, (c) per subject `memberCount == expectedCounts[i]` (generation-time
+  counts baked into the batch — AUTHORITY-side drift between generation and `announceWinner` reverts
+  the whole batch), `hats.hatSupply(subject) == expectedSupplies[i]` (A5 — a FRESH LEGACY wearer that
+  joined post-seed changes the canonical supply but NOT the authority memberCount, so this exact-
+  equality guard is the only on-chain signal that a newcomer would be toggled off unported; it forces
+  the regenerate-with-delta step before cutover), AND `memberCount <= hats.hatSupply(subject)` via the
+  CANONICAL Hats (enumeration-independent upper bound — closes the self-referential-parity gap), and
+  (d) the admin (topHat) id resolves THROUGH THE ROUTER (`isWearerOfHat(orgExecutor, subjects[0])` +
+  `viewHat(...).active`). `subjects[0]` MUST be the admin (topHat) id.
+- **Delta-seed (A5, §6 step-3 first element)** — the cutover batch OPENS with a delta-seed section:
+  legacy wearers who joined since the seed proposals executed (live `isWearerOfHat` but not yet an
+  authority member) get one `seedRules(Grant)`+`seedMemberships` pair each, INSIDE the atomic cutover
+  (executor-gated, pause-exempt, before the unpause). `GenerateBatches` computes it automatically from
+  the re-enumerated candidate set — so RE-RUN `tools/enumerate-wearers.sh` immediately before
+  regenerating the cutover. No drift → empty delta → the router bind leads the batch (pre-A5 shape).
+  The governed sim's drift drill (`SimMigrate*`) proves both arms: a stale batch reverts on `SupplyDrift`
+  and a regenerated delta batch ports the newcomer with the verifier passing.
+- **DD CREATE2 occupant guard (A7)** — `_ddDeployAuthority` reuses a pre-occupied predicted slot ONLY
+  after two guards: the occupant's codehash matches a reference `BeaconProxy` on the org's MA beacon
+  (rejects foreign/wrong-beacon bytecode at a colliding CREATE2 slot, CLAUDE.md pt 6), AND its
+  `executor()`/`paused()` match this org's empty-genesis predeploy (rejects a legit BeaconProxy for a
+  different org). Foreign bytecode reverts loudly instead of being bound as the authority.
 - **Seed acceptedAt = epoch 1 (C3, ruling R7)** — `seedMemberships` writes `acceptedAt = 1`, NOT
   `block.timestamp`. Seeded members are pre-existing, so `activeMemberSince = 1 <=` any in-flight
   proposal's `createdAt`, keeping those proposals votable across the cutover; post-cutover `claim()`

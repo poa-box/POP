@@ -127,8 +127,14 @@ contract CutoverVerifierTest is Test {
         c[1] = 5;
     }
 
+    function _supplies() internal pure returns (uint32[] memory sup) {
+        sup = new uint32[](2);
+        sup[0] = 1; // ADMIN supply (happy state)
+        sup[1] = 8; // ROLE supply (happy state)
+    }
+
     function _verify() internal view {
-        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), _counts());
+        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), _counts(), _supplies());
     }
 
     function testImmutablesPinned() public view {
@@ -142,14 +148,21 @@ contract CutoverVerifierTest is Test {
 
     function testRevertsOnNoSubjects() public {
         vm.expectRevert(CutoverVerifier.NoSubjects.selector);
-        verifier.verify(ORG_ID, address(authority), address(router), new uint256[](0), new uint32[](0));
+        verifier.verify(ORG_ID, address(authority), address(router), new uint256[](0), new uint32[](0), new uint32[](0));
     }
 
     function testRevertsOnLengthMismatch() public {
         uint32[] memory c = new uint32[](1);
         c[0] = 1;
         vm.expectRevert(CutoverVerifier.ArrayLengthMismatch.selector);
-        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), c);
+        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), c, _supplies());
+    }
+
+    function testRevertsOnSupplyLengthMismatch() public {
+        uint32[] memory sup = new uint32[](1);
+        sup[0] = 1;
+        vm.expectRevert(CutoverVerifier.ArrayLengthMismatch.selector);
+        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), _counts(), sup);
     }
 
     function testRevertsWhenAuthorityStillPaused() public {
@@ -171,17 +184,29 @@ contract CutoverVerifierTest is Test {
         // A member joined between generation and announceWinner: live count 6 != expected 5.
         authority.setMemberCount(ROLE, 6);
         vm.expectRevert(abi.encodeWithSelector(CutoverVerifier.MemberCountDrift.selector, ROLE, uint256(5), uint256(6)));
-        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), _counts());
+        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), _counts(), _supplies());
+    }
+
+    function testRevertsOnSupplyDrift() public {
+        // A5: a FRESH LEGACY WEARER joined between the delta snapshot and announceWinner — the authority
+        // memberCount is unchanged (still 5 == expected) but the canonical supply rose 8 → 9. Only the
+        // supply-drift guard catches it, forcing a regenerate-with-delta before cutover.
+        hats.setSupply(ROLE, 9);
+        vm.expectRevert(abi.encodeWithSelector(CutoverVerifier.SupplyDrift.selector, ROLE, uint32(8), uint32(9)));
+        _verify();
     }
 
     function testRevertsWhenMemberCountExceedsHatSupply() public {
         // memberCount 5 (== expected) but hats supply only 4 → self-referential-parity guard trips.
+        // Bake expectedSupplies=4 too so the supply-drift guard passes and we isolate the <= check.
         authority.setMemberCount(ROLE, 5);
         hats.setSupply(ROLE, 4);
+        uint32[] memory sup = _supplies();
+        sup[1] = 4;
         vm.expectRevert(
             abi.encodeWithSelector(CutoverVerifier.MemberCountExceedsSupply.selector, ROLE, uint256(5), uint32(4))
         );
-        _verify();
+        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), _counts(), sup);
     }
 
     function testRevertsWhenOrgNotRegistered() public {
@@ -208,6 +233,6 @@ contract CutoverVerifierTest is Test {
         hats.setSupply(ROLE, 8);
         uint32[] memory c = _counts();
         c[1] = 8;
-        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), c);
+        verifier.verify(ORG_ID, address(authority), address(router), _subjects(), c, _supplies());
     }
 }

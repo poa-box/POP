@@ -53,7 +53,12 @@ contract CutoverVerifier {
     error AuthorityPaused();
     /// (c1) authority.memberCount(subject) != the generation-time expected count (seed→cutover drift).
     error MemberCountDrift(uint256 subject, uint256 expected, uint256 actual);
-    /// (c2) memberCount exceeds the canonical Hats supply (the self-referential-parity guard).
+    /// (c2) canonical Hats supply changed since generation (A5: a LEGACY join/burn between the delta
+    ///      snapshot and announceWinner — the authority memberCount is BLIND to a fresh legacy wearer,
+    ///      so the enumeration-INDEPENDENT supply is the only on-chain signal that a newcomer would be
+    ///      toggled off unported. An exact-equality guard makes the regenerate-with-delta discipline real.
+    error SupplyDrift(uint256 subject, uint32 expected, uint32 actual);
+    /// (c3) memberCount exceeds the canonical Hats supply (the self-referential-parity guard).
     error MemberCountExceedsSupply(uint256 subject, uint256 memberCount, uint32 hatSupply);
     /// (d1) the admin (topHat) id does not resolve to the org Executor THROUGH THE ROUTER.
     error AdminNotResolved(uint256 adminSubject, address executor);
@@ -74,16 +79,18 @@ contract CutoverVerifier {
     /// @param router         the protocol AuthorityRouter singleton (the just-bound-through router).
     /// @param subjects       adopted subject ids to verify; index 0 = the admin (topHat) id.
     /// @param expectedCounts generation-time memberCount per subject (index-aligned with `subjects`).
+    /// @param expectedSupplies generation-time canonical Hats supply per subject (A5 legacy-drift guard).
     function verify(
         bytes32 orgId,
         address authority,
         address router,
         uint256[] calldata subjects,
-        uint32[] calldata expectedCounts
+        uint32[] calldata expectedCounts,
+        uint32[] calldata expectedSupplies
     ) external view {
         uint256 n = subjects.length;
         if (n == 0) revert NoSubjects();
-        if (expectedCounts.length != n) revert ArrayLengthMismatch();
+        if (expectedCounts.length != n || expectedSupplies.length != n) revert ArrayLengthMismatch();
 
         // (b) the authority must be UNPAUSED post-cutover (writes live again).
         if (IMembershipAuthorityCutover(authority).paused()) revert AuthorityPaused();
@@ -95,10 +102,12 @@ contract CutoverVerifier {
             address bound = IAuthorityRouter(router).authorityOf(subject);
             if (bound != authority) revert AuthorityNotBound(subject, authority, bound);
 
-            // (c) memberCount == the generation-time count AND <= canonical Hats supply.
+            // (c) memberCount == the generation-time count; supply == the generation-time supply
+            //     (A5 legacy-drift guard); and memberCount <= supply (self-referential-parity guard).
             uint256 mc = IMembershipAuthorityCutover(authority).memberCount(subject);
             if (mc != expectedCounts[i]) revert MemberCountDrift(subject, expectedCounts[i], mc);
             uint32 supply = IHatsSupply(hats).hatSupply(subject);
+            if (supply != expectedSupplies[i]) revert SupplyDrift(subject, expectedSupplies[i], supply);
             if (mc > supply) revert MemberCountExceedsSupply(subject, mc, supply);
 
             unchecked {

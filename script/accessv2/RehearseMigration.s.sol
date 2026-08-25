@@ -131,8 +131,9 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         // reads go dark; parity must compare the authority against this pre-cutover snapshot).
         _captureExpectations(s, candidates);
 
-        // (4) Ordering proof (iii) + faithful cutover execution.
-        (IExecutor.Call[] memory batch, uint256 bindIdx) = _buildCutoverBatch(s, authority, router);
+        // (4) Ordering proof (iii) + faithful cutover execution. No drift in the rehearsal → the delta
+        //     is empty and bindIdx == 0 (the pre-A5 batch shape).
+        (IExecutor.Call[] memory batch, uint256 bindIdx) = _buildCutoverBatch(s, authority, router, candidates);
         _assertBindBeforeToggle(s, authority, router, batch, bindIdx);
 
         // Execute the FULL batch faithfully through governance.

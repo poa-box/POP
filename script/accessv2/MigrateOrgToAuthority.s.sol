@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/console.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
-import {IExecMig, IPoaManagerMig} from "./AccessV2MigrationBase.sol";
+import {IExecMig, IPoaManagerMig, IHatsMin} from "./AccessV2MigrationBase.sol";
 import {OrgCatalog} from "./RehearseMigration.s.sol";
 import {IMembershipAuthority} from "../../src/interfaces/IMembershipAuthority.sol";
 import {IAuthorityRouter} from "../../src/interfaces/IAuthorityRouter.sol";
@@ -95,9 +95,19 @@ abstract contract MigrateOrgBase is OrgCatalog {
         } else {
             // A7 (simVsBroadcast-5 / CLAUDE.md point 6): the CREATE2 slot is already occupied. Adopting it
             // blindly would let the ceremony bind FOREIGN bytecode (a colliding salt, or stale code
-            // registered under a different version) as the org's authority. Confirm the occupant is THIS
-            // org's atomically-initialized authority proxy (executor + paused match the empty-genesis init)
-            // before reusing it; foreign bytecode makes executor() revert or mismatch → fail loudly.
+            // registered under a different version) as the org's authority. Two layered guards:
+            //  (1) CODEHASH: the occupant runtime MUST be a BeaconProxy pointing at THIS org's MA beacon —
+            //      reject any non-proxy / wrong-beacon bytecode at the colliding slot. Compared against a
+            //      throwaway reference proxy on the same beacon (BeaconProxy runtimeCode is unavailable —
+            //      it carries an immutable — so a fresh reference deploy is the robust codehash source).
+            //  (2) SEMANTIC: the proxy is THIS org's atomically-initialized authority (executor + paused
+            //      match the empty-genesis init) — catches a legit-but-foreign BeaconProxy for another org.
+            address maBeacon = IPoaManagerMig(_poaManager(s)).getBeaconById(MEMBERSHIP_AUTHORITY_TYPEID);
+            bytes32 refCodehash = address(new BeaconProxy(maBeacon, "")).codehash;
+            require(
+                authority.codehash == refCodehash,
+                "CREATE2 slot occupant is not a MembershipAuthority BeaconProxy (foreign bytecode)"
+            );
             try IMembershipAuthority(authority).executor() returns (address ex) {
                 require(ex == s.executor, "CREATE2 slot occupied by a DIFFERENT org's authority (wrong executor)");
                 require(
@@ -215,9 +225,13 @@ abstract contract MigrateOrgBase is OrgCatalog {
         console.log("  SEED INVARIANT ok; seeded memberships:", seeded);
         _captureExpectations(s, candidates);
 
-        // Cutover — one atomic governance proposal (§6 order asserted structurally).
-        (IExecutor.Call[] memory cutover, uint256 bindIdx) = _buildCutoverBatch(s, authority, router);
-        require(bindIdx == 0, "router bind must lead the cutover batch");
+        // A5 DRIFT DRILL (isolated snapshot): a fresh legacy wearer joins after the seed proposals
+        // executed; prove the STALE cutover reverts on-chain and a regenerated DELTA cutover ports them.
+        _driftDrill(s, authority, router, candidates);
+
+        // Cutover — one atomic governance proposal (§6 order; no drift here → delta empty, bindIdx 0).
+        (IExecutor.Call[] memory cutover, uint256 bindIdx) = _buildCutoverBatch(s, authority, router, candidates);
+        require(bindIdx == 0, "router bind must lead the cutover batch (no drift expected here)");
         _writeBatchJson(s, "cutover", 1, cutover, authority);
         _govern(s, cutover, "access-v2 cutover", candidates);
         _assertCutoverLanded(s, authority, router);
@@ -230,6 +244,81 @@ abstract contract MigrateOrgBase is OrgCatalog {
         _assertRollback(s, authority);
 
         console.log(string.concat("PASS: ", s.name, " governed migration sim complete."));
+    }
+
+    /*──────────────────── A5 drift drill (delta-seed vs stale-batch revert) ────────────────────*/
+
+    /// @dev A5 (specOrder-4 / seedCompleteness-2): the drift drill. After the seeds executed, a NEW legacy
+    ///      member joins (force-eligible + mint via the EligibilityModule superAdmin = Executor). Then:
+    ///        (i)  the STALE cutover (built pre-drift, expectedSupplies baked before the join) REVERTS
+    ///             on-chain — the CutoverVerifier SupplyDrift guard catches the fresh wearer that the
+    ///             authority memberCount is blind to (proves drift protection is real, not sim-only);
+    ///        (ii) a REGENERATED cutover (candidate set now including the newcomer) carries a delta-seed
+    ///             at its head, ports the newcomer, and the in-batch verifier PASSES.
+    ///      Runs inside a snapshot so it does not perturb the clean cutover that follows.
+    function _driftDrill(OrgSpec memory s, address authority, address router, address[] memory candidates) internal {
+        uint256 snap = vm.snapshotState();
+
+        // Build the STALE cutover at the current (no-drift) state — expectedSupplies baked pre-join.
+        (IExecutor.Call[] memory stale, uint256 staleBind) = _buildCutoverBatch(s, authority, router, candidates);
+        require(staleBind == 0, "A5: pre-drift cutover unexpectedly carries a delta");
+
+        // Mint a fresh legacy wearer on a role subject with headroom (supply++).
+        (uint256 subj, address newcomer) = _mintLegacyNewcomer(s);
+        require(newcomer != address(0), "A5 drill: could not mint a legacy newcomer on any subject");
+        console.log("  [A5] minted fresh legacy wearer on subject:", subj);
+
+        // (i) the STALE cutover must REVERT atomically at the verifier (SupplyDrift). Executed directly
+        //     through the Executor so the revert BUBBLES (announceWinner's try/catch would swallow it —
+        //     that swallowing is the silent-no-op hazard; the drill asserts the batch itself reverts).
+        vm.prank(s.votingContract);
+        try IExecMig(s.executor).execute(90901, stale) {
+            revert("A5 DRIFT: stale cutover did NOT revert despite a fresh legacy wearer (guard dead)");
+        } catch {}
+        console.log("  [A5] stale cutover REVERTED on legacy drift (CutoverVerifier SupplyDrift guard live)");
+
+        // (ii) regenerate WITH the newcomer in the candidate set → delta-seed leads the cutover, ports it.
+        address[] memory augmented = _appendAddr(candidates, newcomer);
+        (IExecutor.Call[] memory deltaCut, uint256 deltaBind) = _buildCutoverBatch(s, authority, router, augmented);
+        require(deltaBind > 0, "A5: regenerated cutover has no delta-seed despite drift");
+        require(deltaCut[deltaBind].target == router, "A5: router bind not at bindIndex after delta");
+        vm.prank(s.votingContract);
+        IExecMig(s.executor).execute(90902, deltaCut);
+        require(IMembershipAuthority(authority).isMember(subj, newcomer), "A5: delta cutover did not port the newcomer");
+        _assertCutoverLanded(s, authority, router);
+        console.log("  [A5] delta cutover ported the newcomer; in-batch verifier PASSED. bindIndex:", deltaBind);
+
+        vm.revertToState(snap);
+    }
+
+    /// @dev Force-eligible + mint a fresh legacy wearer on the first role subject with maxSupply headroom.
+    ///      The EligibilityModule superAdmin is the org Executor (verified live), so pranking it can both
+    ///      grant eligibility and mint the hat (mintHatToAddress → hats.mintHat, supply++).
+    function _mintLegacyNewcomer(OrgSpec memory s) internal returns (uint256 subject, address newcomer) {
+        newcomer = address(uint160(uint256(keccak256(abi.encode(s.orgId, "a5-drift-newcomer")))));
+        for (uint256 i; i < _subjects.length; ++i) {
+            uint256 cand = _subjects[i];
+            if (cand == _topHatId(s)) continue; // topHat maxSupply 1 (no headroom)
+            (, uint32 maxSupply, uint32 supply,,,,,,) = IHatsMin(HATS).viewHat(cand);
+            if (maxSupply <= supply) continue; // no headroom (AllHatsWorn would revert)
+            vm.startPrank(s.executor);
+            try IEMWrite(s.eligibilityModule).setWearerEligibility(newcomer, cand, true, true) {} catch {}
+            try IEMWrite(s.eligibilityModule).mintHatToAddress(cand, newcomer) {
+                vm.stopPrank();
+                if (IHatsMin(HATS).isWearerOfHat(newcomer, cand)) return (cand, newcomer);
+            } catch {
+                vm.stopPrank();
+            }
+        }
+        return (0, address(0));
+    }
+
+    function _appendAddr(address[] memory arr, address x) internal pure returns (address[] memory out) {
+        out = new address[](arr.length + 1);
+        for (uint256 i; i < arr.length; ++i) {
+            out[i] = arr[i];
+        }
+        out[arr.length] = x;
     }
 
     /*──────────────────── Proposal JSON emission ────────────────────*/
@@ -291,6 +380,12 @@ interface IHatsLocal {
     function isWearerOfHat(address user, uint256 hatId) external view returns (bool);
 }
 
+/// @dev EligibilityModule write surface used by the A5 drift drill (superAdmin = org Executor).
+interface IEMWrite {
+    function setWearerEligibility(address wearer, uint256 hatId, bool eligible, bool standing) external;
+    function mintHatToAddress(uint256 hatId, address wearer) external;
+}
+
 interface HVAnnounce {
     function announceWinner(uint256 id) external returns (uint256 winner, bool valid);
 }
@@ -341,8 +436,11 @@ contract GenerateBatches is MigrateOrgBase {
         // protocol wave repointed hub.HATS() to the router; before that wave this correctly reverts).
         address router = _hubHats(s);
         require(_isRouter(router), "hub HATS() is not the AuthorityRouter yet (run protocol wave first)");
-        (IExecutor.Call[] memory cutover, uint256 bindIdx) = _buildCutoverBatch(s, authority, router);
-        require(bindIdx == 0, "router bind must lead the cutover batch");
+        // A5 delta mode: candidates should be RE-ENUMERATED (tools/enumerate-wearers.sh) immediately
+        // before this call so any legacy joiner since the seed is picked up as a delta-seed slice at the
+        // head of the cutover batch. bindIdx > 0 iff a delta is present.
+        (IExecutor.Call[] memory cutover, uint256 bindIdx) = _buildCutoverBatch(s, authority, router, candidates);
+        require(cutover[bindIdx].target == router, "router bind not at bindIndex (delta ordering wrong)");
         _writeBatchJson(s, "cutover", 1, cutover, authority);
 
         console.log("  DONE. Craft proposals from out/*.json IN ORDER (seed.1..n, then cutover.1).");

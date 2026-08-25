@@ -190,8 +190,13 @@ interface ICutoverVerifierMig {
         address authority,
         address router,
         uint256[] calldata subjects,
-        uint32[] calldata expectedCounts
+        uint32[] calldata expectedCounts,
+        uint32[] calldata expectedSupplies
     ) external view;
+}
+
+interface IHatsSupplyMig {
+    function hatSupply(uint256 hatId) external view returns (uint32);
 }
 
 abstract contract AccessV2MigrationBase is Script {
@@ -1001,11 +1006,12 @@ abstract contract AccessV2MigrationBase is Script {
     /*═══════════════════════════════ CUTOVER BATCH (§6 step 3) ═══════════════════════════════*/
 
     /// @notice Build the exact atomic cutover Executor.Call[] in §6 order. `router` is the singleton.
-    ///         Ordering: router BIND (before toggle-off) → setMembershipAuthority ×8 (incl. Executor
-    ///         self-target) → unpause → legacy toggle-off → in-batch CutoverVerifier.verify (LAST).
-    ///         announceWinner needs the per-org runbook --gas-limit (KUBI 5M, others 4M).
-    ///         Returns the batch and the index of the router-bind call (for the ordering assertion).
-    function _buildCutoverBatch(OrgSpec memory s, address authority, address router)
+    ///         Ordering: DELTA-SEED (A5, §6 first element) → router BIND (before toggle-off) →
+    ///         setMembershipAuthority ×8 (incl. Executor self-target) → unpause → legacy toggle-off →
+    ///         in-batch CutoverVerifier.verify (LAST). announceWinner needs the per-org runbook
+    ///         --gas-limit (KUBI 5M, others 4M). Returns the batch and the index of the router-bind call
+    ///         (bindIndex == number of delta calls; 0 when there is no drift).
+    function _buildCutoverBatch(OrgSpec memory s, address authority, address router, address[] memory candidates)
         internal
         view
         returns (IExecutor.Call[] memory batch, uint256 bindIndex)
@@ -1015,10 +1021,23 @@ abstract contract AccessV2MigrationBase is Script {
         bool[] memory offs = new bool[](roleHats.length);
         // offs default false → setHatStatus(false)
 
-        // The batch is 11 core calls + 1 trailing CutoverVerifier.verify (when a verifier is wired).
+        // A5 (§6 step-3, specOrder-4 / seedCompleteness-2): DELTA-SEED first — legacy wearers who joined
+        // since the authority was seeded (isWearerOfHat but NOT yet an authority member) are granted +
+        // accepted here, INSIDE the atomic cutover, so they are not silently toggled off unported. When
+        // there is no drift the delta is EMPTY (bindIndex == 0, the pre-A5 shape). This is executable —
+        // seedRules/seedMemberships are executor-gated and pause-exempt, and run before the unpause.
+        (IExecutor.Call[] memory delta,) = _buildDeltaSeed(s, authority, candidates);
+
+        // The batch is `delta` + 11 core calls + 1 trailing CutoverVerifier.verify (when wired).
         bool withVerify = _verifier != address(0);
-        batch = new IExecutor.Call[](withVerify ? 12 : 11);
+        batch = new IExecutor.Call[](delta.length + (withVerify ? 12 : 11));
+        require(batch.length <= MAX_CALLS, "cutover batch exceeds Executor MAX_CALLS (freeze legacy joins)");
         uint256 k;
+
+        // 0. DELTA-SEED slices (the §6 first cutover element).
+        for (uint256 i; i < delta.length; ++i) {
+            batch[k++] = delta[i];
+        }
 
         // 1. Router legacy-id BIND — BEFORE toggle-off (adopted ids flip passthrough→authority-native).
         bindIndex = k;
@@ -1070,33 +1089,102 @@ abstract contract AccessV2MigrationBase is Script {
         //     the runbook's "the cutover batch itself require()s counts and router-through resolution"
         //     is now TRUE (was previously sim-only — specOrder-2 / simVsBroadcast-1 / seedCompleteness-2).
         if (withVerify) {
-            (uint256[] memory subjects, uint32[] memory expectedCounts) = _cutoverExpectedCounts(authority);
+            (uint256[] memory subjects, uint32[] memory expectedCounts, uint32[] memory expectedSupplies) =
+                _cutoverExpectedState(s, authority, candidates);
             batch[k++] = IExecutor.Call({
                 target: _verifier,
                 value: 0,
-                data: abi.encodeCall(ICutoverVerifierMig.verify, (s.orgId, authority, router, subjects, expectedCounts))
+                data: abi.encodeCall(
+                    ICutoverVerifierMig.verify, (s.orgId, authority, router, subjects, expectedCounts, expectedSupplies)
+                )
             });
         }
 
         require(k == batch.length, "batch length mismatch");
     }
 
-    /// @dev Generation-time (post-seed, pre-cutover) per-subject memberCount, baked into the cutover
-    ///      batch as the verifier's `expectedCounts`. subjects[0] is the admin (topHat) id, as the
-    ///      CutoverVerifier requires. Any membership drift between generation and announceWinner then
-    ///      reverts the batch on-chain (A5 drift protection).
-    function _cutoverExpectedCounts(address authority)
+    /// @dev A5: the DELTA-SEED calls — for each subject, legacy wearers (isWearerOfHat, in `candidates`)
+    ///      who are NOT yet authority members get one seedRules(Grant)+seedMemberships pair (the SEED
+    ///      INVARIANT unit). Returns the calls and the count of subjects carrying a delta. Empty when the
+    ///      authority already covers every live wearer (no drift → bindIndex 0, the pre-A5 batch shape).
+    function _buildDeltaSeed(OrgSpec memory s, address authority, address[] memory candidates)
         internal
         view
-        returns (uint256[] memory subjects, uint32[] memory expectedCounts)
+        returns (IExecutor.Call[] memory delta, uint256 subjectsWithDelta)
+    {
+        uint256 n = _subjects.length;
+        address[][] memory perNew = new address[][](n);
+        for (uint256 i; i < n; ++i) {
+            perNew[i] = _deltaMembers(s, authority, _subjects[i], candidates);
+            if (perNew[i].length > 0) subjectsWithDelta++;
+        }
+        delta = new IExecutor.Call[](2 * subjectsWithDelta);
+        uint256 di;
+        for (uint256 i; i < n; ++i) {
+            address[] memory newM = perNew[i];
+            if (newM.length == 0) continue;
+            uint256 subject = _subjects[i];
+            bool delegable = (subject == _memberSubject); // member-class delegable, officer-class sticky
+            AccessV2Types.RuleKind[] memory kinds = new AccessV2Types.RuleKind[](newM.length);
+            bool[] memory del = new bool[](newM.length);
+            uint256[] memory subs = new uint256[](newM.length);
+            for (uint256 j; j < newM.length; ++j) {
+                kinds[j] = AccessV2Types.RuleKind.Grant;
+                del[j] = delegable;
+                subs[j] = subject;
+            }
+            delta[di++] = IExecutor.Call({
+                target: authority,
+                value: 0,
+                data: abi.encodeCall(IMembershipAuthority.seedRules, (subs, newM, kinds, del))
+            });
+            delta[di++] = IExecutor.Call({
+                target: authority, value: 0, data: abi.encodeCall(IMembershipAuthority.seedMemberships, (subs, newM))
+            });
+        }
+    }
+
+    /// @dev Legacy wearers of `subject` among `candidates` who are NOT yet authority members (the delta).
+    function _deltaMembers(OrgSpec memory s, address authority, uint256 subject, address[] memory candidates)
+        internal
+        view
+        returns (address[] memory)
+    {
+        address[] memory legacyMembers = _currentMembers(s, subject, candidates);
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        address[] memory tmp = new address[](legacyMembers.length);
+        uint256 c;
+        for (uint256 j; j < legacyMembers.length; ++j) {
+            if (!a.isMember(subject, legacyMembers[j])) tmp[c++] = legacyMembers[j];
+        }
+        address[] memory out = new address[](c);
+        for (uint256 j; j < c; ++j) {
+            out[j] = tmp[j];
+        }
+        return out;
+    }
+
+    /// @dev Generation-time state baked into the cutover verifier: per-subject expectedCounts (authority
+    ///      memberCount AFTER the in-batch delta applies) and expectedSupplies (live canonical Hats
+    ///      supply). subjects[0] is the admin (topHat) id, as the CutoverVerifier requires. Authority-side
+    ///      drift trips MemberCountDrift; a fresh LEGACY wearer (invisible to authority memberCount) trips
+    ///      SupplyDrift — together the on-chain regenerate-with-delta-before-cutover guard (A5).
+    function _cutoverExpectedState(OrgSpec memory s, address authority, address[] memory candidates)
+        internal
+        view
+        returns (uint256[] memory subjects, uint32[] memory expectedCounts, uint32[] memory expectedSupplies)
     {
         uint256 n = _subjects.length;
         subjects = new uint256[](n);
         expectedCounts = new uint32[](n);
+        expectedSupplies = new uint32[](n);
         IMembershipAuthority a = IMembershipAuthority(authority);
         for (uint256 i; i < n; ++i) {
-            subjects[i] = _subjects[i];
-            expectedCounts[i] = uint32(a.memberCount(_subjects[i]));
+            uint256 subject = _subjects[i];
+            subjects[i] = subject;
+            uint256 deltaCount = _deltaMembers(s, authority, subject, candidates).length;
+            expectedCounts[i] = uint32(a.memberCount(subject) + deltaCount);
+            expectedSupplies[i] = IHatsSupplyMig(HATS).hatSupply(subject);
         }
     }
 
