@@ -202,6 +202,8 @@ abstract contract MigrateOrgBase is OrgCatalog {
         _discoverSubjects(s);
         // T3: real legacy kick injected BEFORE the seed proposals are built (ban path non-vacuity).
         _injectSyntheticBan(s, candidates);
+        // T5: guarantee the per-project TM override resolution path executes on this org.
+        _ensureTmOverrideRow(s, candidates);
         vm.startPrank(HUDSON);
         address authority = _ddDeployAuthority(s);
         vm.stopPrank();
@@ -231,6 +233,8 @@ abstract contract MigrateOrgBase is OrgCatalog {
         uint256 seeded = _assertSeedInvariant(s, authority, candidates);
         console.log("  SEED INVARIANT ok; seeded memberships:", seeded);
         _captureExpectations(s, candidates);
+        // T5: INDEPENDENT legacy TM oracle, read from the live TM's own storage PRE-cutover.
+        _captureTmOracle(s, candidates);
 
         // T1: LEGACY zk-claim baseline (snapshot-isolated) — the independent pre-cutover expectation
         //     the post-cutover continuity probe must reproduce.

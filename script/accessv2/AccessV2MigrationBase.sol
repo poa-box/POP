@@ -146,6 +146,11 @@ interface ITMMig {
     function getLensData(uint8 t, bytes calldata d) external view returns (bytes memory);
 }
 
+/// @dev The executor-gated TaskManager admin surface used by the T5 override-row injection fallback.
+interface ITMWriteMig {
+    function setProjectRolePerm(bytes32 pid, uint256 hatId, uint8 mask) external;
+}
+
 interface IExecMig {
     function execute(uint256 proposalId, IExecutor.Call[] calldata batch) external;
     function mintHatsForUser(address user, uint256[] calldata hatIds) external;
@@ -955,6 +960,193 @@ abstract contract AccessV2MigrationBase is Script {
         _tmProjHats = vm.parseJsonUintArray(json, ".projHats");
         _tmProjMasks = vm.parseJsonUintArray(json, ".projMasks");
         _tmPermsLoaded = true;
+    }
+
+    /*═══════════════ T5: INDEPENDENT legacy TaskManager oracle (assertTautology-5) ═══════════════*/
+    /*
+     * The A2 probe compared the seeded authority state against `_legacyExpectedMask`, folded from the
+     * SAME fixture that seeded it — a shared-source tautology that also omitted legacy `_permMask`'s
+     * `permissionHatIds` gate, so a stale fixture row for a delisted hat would be seeded as a live TM
+     * grant and "proved" correct by both sides carrying it.
+     *
+     * The oracle below is read from the LIVE TaskManager's OWN ERC-7201 storage (rolePermGlobal /
+     * rolePermProj / permissionHatIds) plus live Hats wearership, i.e. exactly the inputs
+     * TaskManager._permMask's legacy arm folds — nothing fixture-derived. Slot offsets are anchored by
+     * requiring the storage-read permissionHatIds to equal getLensData(6) before any mask is trusted.
+     */
+    bytes32 internal constant TM_SLOT = keccak256("poa.taskmanager.storage");
+    uint256 internal constant TM_F_ROLE_PERM_GLOBAL = 6; // Layout field index (append-only struct)
+    uint256 internal constant TM_F_ROLE_PERM_PROJ = 7;
+    uint256 internal constant TM_F_PERMISSION_HATS = 8;
+
+    // Oracle rows captured PRE-cutover (live Hats reads go dark after the toggle-off).
+    address[] internal _tmOracleUsers;
+    uint256[] internal _tmOraclePids;
+    uint256[] internal _tmOracleMasks;
+    bool[] internal _tmOracleShadow; // true = the row carries a per-project override for this user
+
+    function _tmPermHatsLive(OrgSpec memory s) internal view returns (uint256[] memory out) {
+        bytes32 lenSlot = bytes32(uint256(TM_SLOT) + TM_F_PERMISSION_HATS);
+        uint256 len = uint256(vm.load(s.tm, lenSlot));
+        out = new uint256[](len);
+        uint256 start = uint256(keccak256(abi.encode(lenSlot)));
+        for (uint256 i; i < len; ++i) {
+            out[i] = uint256(vm.load(s.tm, bytes32(start + i)));
+        }
+    }
+
+    function _tmGlobalMaskLive(OrgSpec memory s, uint256 hat) internal view returns (uint256) {
+        return uint256(vm.load(s.tm, keccak256(abi.encode(hat, uint256(TM_SLOT) + TM_F_ROLE_PERM_GLOBAL)))) & 0xFF;
+    }
+
+    function _tmProjMaskLive(OrgSpec memory s, uint256 pid, uint256 hat) internal view returns (uint256) {
+        bytes32 inner = keccak256(abi.encode(bytes32(pid), uint256(TM_SLOT) + TM_F_ROLE_PERM_PROJ));
+        return uint256(vm.load(s.tm, keccak256(abi.encode(hat, inner)))) & 0xFF;
+    }
+
+    /// @dev The LEGACY effective mask for (`user`, `pid`) computed EXACTLY as TaskManager._permMask's
+    ///      legacy arm does: fold over `permissionHatIds` (the gate the fixture-derived expectation
+    ///      lacked), skip hats the user does not wear, `proj != 0 ? proj : global`. Live reads — call
+    ///      BEFORE the cutover toggle-off.
+    function _tmLiveMask(OrgSpec memory s, address user, uint256 pid) internal view returns (uint256 m) {
+        uint256[] memory hats = _tmPermHatsLive(s);
+        for (uint256 i; i < hats.length; ++i) {
+            if (!IHatsMin(HATS).isWearerOfHat(user, hats[i])) continue;
+            uint256 proj = _tmProjMaskLive(s, pid, hats[i]);
+            m |= proj != 0 ? proj : _tmGlobalMaskLive(s, hats[i]);
+        }
+    }
+
+    /// @dev Anchor the slot derivation: the storage-read permission-hat array must equal the contract's
+    ///      own getLensData(6). If this ever fails the Layout was reordered and every mask below is junk.
+    function _assertTmSlotDerivation(OrgSpec memory s) internal view {
+        uint256[] memory fromStorage = _tmPermHatsLive(s);
+        uint256[] memory fromLens = _tmLensHats(s, 6);
+        require(fromStorage.length == fromLens.length, "T5: TM permissionHatIds slot derivation (length)");
+        for (uint256 i; i < fromLens.length; ++i) {
+            require(fromStorage[i] == fromLens[i], "T5: TM permissionHatIds slot derivation (element)");
+        }
+    }
+
+    /// @notice Capture the INDEPENDENT legacy TM resolution for every (candidate, project) pair that
+    ///         carries a per-project override row, plus a global-only pair on an override-free project.
+    ///         Call PRE-cutover. The post-cutover probe replays these verbatim against the authority.
+    function _captureTmOracle(OrgSpec memory s, address[] memory candidates) internal {
+        _loadTmPerms(s.name);
+        _assertTmSlotDerivation(s);
+        delete _tmOracleUsers;
+        delete _tmOraclePids;
+        delete _tmOracleMasks;
+        delete _tmOracleShadow;
+
+        uint256[] memory permHats = _tmPermHatsLive(s);
+        // (1) SHADOW rows — a LIVE per-project override for a permission hat a candidate actually wears.
+        for (uint256 i; i < permHats.length; ++i) {
+            uint256 hat = permHats[i];
+            uint256 globalMask = _tmGlobalMaskLive(s, hat);
+            for (uint256 r; r < _tmProjPids.length; ++r) {
+                uint256 pid = _tmProjPids[r];
+                uint256 projMask = _tmProjMaskLive(s, pid, hat);
+                if (projMask == 0 || projMask == globalMask) continue; // no genuine shadow for this hat
+                for (uint256 j; j < candidates.length; ++j) {
+                    if (!IHatsMin(HATS).isWearerOfHat(candidates[j], hat)) continue;
+                    _pushTmOracle(s, candidates[j], pid, true);
+                }
+            }
+        }
+        // (2) GLOBAL-ONLY — the same fold on a project id NO override row targets.
+        uint256 unusedPid = _firstUnusedPid();
+        for (uint256 i; i < permHats.length; ++i) {
+            if (_tmGlobalMaskLive(s, permHats[i]) == 0) continue;
+            for (uint256 j; j < candidates.length; ++j) {
+                if (!IHatsMin(HATS).isWearerOfHat(candidates[j], permHats[i])) continue;
+                _pushTmOracle(s, candidates[j], unusedPid, false);
+            }
+        }
+        console.log("  [T5] independent TM oracle rows captured (live TM storage):", _tmOracleUsers.length);
+    }
+
+    function _pushTmOracle(OrgSpec memory s, address user, uint256 pid, bool shadow) internal {
+        for (uint256 i; i < _tmOracleUsers.length; ++i) {
+            if (_tmOracleUsers[i] == user && _tmOraclePids[i] == pid) return; // dedup
+        }
+        _tmOracleUsers.push(user);
+        _tmOraclePids.push(pid);
+        _tmOracleMasks.push(_tmLiveMask(s, user, pid));
+        _tmOracleShadow.push(shadow);
+    }
+
+    /// @dev A project id (uint256) that NO fixture per-project row targets — its ctx (pid+1) has no
+    ///      override for any hat, so resolution there is pure global-union.
+    function _firstUnusedPid() internal view returns (uint256) {
+        uint256 maxPid;
+        for (uint256 i; i < _tmProjPids.length; ++i) {
+            if (_tmProjPids[i] > maxPid) maxPid = _tmProjPids[i];
+        }
+        return maxPid + 1000; // comfortably past any real project id
+    }
+
+    /// @dev T5 fallback: no LIVE per-project override row is worn by any candidate, so the per-project
+    ///      resolution path would never execute on this org. Inject one through the org's own TM admin
+    ///      surface (`setProjectRolePerm`, executor-gated) on a project that already exists in the
+    ///      fixture, for a permission hat a candidate wears — and mirror it into the in-memory fixture
+    ///      rows so the seed builder ports it (i.e. exactly what a re-enumerated fixture would carry).
+    ///      Returns true when a row was injected. Call BEFORE the seed batches are built.
+    function _injectTmOverrideRow(OrgSpec memory s, address[] memory candidates) internal returns (bool) {
+        uint256[] memory permHats = _tmPermHatsLive(s);
+        if (_tmProjPids.length == 0 || permHats.length == 0) return false;
+        uint256 pid = _tmProjPids[0];
+        for (uint256 i; i < permHats.length; ++i) {
+            uint256 hat = permHats[i];
+            uint256 globalMask = _tmGlobalMaskLive(s, hat);
+            uint256 newMask = globalMask == 0 ? 0x0F : (globalMask ^ 0x0F);
+            if (newMask == 0 || newMask == globalMask) continue;
+            bool worn;
+            for (uint256 j; j < candidates.length && !worn; ++j) {
+                worn = IHatsMin(HATS).isWearerOfHat(candidates[j], hat);
+            }
+            if (!worn) continue;
+            vm.prank(s.executor);
+            try ITMWriteMig(s.tm).setProjectRolePerm(bytes32(pid), hat, uint8(newMask)) {}
+            catch {
+                continue;
+            }
+            if (_tmProjMaskLive(s, pid, hat) != newMask) continue;
+            _tmProjPids.push(pid);
+            _tmProjHats.push(hat);
+            _tmProjMasks.push(newMask);
+            console.log("  [T5] injected a per-project override row (no live shadow existed). pid/hat:", pid, hat);
+            return true;
+        }
+        return false;
+    }
+
+    /// @notice T5 non-vacuity guarantee: make sure the per-project override resolution path WILL execute
+    ///         on this org. Call PRE-SEED. If no live override row is worn by any candidate, inject one.
+    function _ensureTmOverrideRow(OrgSpec memory s, address[] memory candidates) internal {
+        _loadTmPerms(s.name);
+        _assertTmSlotDerivation(s);
+        if (_liveShadowRowExists(s, candidates)) return;
+        require(
+            _injectTmOverrideRow(s, candidates),
+            "T5: org has NO per-project override row worn by a candidate and none could be injected"
+        );
+    }
+
+    function _liveShadowRowExists(OrgSpec memory s, address[] memory candidates) internal view returns (bool) {
+        uint256[] memory permHats = _tmPermHatsLive(s);
+        for (uint256 i; i < permHats.length; ++i) {
+            uint256 hat = permHats[i];
+            uint256 globalMask = _tmGlobalMaskLive(s, hat);
+            for (uint256 r; r < _tmProjPids.length; ++r) {
+                uint256 projMask = _tmProjMaskLive(s, _tmProjPids[r], hat);
+                if (projMask == 0 || projMask == globalMask) continue;
+                for (uint256 j; j < candidates.length; ++j) {
+                    if (IHatsMin(HATS).isWearerOfHat(candidates[j], hat)) return true;
+                }
+            }
+        }
+        return false;
     }
 
     /// @dev The fixture global mask for `hat` (0 if none). Small linear scans (a few rows per org).
