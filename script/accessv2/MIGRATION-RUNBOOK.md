@@ -181,6 +181,15 @@ code paths) ships only after the LAST org migrates and soaks.
   feature-detects per module).
 - Legacy EM/QuickJoin rulebook entries stay (superset discipline) until the last legacy org
   migrates; then a cleanup `setGlobalRulesBatch` may retire them.
+- **Wave G — the de-Hats strip (sequencing decision 2026-08-25):** all migrations run on the
+  dual-path impls this runbook rehearsed; ONLY AFTER the last real org is bound + cut over,
+  ship authority-only impls in one Mirror-beacon wave. Behavior-neutral by construction for
+  migrated orgs (the legacy arm is dead code once `membershipAuthority != 0` everywhere), so
+  it needs NO org votes; sim gate = per-org read-parity differential pre/post bump.
+  **CAUTION — the 6 inactive Gnosis orgs (Test, Test2, Test3, tkrjehbcuebc, Test5, Argus)
+  break at THIS bump** unless pinned Static (`SwitchableBeacon.pinToCurrent()`, executor-owned)
+  or migrated first — decide before broadcasting the strip wave. poa-cli's legacy scrap rides
+  in this wave too.
 
 ## Access-v2 contract-surface notes (Wave D FIX-B)
 
