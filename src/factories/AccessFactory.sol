@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
 
+import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import {SwitchableBeacon} from "../SwitchableBeacon.sol";
 import "../OrgRegistry.sol";
 import {ModuleDeploymentLib} from "../libs/ModuleDeploymentLib.sol";
+import {BeaconDeploymentLib} from "../libs/BeaconDeploymentLib.sol";
 import {ModuleTypes} from "../libs/ModuleTypes.sol";
 import {RoleResolver} from "../libs/RoleResolver.sol";
 import {IPoaManager} from "../libs/ModuleDeploymentLib.sol";
+import {AccessV2Ids} from "../libs/AccessV2Ids.sol";
+import {AccessV2Types} from "../libs/AccessV2Types.sol";
+import {IMembershipAuthority} from "../interfaces/IMembershipAuthority.sol";
+import {OrgAccessSeedLib} from "../libs/OrgAccessSeedLib.sol";
+import {RoleConfigStructs} from "../libs/RoleConfigStructs.sol";
 
 /*──────────────────── OrgDeployer interface ────────────────────*/
 interface IOrgDeployer {
@@ -30,8 +37,10 @@ error UnsupportedType();
 
 /**
  * @title AccessFactory
- * @notice Factory contract for deploying access control and token infrastructure
- * @dev Deploys BeaconProxy instances for QuickJoin and ParticipationToken
+ * @notice Deploys the org's access layer: the MembershipAuthority, QuickJoin and ParticipationToken.
+ * @dev The authority is a BeaconProxy whose constructor data carries `initialize` — it is born
+ *      configured (executor, paymasterHub, orgId, genesis seed) in a single transaction, so no
+ *      window exists where an uninitialized authority is reachable.
  */
 contract AccessFactory {
     /*──────────────────── Role Assignments ────────────────────*/
@@ -47,6 +56,28 @@ contract AccessFactory {
         address universalFactory; // Reference to universal PasskeyAccountFactory
     }
 
+    /*──────────────────── Authority Deployment Params ────────────────────*/
+    struct AuthorityParams {
+        bytes32 orgId;
+        address poaManager;
+        address orgRegistry;
+        address executor;
+        address deployer; // OrgDeployer address for registration callbacks
+        address paymasterHub;
+        bool autoUpgrade;
+        RoleConfigStructs.RoleConfig[] roles;
+        RoleConfigStructs.GroupConfig[] groups;
+        OrgAccessSeedLib.PermConfig perms;
+    }
+
+    /*──────────────────── Authority Deployment Result ────────────────────*/
+    struct AuthorityResult {
+        address authority;
+        uint256 adminSubjectId; // sole member is the Executor; the org-admin subject for PaymasterHub
+        uint256[] roleSubjectIds; // index-aligned with AuthorityParams.roles
+        uint256[] groupSubjectIds; // index-aligned with AuthorityParams.groups
+    }
+
     /*──────────────────── Access Deployment Params ────────────────────*/
     struct AccessParams {
         bytes32 orgId;
@@ -57,7 +88,7 @@ contract AccessFactory {
         address executor;
         address deployer; // OrgDeployer address for registration callbacks
         address registryAddr; // Universal account registry
-        uint256[] roleHatIds;
+        uint256[] roleSubjectIds;
         bool autoUpgrade;
         RoleAssignments roleAssignments;
         PasskeyConfig passkeyConfig; // Passkey infrastructure configuration
@@ -71,10 +102,67 @@ contract AccessFactory {
         address participationToken;
     }
 
+    /*══════════════  AUTHORITY DEPLOYMENT  ═════════════=*/
+
+    /**
+     * @notice Deploys and registers the org's MembershipAuthority, seeded with its genesis shape.
+     * @dev Subject ids are NOT read back: the authority allocates them as
+     *      `newSubjectId(authority, k + 1)` in seed order, so the caller derives them from the proxy
+     *      address alone. Registration follows the atomic initialize in the same transaction, which
+     *      keeps the deploy-time config events under the org's subgraph template.
+     * @param params Authority deployment parameters
+     * @return result The authority proxy plus the admin / role / group subject ids
+     */
+    function deployAuthority(AuthorityParams memory params) external returns (AuthorityResult memory result) {
+        if (
+            params.poaManager == address(0) || params.orgRegistry == address(0) || params.executor == address(0)
+                || params.paymasterHub == address(0)
+        ) {
+            revert InvalidAddress();
+        }
+
+        address beacon = BeaconDeploymentLib.createBeacon(
+            ModuleTypes.MEMBERSHIP_AUTHORITY_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)
+        );
+
+        {
+            AccessV2Types.OrgAccessSeed memory seed = OrgAccessSeedLib.build(params.roles, params.groups, params.perms);
+            bytes memory initData = abi.encodeCall(
+                IMembershipAuthority.initialize,
+                (IMembershipAuthority.InitConfig({
+                        executor: params.executor, paymasterHub: params.paymasterHub, orgId: params.orgId, seed: seed
+                    }))
+            );
+            result.authority = address(new BeaconProxy(beacon, initData));
+        }
+
+        uint256 n = params.roles.length;
+        uint256 g = params.groups.length;
+        result.adminSubjectId = AccessV2Ids.newSubjectId(result.authority, 1);
+        result.roleSubjectIds = new uint256[](n);
+        for (uint256 i; i < n; ++i) {
+            result.roleSubjectIds[i] =
+                AccessV2Ids.newSubjectId(result.authority, uint64(OrgAccessSeedLib.roleRef(i) + 1));
+        }
+        result.groupSubjectIds = new uint256[](g);
+        for (uint256 j; j < g; ++j) {
+            result.groupSubjectIds[j] =
+                AccessV2Ids.newSubjectId(result.authority, uint64(OrgAccessSeedLib.groupRef(n, j) + 1));
+        }
+
+        OrgRegistry.ContractRegistration[] memory registrations = new OrgRegistry.ContractRegistration[](1);
+        registrations[0] = OrgRegistry.ContractRegistration({
+            typeId: ModuleTypes.MEMBERSHIP_AUTHORITY_ID, proxy: result.authority, beacon: beacon, owner: params.executor
+        });
+        IOrgDeployer(params.deployer).batchRegisterContracts(params.orgId, registrations, params.autoUpgrade, false);
+
+        return result;
+    }
+
     /*══════════════  MAIN DEPLOYMENT FUNCTION  ═════════════=*/
 
     /**
-     * @notice Deploys complete access control infrastructure for an organization
+     * @notice Deploys QuickJoin and ParticipationToken for an organization
      * @param params Access deployment parameters
      * @return result Addresses of deployed access components
      */
@@ -91,8 +179,9 @@ contract AccessFactory {
 
         /* 1. Deploy QuickJoin (without registration) */
         {
-            // Get the role hat IDs for new members
-            uint256[] memory memberHats = RoleResolver.resolveRoleBitmap(
+            // Auto-join subjects for new members. Once the authority is wired these are re-derived
+            // from the QJ_AUTOJOIN perm rows; the stored list is the rollback-path copy.
+            uint256[] memory memberSubjects = RoleResolver.resolveRoleBitmap(
                 OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.quickJoinRolesBitmap
             );
 
@@ -111,7 +200,7 @@ contract AccessFactory {
             });
 
             result.quickJoin = ModuleDeploymentLib.deployQuickJoin(
-                config, params.executor, params.registryAddr, address(this), memberHats, quickJoinBeacon
+                config, params.executor, params.registryAddr, address(this), memberSubjects, quickJoinBeacon
             );
         }
 
@@ -122,12 +211,11 @@ contract AccessFactory {
                 : string(abi.encodePacked(params.orgName, " Token"));
             string memory tSymbol = bytes(params.tokenSymbol).length > 0 ? params.tokenSymbol : "PT";
 
-            // Get the role hat IDs for member and approver permissions
-            uint256[] memory memberHats = RoleResolver.resolveRoleBitmap(
+            uint256[] memory memberSubjects = RoleResolver.resolveRoleBitmap(
                 OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.tokenMemberRolesBitmap
             );
 
-            uint256[] memory approverHats = RoleResolver.resolveRoleBitmap(
+            uint256[] memory approverSubjects = RoleResolver.resolveRoleBitmap(
                 OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.tokenApproverRolesBitmap
             );
 
@@ -146,7 +234,7 @@ contract AccessFactory {
             });
 
             result.participationToken = ModuleDeploymentLib.deployParticipationToken(
-                config, params.executor, tName, tSymbol, memberHats, approverHats, participationTokenBeacon
+                config, params.executor, tName, tSymbol, memberSubjects, approverSubjects, participationTokenBeacon
             );
         }
 

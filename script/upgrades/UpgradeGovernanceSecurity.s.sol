@@ -13,7 +13,6 @@ import {OrgDeployer, ITaskManagerBootstrap} from "../../src/OrgDeployer.sol";
 import {ModulesFactory} from "../../src/factories/ModulesFactory.sol";
 import {GovernanceFactory} from "../../src/factories/GovernanceFactory.sol";
 import {AccessFactory} from "../../src/factories/AccessFactory.sol";
-import {HatsTreeSetup} from "../../src/HatsTreeSetup.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {UniversalAccountRegistry} from "../../src/UniversalAccountRegistry.sol";
 import {RoleConfigStructs} from "../../src/libs/RoleConfigStructs.sol";
@@ -603,7 +602,6 @@ contract SimGnosis is GovernanceUpgradeSimBase {
         GovernanceFactory gov = new GovernanceFactory();
         AccessFactory acc = new AccessFactory();
         ModulesFactory mods = new ModulesFactory();
-        HatsTreeSetup hatsTree = new HatsTreeSetup();
 
         uar = address(
             new BeaconProxy(
@@ -631,7 +629,6 @@ contract SimGnosis is GovernanceUpgradeSimBase {
                         GNOSIS_POA_MANAGER,
                         address(orgRegistry),
                         HATS,
-                        address(hatsTree),
                         GNOSIS_PAYMASTER
                     )
                 )
@@ -698,27 +695,19 @@ contract SimGnosis is GovernanceUpgradeSimBase {
 
     function _buildRoles() internal pure returns (RoleConfigStructs.RoleConfig[] memory roles) {
         roles = new RoleConfigStructs.RoleConfig[](2);
-        roles[0] = _role("DEFAULT", false, 1);
-        roles[1] = _role("EXECUTIVE", true, type(uint256).max);
+        roles[0] = _role("DEFAULT", false);
+        roles[1] = _role("EXECUTIVE", true);
     }
 
-    function _role(string memory name, bool isTop, uint256 adminRoleIndex)
-        internal
-        pure
-        returns (RoleConfigStructs.RoleConfig memory r)
-    {
+    function _role(string memory name, bool isTop) internal pure returns (RoleConfigStructs.RoleConfig memory r) {
         r.name = name;
         r.image = "ipfs://role";
         r.metadataCID = bytes32(0);
         r.canVote = true;
-        r.vouching = RoleConfigStructs.RoleVouchingConfig({
-            enabled: false, quorum: 0, voucherRoleIndex: 0, combineWithHierarchy: false
-        });
-        r.defaults = RoleConfigStructs.RoleEligibilityDefaults({eligible: true, standing: true});
-        r.hierarchy = RoleConfigStructs.RoleHierarchyConfig({adminRoleIndex: adminRoleIndex});
+        r.open = true;
+        r.vouching = RoleConfigStructs.RoleVouchingConfig({enabled: false, quorum: 0, voucherRoleIndex: 0});
         r.distribution =
             RoleConfigStructs.RoleDistributionConfig({mintToDeployer: isTop, additionalWearers: new address[](0)});
-        r.hatConfig = RoleConfigStructs.HatConfig({maxSupply: type(uint32).max, mutableHat: true});
     }
 
     function _buildRoleAssignments() internal pure returns (OrgDeployer.RoleAssignments memory) {

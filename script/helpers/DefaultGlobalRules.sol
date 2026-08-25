@@ -53,7 +53,7 @@ library DefaultGlobalRules {
 
     /// @notice All default rulebook entries (selector strings match the deployed module ABIs).
     function entries() internal pure returns (Entry[] memory e) {
-        e = new Entry[](71);
+        e = new Entry[](67);
         uint256 i;
 
         // ── QuickJoin (6) ──
@@ -130,7 +130,7 @@ library DefaultGlobalRules {
         bytes4 proposalSel =
             bytes4(keccak256("createProposal(bytes,bytes32,uint32,uint8,(address,uint256,bytes)[][],uint256[])"));
         // V2 signatures differ per contract: DD carries quorumOverride, HV adds equalWeight — both
-        // must be sponsored or passkey users lose gasless restricted-poll creation (RoleManager wave).
+        // must be sponsored or passkey users lose gasless restricted-poll creation.
         bytes4 proposalV2DDSel = bytes4(
             keccak256("createProposalV2(bytes,bytes32,uint32,uint8,(address,uint256,bytes)[][],uint256[],uint32)")
         );
@@ -154,31 +154,22 @@ library DefaultGlobalRules {
         e[i++] = Entry(t, bytes4(keccak256("createDistribution(address,uint256,bytes32,uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("finalizeDistribution(uint256,uint256)")), 0);
 
-        // ── EligibilityModule (10) — vouch + role-application + RoleManager self-claim + kick paths ──
+        // ── EligibilityModule (8) — vouch + role-application + kick paths ──
+        // Retained for the orgs still on the legacy access rails; new orgs deploy no EligibilityModule.
+        // `claimHat` / `claimHats` are NOT here: no chain ever had a targetTypes row mapping them, so
+        // they were never reachable through the rulebook, and Access v2 replaces them with
+        // MembershipAuthority.claim below.
         t = ModuleTypes.ELIGIBILITY_MODULE_ID;
         e[i++] = Entry(t, bytes4(keccak256("claimVouchedHat(uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("vouchFor(address,uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("revokeVouch(address,uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("applyForRole(uint256,bytes32)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("withdrawApplication(uint256)")), 0);
-        // Permissionless self-claim of a hat the caller is derived/vouched/email/rule-eligible for
-        // (RoleManager offer acceptance). claimHat = single mint; claimHats loops up to MAX_CLAIM_BATCH
-        // (20) mints in one call, so it carries a batch-sized gas hint (single mint ~200-250k; the cap
-        // bounds a full 20-hat accept while still covering legitimate offers).
-        e[i++] = Entry(t, bytes4(keccak256("claimHat(uint256)")), 300_000);
-        e[i++] = Entry(t, bytes4(keccak256("claimHats(uint256[])")), 3_000_000);
-        // Delegated-kick lifecycle (kicker-hat wearers; delegation wave). kickWearer covers rule
-        // write + provenance + burn; finalizeKick applies a delayed kick; unkickWearer is a rule
-        // restore only.
+        // Delegated-kick lifecycle (kicker-hat wearers). kickWearer covers rule write + provenance +
+        // burn; finalizeKick applies a delayed kick; unkickWearer is a rule restore only.
         e[i++] = Entry(t, bytes4(keccak256("kickWearer(address,uint256)")), 400_000);
         e[i++] = Entry(t, bytes4(keccak256("finalizeKick(address,uint256)")), 400_000);
         e[i++] = Entry(t, bytes4(keccak256("unkickWearer(address,uint256)")), 200_000);
-
-        // ── RoleManager (2) — delegated lifecycle (manager-hat wearers; executor path never needs
-        // sponsorship). grantRole worst case clears rules + mints identity + several group markers.
-        t = ModuleTypes.ROLE_MANAGER_ID;
-        e[i++] = Entry(t, bytes4(keccak256("grantRole(uint256,address)")), 800_000);
-        e[i++] = Entry(t, bytes4(keccak256("revokeRole(uint256,address)")), 800_000);
 
         // ── ParticipationToken (3) ──
         t = ModuleTypes.PARTICIPATION_TOKEN_ID;
@@ -238,11 +229,10 @@ library DefaultGlobalRules {
         );
 
         // ── MembershipAuthority (10) — Access-v2 user-facing + delegated lifecycle selectors ──
-        // Keyed under MEMBERSHIP_AUTHORITY_ID so every migrated org's authority resolves the same
-        // type-keyed whitelist (Mirror mode). MIRRORS the RoleManager wave's reasoning that sponsored
-        // its 5 delegation selectors (kick/finalize/unkick + grantRole/revokeRole): the EXECUTOR path
-        // is never sponsored (governance batches carry their own gas), so only USER-initiated and
-        // MANAGER-DELEGATE-initiated calls appear here. INCLUSIONS / EXCLUSIONS (documented per §6):
+        // Keyed under MEMBERSHIP_AUTHORITY_ID so every org's authority resolves the same type-keyed
+        // whitelist (Mirror mode). The EXECUTOR path is never sponsored (governance batches carry
+        // their own gas), so only USER-initiated and MANAGER-DELEGATE-initiated calls appear here.
+        // INCLUSIONS / EXCLUSIONS (documented per §6):
         //   INCLUDED — user self-service: claim (self-claim / offer-accept — a single role-token mint
         //     + eligibility fold, ~claimHat), renounce (clear accepted + burn); vouch / revokeVouch
         //     (attestor runtime, member-initiated — mirrors EM vouchFor/revokeVouch, hint 0 like v1).
@@ -251,8 +241,7 @@ library DefaultGlobalRules {
         //     ~unkickWearer), finalize (applies the delayed grant/remove — the heavy verb: rule write
         //     + membership flip + mint/burn), cancel (delete a pending action).
         //   EXCLUDED — every onlyExecutor write (grant/offer/remove/setRule/config/seed/setPaused/…):
-        //     governance-only, never passkey-sponsored (executor batches fund their own gas), matching
-        //     the RoleManager wave excluding RoleManager's executor path.
+        //     governance-only, never passkey-sponsored (executor batches fund their own gas).
         //   EXCLUDED — reconcile (permissionless keeper repair): DELIBERATE spec §6 step-0 item-4
         //     DEVIATION (orchestrator ruling R3). §6 lists reconcile among the sponsored selectors, but
         //     a permissionless, gas-free reconcile is a grief-spam vector (any address can burn org
@@ -260,7 +249,7 @@ library DefaultGlobalRules {
         //     unsponsored like v1's absence of a sponsored reconcile path. Recorded here + in
         //     MIGRATION-RUNBOOK.md (Orchestrator rulings) as the accepted deviation from the binding
         //     spec text; §8's permissionless-reconcile repair still works, just self-funded.
-        // Gas hints mirror the v1 delegation-selector calibration (single-subject, bounded writes):
+        // Gas hints mirror the legacy delegation-selector calibration (single-subject, bounded writes):
         t = ModuleTypes.MEMBERSHIP_AUTHORITY_ID;
         e[i++] = Entry(t, bytes4(keccak256("claim(uint256)")), 300_000); // single mint + fold (~claimHat)
         e[i++] = Entry(t, bytes4(keccak256("renounce(uint256)")), 200_000); // clear accepted + burn + rule clear

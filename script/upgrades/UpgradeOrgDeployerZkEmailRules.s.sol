@@ -209,6 +209,7 @@ abstract contract ZkEmailRulesBase is Script {
             hybridClasses: _fixtureClasses(),
             ddInitialTargets: new address[](0),
             roles: _fixtureRoles(),
+            groups: new RoleConfigStructs.GroupConfig[](0),
             roleAssignments: _fixtureAssignments(),
             metadataAdminRoleIndex: type(uint256).max,
             passkeyEnabled: false,
@@ -244,15 +245,12 @@ abstract contract ZkEmailRulesBase is Script {
             image: "",
             metadataCID: bytes32(0),
             canVote: true,
-            vouching: RoleConfigStructs.RoleVouchingConfig({
-                enabled: false, quorum: 0, voucherRoleIndex: 0, combineWithHierarchy: false
-            }),
-            defaults: RoleConfigStructs.RoleEligibilityDefaults({eligible: true, standing: true}),
-            hierarchy: RoleConfigStructs.RoleHierarchyConfig({adminRoleIndex: type(uint256).max}),
+            open: true,
+            maxMembers: 0,
+            vouching: RoleConfigStructs.RoleVouchingConfig({enabled: false, quorum: 0, voucherRoleIndex: 0}),
             distribution: RoleConfigStructs.RoleDistributionConfig({
                 mintToDeployer: true, additionalWearers: new address[](0)
-            }),
-            hatConfig: RoleConfigStructs.HatConfig({maxSupply: 0, mutableHat: true})
+            })
         });
     }
 
