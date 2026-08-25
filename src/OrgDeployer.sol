@@ -12,10 +12,9 @@ import {AccessFactory} from "./factories/AccessFactory.sol";
 import {ModulesFactory} from "./factories/ModulesFactory.sol";
 import {RoleConfigStructs} from "./libs/RoleConfigStructs.sol";
 import {OrgAccessSeedLib} from "./libs/OrgAccessSeedLib.sol";
-import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 import {AccessV2Types} from "./libs/AccessV2Types.sol";
 import {ModuleTypes} from "./libs/ModuleTypes.sol";
-import {TaskPerm} from "./libs/TaskPerm.sol";
+import {ITaskManagerBootstrap} from "./interfaces/ITaskManagerBootstrap.sol";
 
 /*────────────────────── Module‑specific hooks ──────────────────────────*/
 interface IExecutorAdmin {
@@ -51,37 +50,6 @@ interface IPaymasterHub {
     function registerOrg(bytes32 orgId, uint256 adminHatId, uint256 operatorHatId) external;
     function registerAndConfigureOrg(bytes32 orgId, uint256 adminHatId, DeployConfig calldata config) external payable;
     function depositForOrg(bytes32 orgId) external payable;
-}
-
-interface ITaskManagerBootstrap {
-    struct BootstrapProjectConfig {
-        bytes title;
-        bytes32 metadataHash;
-        uint256 cap;
-        address[] managers;
-        uint256[] createHats;
-        uint256[] claimHats;
-        uint256[] reviewHats;
-        uint256[] assignHats;
-        address[] bountyTokens;
-        uint256[] bountyCaps;
-    }
-
-    struct BootstrapTaskConfig {
-        uint8 projectIndex;
-        uint256 payout;
-        bytes title;
-        bytes32 metadataHash;
-        address bountyToken;
-        uint256 bountyPayout;
-        bool requiresApplication;
-    }
-
-    function bootstrapProjectsAndTasks(BootstrapProjectConfig[] calldata projects, BootstrapTaskConfig[] calldata tasks)
-        external
-        returns (bytes32[] memory projectIds);
-
-    function clearDeployer() external;
 }
 
 /*────────────────────── MembershipAuthority seed hooks ─────────────────*/
@@ -127,6 +95,8 @@ contract OrgDeployer is Initializable {
     error OrgExistsMismatch();
     error Reentrant();
     error InvalidRoleConfiguration();
+    /// @notice A factory tried to register after the org left bootstrap mode.
+    error DeploymentComplete();
 
     /*────────────────────────────  Events  ───────────────────────────────*/
     event OrgDeployed(
@@ -708,7 +678,7 @@ contract OrgDeployer is Initializable {
         // (mintHatsForUser, ZkEmailInvites) follows automatically.
         exec.setMembershipAuthority(auth.authority);
 
-        (uint256[] memory subjects, address[] memory users) = _collectInitialWearers(params, result.executor, auth);
+        (uint256[] memory subjects, address[] memory users) = _genesisMemberships(params, result.executor, auth);
         if (subjects.length > 0) {
             AccessV2Types.RuleKind[] memory kinds = new AccessV2Types.RuleKind[](subjects.length);
             bool[] memory delegable = new bool[](subjects.length);
@@ -725,41 +695,17 @@ contract OrgDeployer is Initializable {
         exec.configureModule(auth.authority, abi.encodeCall(IAuthoritySeed.setPaused, (false)));
     }
 
-    /**
-     * @notice Collects the genesis membership set: the Executor on the ADMIN subject, plus every
-     *         `mintToDeployer` / `additionalWearers` assignment on the role subjects.
-     */
-    function _collectInitialWearers(
+    /// @dev Genesis membership set (Executor on ADMIN + every seeded role wearer). Built in
+    ///      AccessFactory to keep OrgDeployer under the EIP-170 limit.
+    function _genesisMemberships(
         DeploymentParams calldata params,
         address executor,
         AccessFactory.AuthorityResult memory auth
-    ) internal pure returns (uint256[] memory subjects, address[] memory users) {
-        uint256 total = 1; // the Executor on the ADMIN subject
-        for (uint256 i = 0; i < params.roles.length; i++) {
-            if (params.roles[i].distribution.mintToDeployer) total++;
-            total += params.roles[i].distribution.additionalWearers.length;
-        }
-
-        subjects = new uint256[](total);
-        users = new address[](total);
-        subjects[0] = auth.adminSubjectId;
-        users[0] = executor;
-        uint256 idx = 1;
-
-        for (uint256 i = 0; i < params.roles.length; i++) {
-            uint256 subjectId = auth.roleSubjectIds[i];
-            if (params.roles[i].distribution.mintToDeployer) {
-                subjects[idx] = subjectId;
-                users[idx] = params.deployerAddress;
-                idx++;
-            }
-            address[] calldata extra = params.roles[i].distribution.additionalWearers;
-            for (uint256 j = 0; j < extra.length; j++) {
-                subjects[idx] = subjectId;
-                users[idx] = extra[j];
-                idx++;
-            }
-        }
+    ) internal view returns (uint256[] memory, address[] memory) {
+        return _layout().accessFactory
+            .buildGenesisMemberships(
+                params.roles, params.deployerAddress, executor, auth.adminSubjectId, auth.roleSubjectIds
+            );
     }
 
     /**
@@ -828,37 +774,6 @@ contract OrgDeployer is Initializable {
     }
 
     /**
-     * @notice Allows factories to register contracts via OrgDeployer's ownership
-     * @dev Only callable by approved factory contracts during deployment
-     */
-    function registerContract(
-        bytes32 orgId,
-        bytes32 typeId,
-        address proxy,
-        address beacon,
-        bool autoUpgrade,
-        address moduleOwner,
-        bool lastRegister
-    ) external {
-        Layout storage l = _layout();
-
-        // Only allow factory contracts to call this
-        if (
-            msg.sender != address(l.governanceFactory) && msg.sender != address(l.accessFactory)
-                && msg.sender != address(l.modulesFactory)
-        ) {
-            revert InvalidAddress();
-        }
-
-        // Only allow during bootstrap (deployment phase)
-        (,, bool bootstrap,) = l.orgRegistry.orgOf(orgId);
-        if (!bootstrap) revert("Deployment complete");
-
-        // Forward registration to OrgRegistry (we are the owner)
-        l.orgRegistry.registerOrgContract(orgId, typeId, proxy, beacon, autoUpgrade, moduleOwner, lastRegister);
-    }
-
-    /**
      * @notice Batch register multiple contracts from factories
      * @dev Only callable by approved factory contracts. Reduces gas overhead by batching registrations.
      * @param orgId The organization identifier
@@ -883,7 +798,7 @@ contract OrgDeployer is Initializable {
 
         // Only allow during bootstrap (deployment phase)
         (,, bool bootstrap,) = l.orgRegistry.orgOf(orgId);
-        if (!bootstrap) revert("Deployment complete");
+        if (!bootstrap) revert DeploymentComplete();
 
         // Forward batch registration to OrgRegistry (we are the owner)
         l.orgRegistry.batchRegisterOrgContracts(orgId, registrations, autoUpgrade, lastRegister);
@@ -932,61 +847,24 @@ contract OrgDeployer is Initializable {
         return subjectIds;
     }
 
-    /**
-     * @notice Mirror each bootstrap project's role permissions into the authority's TM_PERMS rows.
-     * @dev TaskManager reads effective masks from the authority (ctx = projectId + 1), so the
-     *      per-project lists a bootstrap config carries have to land there to have any effect.
-     *      Rows are written with INHERIT_GLOBAL set: a project grant ADDS to the org-wide grant
-     *      instead of replacing it, which is the shadowing footgun the v1 storage layout had.
-     */
+    /// @dev Mirror each bootstrap project's role lists into the authority's per-project TM_PERMS
+    ///      rows (AccessFactory builds them; see `buildProjectPermRows` for the inherit semantics).
     function _seedProjectPerms(
         DeploymentResult memory result,
         uint256[] memory roleSubjectIds,
         ITaskManagerBootstrap.BootstrapProjectConfig[] calldata projects,
         bytes32[] memory projectIds
     ) internal {
-        uint256 roleCount = roleSubjectIds.length;
+        AccessFactory factory = _layout().accessFactory;
         for (uint256 p = 0; p < projects.length; p++) {
-            uint256[] memory subjects = new uint256[](roleCount);
-            bytes32[] memory keys = new bytes32[](roleCount);
-            bytes32[] memory ctxs = new bytes32[](roleCount);
-            uint256[] memory words = new uint256[](roleCount);
-            bytes32 ctx = bytes32(uint256(projectIds[p]) + 1);
-            uint256 n;
-
-            for (uint256 r = 0; r < roleCount; r++) {
-                uint256 mask;
-                if (_contains(projects[p].createHats, r)) mask |= TaskPerm.CREATE;
-                if (_contains(projects[p].claimHats, r)) mask |= TaskPerm.CLAIM;
-                if (_contains(projects[p].reviewHats, r)) mask |= TaskPerm.REVIEW;
-                if (_contains(projects[p].assignHats, r)) mask |= TaskPerm.ASSIGN;
-                if (mask == 0) continue;
-                subjects[n] = roleSubjectIds[r];
-                keys[n] = AccessV2PermKeys.TM_PERMS;
-                ctxs[n] = ctx;
-                words[n] = AccessV2PermKeys.EXISTS_BIT | AccessV2PermKeys.INHERIT_GLOBAL_BIT | mask;
-                n++;
-            }
-
-            if (n == 0) continue;
-            assembly {
-                mstore(subjects, n)
-                mstore(keys, n)
-                mstore(ctxs, n)
-                mstore(words, n)
-            }
+            (uint256[] memory subjects, bytes32[] memory keys, bytes32[] memory ctxs, uint256[] memory words) =
+                factory.buildProjectPermRows(projects[p], roleSubjectIds, projectIds[p]);
+            if (subjects.length == 0) continue;
             IExecutorAdmin(result.executor)
                 .configureModule(
                     result.membershipAuthority, abi.encodeCall(IAuthoritySeed.seedPerms, (subjects, keys, ctxs, words))
                 );
         }
-    }
-
-    function _contains(uint256[] calldata list, uint256 value) internal pure returns (bool) {
-        for (uint256 i = 0; i < list.length; i++) {
-            if (list[i] == value) return true;
-        }
-        return false;
     }
 
     /*══════════════  SUBGRAPH EVENTS  ═════════════=*/
@@ -1043,7 +921,7 @@ contract OrgDeployer is Initializable {
         }
 
         {
-            (uint256[] memory subjects, address[] memory users) = _collectInitialWearers(params, result.executor, auth);
+            (uint256[] memory subjects, address[] memory users) = _genesisMemberships(params, result.executor, auth);
             emit InitialWearersAssigned(params.orgId, auth.authority, users, subjects);
         }
     }

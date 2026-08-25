@@ -14,6 +14,9 @@ import {AccessV2Types} from "../libs/AccessV2Types.sol";
 import {IMembershipAuthority} from "../interfaces/IMembershipAuthority.sol";
 import {OrgAccessSeedLib} from "../libs/OrgAccessSeedLib.sol";
 import {RoleConfigStructs} from "../libs/RoleConfigStructs.sol";
+import {AccessV2PermKeys} from "../libs/AccessV2PermKeys.sol";
+import {ITaskManagerBootstrap} from "../interfaces/ITaskManagerBootstrap.sol";
+import {TaskPerm} from "../libs/TaskPerm.sol";
 
 /*──────────────────── OrgDeployer interface ────────────────────*/
 interface IOrgDeployer {
@@ -265,7 +268,110 @@ contract AccessFactory {
         return result;
     }
 
+    /*══════════════  GENESIS SEED BUILDERS  ═════════════=*/
+
+    /**
+     * @notice Builds the org's genesis membership set for `MembershipAuthority.seedMemberships`.
+     * @dev The Executor takes the ADMIN subject (the §6 lock-out guard), then every role's
+     *      `mintToDeployer` / `additionalWearers` assignment lands on that role's subject.
+     * @param roles Deploy-time role configs, index-aligned with `roleSubjectIds`
+     * @param deployerAddress Founder address, seeded into every `mintToDeployer` role
+     * @param executor The org Executor — sole member of the ADMIN subject
+     * @param adminSubjectId The ADMIN subject id
+     * @param roleSubjectIds Authority subject id per role index
+     */
+    function buildGenesisMemberships(
+        RoleConfigStructs.RoleConfig[] calldata roles,
+        address deployerAddress,
+        address executor,
+        uint256 adminSubjectId,
+        uint256[] calldata roleSubjectIds
+    ) external pure returns (uint256[] memory subjects, address[] memory users) {
+        uint256 total = 1; // the Executor on the ADMIN subject
+        for (uint256 i; i < roles.length; ++i) {
+            if (roles[i].distribution.mintToDeployer) total++;
+            total += roles[i].distribution.additionalWearers.length;
+        }
+
+        subjects = new uint256[](total);
+        users = new address[](total);
+        subjects[0] = adminSubjectId;
+        users[0] = executor;
+        uint256 idx = 1;
+
+        for (uint256 i; i < roles.length; ++i) {
+            uint256 subjectId = roleSubjectIds[i];
+            if (roles[i].distribution.mintToDeployer) {
+                subjects[idx] = subjectId;
+                users[idx] = deployerAddress;
+                idx++;
+            }
+            address[] calldata extra = roles[i].distribution.additionalWearers;
+            for (uint256 j; j < extra.length; ++j) {
+                subjects[idx] = subjectId;
+                users[idx] = extra[j];
+                idx++;
+            }
+        }
+    }
+
+    /**
+     * @notice Turns one bootstrap project's role lists into TM_PERMS rows at that project's context.
+     * @dev TaskManager reads effective masks from the authority (ctx = projectId + 1), so a bootstrap
+     *      config's per-project lists only take effect once they land there. Rows carry
+     *      INHERIT_GLOBAL: a project grant ADDS to the org-wide grant instead of replacing it, which
+     *      is the shadowing footgun the v1 storage layout had. Roles with an empty mask are skipped.
+     * @param project The bootstrap project config (role INDICES, not subject ids)
+     * @param roleSubjectIds Authority subject id per role index
+     * @param projectId The project id TaskManager assigned
+     */
+    function buildProjectPermRows(
+        ITaskManagerBootstrap.BootstrapProjectConfig calldata project,
+        uint256[] calldata roleSubjectIds,
+        bytes32 projectId
+    )
+        external
+        pure
+        returns (uint256[] memory subjects, bytes32[] memory keys, bytes32[] memory ctxs, uint256[] memory words)
+    {
+        uint256 roleCount = roleSubjectIds.length;
+        subjects = new uint256[](roleCount);
+        keys = new bytes32[](roleCount);
+        ctxs = new bytes32[](roleCount);
+        words = new uint256[](roleCount);
+        bytes32 ctx = bytes32(uint256(projectId) + 1);
+        uint256 n;
+
+        for (uint256 r; r < roleCount; ++r) {
+            uint256 mask;
+            if (_contains(project.createHats, r)) mask |= TaskPerm.CREATE;
+            if (_contains(project.claimHats, r)) mask |= TaskPerm.CLAIM;
+            if (_contains(project.reviewHats, r)) mask |= TaskPerm.REVIEW;
+            if (_contains(project.assignHats, r)) mask |= TaskPerm.ASSIGN;
+            if (mask == 0) continue;
+            subjects[n] = roleSubjectIds[r];
+            keys[n] = AccessV2PermKeys.TM_PERMS;
+            ctxs[n] = ctx;
+            words[n] = AccessV2PermKeys.EXISTS_BIT | AccessV2PermKeys.INHERIT_GLOBAL_BIT | mask;
+            n++;
+        }
+
+        assembly {
+            mstore(subjects, n)
+            mstore(keys, n)
+            mstore(ctxs, n)
+            mstore(words, n)
+        }
+    }
+
     /*══════════════  INTERNAL HELPERS  ═════════════=*/
+
+    function _contains(uint256[] calldata list, uint256 value) private pure returns (bool) {
+        for (uint256 i; i < list.length; ++i) {
+            if (list[i] == value) return true;
+        }
+        return false;
+    }
 
     /**
      * @notice Creates a SwitchableBeacon for a module type
