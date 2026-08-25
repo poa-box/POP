@@ -609,19 +609,47 @@ abstract contract AccessV2MigrationBase is Script {
     ///      admin (topHat) subject is intentionally skipped — it is deny-default with the Executor as its
     ///      sole EXPLICIT member (root-by-address). Only default-ALLOW is emitted (the authority default
     ///      is already deny), so a gated legacy role stays gated post-cutover.
+    ///
+    ///      T7 (assertTautology-7) — TITLED-ROLE SUPPRESSION, spec §2 DEFAULT ("Open roles = default-ALLOW
+    ///      + user claim (QuickJoin keeps working); TITLED roles = deny-by-default + explicit grants").
+    ///      Legacy eligibility != legacy wearing: an EM-default-open verdict on a hat with NO permissionless
+    ///      mint channel (anything other than the QuickJoin member role) was never self-assumable — wearing
+    ///      it required an executor/EM mint, i.e. governance. MembershipAuthority.claim() has no such second
+    ///      gate: default-ALLOW alone makes the subject permissionlessly claimable by any address (with
+    ///      sponsored gas). Adopting the legacy default verbatim on a titled hat is therefore a WIDENING,
+    ///      not parity. This is live TODAY, not hypothetical: Test6's "Treasurer" subject probes
+    ///      getWearerRules == getWearerStatus == (true,true) for a fresh address on the deployed EM
+    ///      (0xf01F2b…8c8B) — adopting it would have shipped a permissionless Treasurer grab.
+    ///      Suppressed subjects lose NOTHING at cutover: every current wearer is ported with an explicit
+    ///      seeded Grant (_pushSeedSlice) and CutoverVerifier pins hatSupply, so no wearer rides the default.
+    ///      Post-cutover appointment goes through the governance path (grantRole, then mintHat) exactly as
+    ///      the legacy executor-gated mint did. The suppression is LOUD (per-subject log + count) and the
+    ///      matching probe (_probeOpenSubjectStrangers) proves both arms on the authority afterwards.
     function _seedLiveDefaults(OrgSpec memory s, address authority) internal {
         uint256 topHat = _topHatId(s);
         // T2: the recorded expectation is checked HERE, at seed time, against the live gate — before a
         // single default is emitted. A silent live-state change now fails loudly instead of seeding the
         // other arm and being "proved" correct by a probe reading the same oracle.
         _assertRecordedMemberGate(s);
+        uint256 opened;
+        uint256 suppressed;
         for (uint256 i; i < _subjects.length; ++i) {
             uint256 subject = _subjects[i];
             if (subject == topHat) continue;
-            if (_liveDefaultAllow(s, subject)) {
-                _push(authority, abi.encodeCall(IMembershipAuthority.setSubjectDefault, (subject, true, false)));
+            if (!_liveDefaultAllow(s, subject)) continue;
+            if (subject != _memberSubject) {
+                console.log("  [T7] TITLED role is EM-default-OPEN legacy-side; seeding deny (not claimable):");
+                console.log("       subject:", subject);
+                suppressed++;
+                continue;
             }
+            // _assertRecordedMemberGate already pinned this against the recorded catalog constant.
+            require(s.expectOpenMember, "open member default without the recorded OPEN expectation");
+            _push(authority, abi.encodeCall(IMembershipAuthority.setSubjectDefault, (subject, true, false)));
+            opened++;
         }
+        console.log("  [T7] default-ALLOW seeded (open member role):", opened);
+        console.log("       titled roles suppressed (legacy-open, no permissionless mint channel):", suppressed);
     }
 
     /// @dev The LIVE default eligibility verdict for `subject`: probe the legacy EM with a FRESH,

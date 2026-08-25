@@ -127,6 +127,24 @@ from a funded EOA.
   `VouchWithMaxMembers` anti-pattern) and NOT guessed-unlimited. Hats guarantees `supply <= maxSupply`,
   so the seeded `memberCount` is always `<= maxMembers` (SEED INVARIANT holds). The open member role's
   QuickJoin was already bounded by the same `maxSupply` legacy-side, so nothing regresses.
+- **subject DEFAULT (A1 + T7)**: `_seedLiveDefaults` adopts the legacy EM's open verdict for **exactly
+  one subject** — the org's QuickJoin member role, and only when the catalog's recorded
+  `expectOpenMember` says so (T2 reconciles that constant against the live EM before a default is
+  emitted). Every other subject seeds **deny-default**, spec §2 DEFAULT ("open roles = default-ALLOW +
+  user claim; **titled** roles = deny-by-default + explicit grants"), even when the legacy EM default
+  probes open. Reason: legacy *eligibility* is not legacy *wearing* — an EM-default-open titled hat had
+  no permissionless mint channel (only executor/EM mint), whereas `MembershipAuthority.claim()` has no
+  second gate, so adopting the legacy default verbatim would make the role permissionlessly claimable
+  (with sponsored gas). This is live, not hypothetical — the T7 probe caught **4 real subjects** that
+  the pre-T7 builder would have opened: Test6 `Treasurer` + `Newcomer`, and **Poa `MEMBER` (7 wearers)
+  + `CONTRIBUTOR` (3 wearers)** — i.e. permissionless self-appointment into the Poa governance org's
+  voting roles. Suppression costs nothing at cutover (every current wearer is ported with an explicit
+  seeded Grant and `CutoverVerifier` pins `hatSupply`, so no wearer rides the default); post-cutover
+  appointment is the governance path (`grantRole`, then `mintHat`), exactly like the legacy
+  executor-gated mint. Suppressions are logged per subject (`[T7] TITLED role is EM-default-OPEN …`)
+  and `_probeOpenSubjectStrangers` proves both arms on the authority after cutover: a stranger CAN
+  `claim()` the one open member role (DP), and every other subject rejects a stranger with
+  `NotClaimable` (Test6 5/5, KUBI 3/3, Poa 3/3, DP 3 gated + 1 open).
 - **role names (specOrder-10)**: subjects adopt the live `hats.viewHat(id).details` string; empty
   details fall back to `Role#N` (admin → `Admin`, reconstructed voucher subjects → `VoucherRole`).
 - **subject discovery (A6 / seedCompleteness-6)**: discovery now covers TM creator hats (lens 5), TM

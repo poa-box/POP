@@ -528,6 +528,9 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         //           (Test6/KUBI), vouch->claim continuity (KUBI), governance-only (Poa).
         _probeQuickJoin(s, authority, candidates);
 
+        // Probe C1b — T7: EVERY subject's stranger semantics, both arms explicit.
+        _probeOpenSubjectStrangers(s, authority);
+
         // Probe C2 — legacy bans ported (A3): banned wearers stay ineligible/non-claimable post-cutover.
         _assertBansPorted(s, authority, candidates);
 
@@ -661,6 +664,58 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
 
         // VERBATIM vouch org (KUBI): vouch->claim continuity — a fresh user vouched to quorum CAN claim.
         if (s.vouchVerbatim) _probeVouchClaim(s, authority, candidates);
+    }
+
+    /// @dev T7 (assertTautology-7): stranger semantics for EVERY subject, both arms explicit per org.
+    ///      `_seedLiveDefaults` seeds default-ALLOW for any subject whose legacy EM default probes open,
+    ///      and MembershipAuthority.claim() flips membership for ANY caller on a default-ALLOW subject —
+    ///      but legacy openness ALSO required a permissionless mint channel (QuickJoin). A default-open
+    ///      verdict on a non-QuickJoin hat (an officer/voting hat whose real gate was the executor-gated
+    ///      mint) therefore becomes a sponsored permissionless role grab post-cutover. Only the member
+    ///      subject's join semantics were ever probed.
+    ///      The open/gated verdict here is read from the AUTHORITY itself (a fresh stranger's
+    ///      isEligible — with no rule, vouch or email that is exactly the subject's default), not from
+    ///      the legacy oracle that seeded it, so this is not a second self-referential check.
+    ///        POSITIVE arm: the ONE subject allowed to be open is the org's QuickJoin member role, and
+    ///                      only where the catalog records it open — a fresh address must actually be
+    ///                      able to claim() it (open semantics preserved end-to-end).
+    ///        NEGATIVE arm: every other subject must reject a stranger's claim() with NotClaimable.
+    function _probeOpenSubjectStrangers(OrgSpec memory s, address authority) internal {
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        uint256 openSubjects;
+        uint256 gatedSubjects;
+        for (uint256 si; si < _subjects.length; ++si) {
+            uint256 subject = _subjects[si];
+            address stranger = address(uint160(uint256(keccak256(abi.encode(s.orgId, subject, "t7-stranger")))));
+            require(!a.isMember(subject, stranger), "T7: fresh stranger is already a member");
+            bool openOnAuthority = a.isEligible(stranger, subject);
+            bool mayBeOpen = (subject == _memberSubject && s.expectOpenMember);
+            if (openOnAuthority != mayBeOpen) {
+                console.log("  [T7] UNEXPECTED default verdict on subject:", subject);
+                console.log("       authority-open / catalog-allows-open:", openOnAuthority, mayBeOpen);
+                console.log(string.concat("       role name: ", a.getSubject(subject).name));
+            }
+            require(
+                openOnAuthority == mayBeOpen,
+                "T7: default-ALLOW verdict on a subject the catalog does not record as the open member role"
+            );
+            if (openOnAuthority) {
+                vm.prank(stranger);
+                IMembershipAuthority(authority).claim(subject);
+                require(a.isMember(subject, stranger), "T7: OPEN subject claim did not create a member");
+                openSubjects++;
+            } else {
+                vm.prank(stranger);
+                try IMembershipAuthority(authority).claim(subject) {
+                    revert("T7: stranger CLAIMED a gated subject (security regression)");
+                } catch (bytes memory e) {
+                    require(bytes4(e) == IMembershipAuthority.NotClaimable.selector, "T7: gated claim wrong revert");
+                }
+                gatedSubjects++;
+            }
+        }
+        console.log("  [T7] stranger arms - OPEN subjects claimable:", openSubjects);
+        console.log("       GATED subjects that rejected a stranger claim:", gatedSubjects);
     }
 
     /// @dev A1 KUBI arm: a fresh user vouched to quorum by members of the member role's voucher subject
