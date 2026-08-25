@@ -4,8 +4,10 @@ pragma solidity ^0.8.24;
 import "forge-std/console.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
-import {IExecMig, IPoaManagerMig, IHatsMin} from "./AccessV2MigrationBase.sol";
+import {IExecMig, IPoaManagerMig, IHatsMin, IEMWriteMig} from "./AccessV2MigrationBase.sol";
 import {OrgCatalog} from "./RehearseMigration.s.sol";
+import {CutoverVerifier} from "../../src/CutoverVerifier.sol";
+import {VmSafe} from "forge-std/Vm.sol";
 import {IMembershipAuthority} from "../../src/interfaces/IMembershipAuthority.sol";
 import {IAuthorityRouter} from "../../src/interfaces/IAuthorityRouter.sol";
 import {IExecutor} from "../../src/Executor.sol";
@@ -278,19 +280,45 @@ abstract contract MigrateOrgBase is OrgCatalog {
         (IExecutor.Call[] memory stale, uint256 staleBind) = _buildCutoverBatch(s, authority, router, candidates);
         require(staleBind == 0, "A5: pre-drift cutover unexpectedly carries a delta");
 
-        // Mint a fresh legacy wearer on a role subject with headroom (supply++).
-        (uint256 subj, address newcomer) = _mintLegacyNewcomer(s);
-        require(newcomer != address(0), "A5 drill: could not mint a legacy newcomer on any subject");
-        console.log("  [A5] minted fresh legacy wearer on subject:", subj);
+        // A fresh legacy wearer joins — through the org's REAL join channel wherever one exists (T6).
+        (uint256 subj, address newcomer, string memory channel, bool indexed_) = _joinLegacyNewcomer(s);
+        require(newcomer != address(0), "A5 drill: could not join a legacy newcomer on any subject");
+        console.log(string.concat("  [A5] fresh legacy wearer joined via ", channel, " on subject:"), subj);
+        // T6: the production recovery loop is "re-enumerate (tools/enumerate-wearers.sh) -> regenerate ->
+        //     cutover passes". That enumerator's ONLY sources are Executor.HatsMinted and
+        //     QuickJoin.QuickJoined, so a joiner invisible to both can never be picked up and ops would
+        //     sit in an unresolvable SupplyDrift loop. Assert the drill's joiner IS visible to it (or say
+        //     loudly, per org, that no indexed channel exists — Poa has no permissionless join at all).
+        if (indexed_) {
+            console.log("  [T6] joiner emitted an enumerator-visible event -> re-enumeration WOULD find them");
+        } else {
+            console.log(
+                "  [T6] NOTE: this org has NO permissionless join channel (governance/EM direct-mint only),"
+                " so the drill's joiner emits neither HatsMinted nor QuickJoined and the candidate refresh"
+                " cannot see them. Recovery there is a governance mint, not a re-enumeration."
+            );
+        }
 
-        // (i) the STALE cutover must REVERT atomically at the verifier (SupplyDrift). Executed directly
+        // (i) the STALE cutover must REVERT atomically at the verifier — and specifically with
+        //     CutoverVerifier.SupplyDrift (T6: the old blanket `catch {}` passed on ANY revert, so a
+        //     future reordering of verifier checks or an unrelated side effect of the drill's own state
+        //     changes would keep the drill green while the specific guard degraded). Executed directly
         //     through the Executor so the revert BUBBLES (announceWinner's try/catch would swallow it —
         //     that swallowing is the silent-no-op hazard; the drill asserts the batch itself reverts).
         vm.prank(s.votingContract);
         try IExecMig(s.executor).execute(90901, stale) {
             revert("A5 DRIFT: stale cutover did NOT revert despite a fresh legacy wearer (guard dead)");
-        } catch {}
-        console.log("  [A5] stale cutover REVERTED on legacy drift (CutoverVerifier SupplyDrift guard live)");
+        } catch (bytes memory err) {
+            (bytes memory inner, uint256 failedIdx, bool wrapped) = _unwrapCallFailed(err);
+            require(wrapped, "A5 DRIFT: stale cutover revert is not Executor.CallFailed (unexpected shape)");
+            require(inner.length >= 4, "A5 DRIFT: verifier reverted with EMPTY data (not SupplyDrift)");
+            require(
+                bytes4(inner) == CutoverVerifier.SupplyDrift.selector,
+                "A5 DRIFT: stale cutover reverted for the WRONG reason (expected CutoverVerifier.SupplyDrift)"
+            );
+            require(failedIdx == stale.length - 1, "A5 DRIFT: the failing call was not the trailing verify()");
+        }
+        console.log("  [A5] stale cutover REVERTED with CutoverVerifier.SupplyDrift (selector-decoded)");
 
         // (ii) regenerate WITH the newcomer in the candidate set → delta-seed leads the cutover, ports it.
         address[] memory augmented = _appendAddr(candidates, newcomer);
@@ -306,26 +334,98 @@ abstract contract MigrateOrgBase is OrgCatalog {
         vm.revertToState(snap);
     }
 
-    /// @dev Force-eligible + mint a fresh legacy wearer on the first role subject with maxSupply headroom.
-    ///      The EligibilityModule superAdmin is the org Executor (verified live), so pranking it can both
-    ///      grant eligibility and mint the hat (mintHatToAddress → hats.mintHat, supply++).
-    function _mintLegacyNewcomer(OrgSpec memory s) internal returns (uint256 subject, address newcomer) {
+    /// @dev T6 (assertTautology-6): a fresh legacy wearer joins through the org's REAL join channel,
+    ///      preferred in this order — the executor-superAdmin direct-mint is a LAST resort, not the
+    ///      default, precisely because it emits neither Executor.HatsMinted nor QuickJoin.QuickJoined and
+    ///      is therefore invisible to tools/enumerate-wearers.sh (so the "re-enumerate -> regenerate ->
+    ///      cutover passes" recovery loop the drill claims to prove would never see the joiner):
+    ///        (1) OPEN member role (DecentralPark)  -> UniversalAccountRegistry.registerAccount then
+    ///            QuickJoin.quickJoinWithUser()      — the real permissionless POP join.
+    ///        (2) zk-email org (Test6, KUBI)        -> the LIVE ZkEmailInvites claim entrypoint
+    ///                                                (their ONLY permissionless join channel).
+    ///        (3) governance-only org (Poa)         -> EligibilityModule superAdmin direct-mint; there
+    ///                                                IS no permissionless channel, reported as such.
+    ///      Returns the subject, the joiner, a human-readable channel label, and whether the join
+    ///      emitted an event the production candidate enumerator can actually see.
+    function _joinLegacyNewcomer(OrgSpec memory s)
+        internal
+        returns (uint256 subject, address newcomer, string memory channel, bool enumeratorVisible)
+    {
         newcomer = address(uint160(uint256(keccak256(abi.encode(s.orgId, "a5-drift-newcomer")))));
+
+        // (1) the REAL QuickJoin chain, where the org's member role is genuinely open.
+        if (s.expectOpenMember && _memberSubject != 0) {
+            vm.recordLogs();
+            address reg = address(IQJJoin(s.qj).accountRegistry());
+            vm.prank(newcomer);
+            try IUARJoin(reg).registerAccount("a5-drift-newcomer") {} catch {}
+            vm.prank(newcomer);
+            try IQJJoin(s.qj).quickJoinWithUser() {} catch {}
+            if (IHatsMin(HATS).isWearerOfHat(newcomer, _memberSubject)) {
+                return (_memberSubject, newcomer, "QuickJoin.quickJoinWithUser (real join)", _sawJoinEvent());
+            }
+        }
+
+        // (2) the REAL zk-email claim chain (Test6/KUBI's only permissionless join channel).
+        if (s.zkEmailInvites != address(0) && _memberSubject != 0) {
+            vm.recordLogs();
+            (bool ok,) = _zkClaim(s, newcomer, _memberSubject, "a5-drift");
+            if (ok && IHatsMin(HATS).isWearerOfHat(newcomer, _memberSubject)) {
+                return (_memberSubject, newcomer, "ZkEmailInvites.claimRoleByDomain (real join)", _sawJoinEvent());
+            }
+        }
+
+        // (3) fallback: EligibilityModule superAdmin (== the org Executor) direct-mint.
         for (uint256 i; i < _subjects.length; ++i) {
             uint256 cand = _subjects[i];
             if (cand == _topHatId(s)) continue; // topHat maxSupply 1 (no headroom)
             (, uint32 maxSupply, uint32 supply,,,,,,) = IHatsMin(HATS).viewHat(cand);
             if (maxSupply <= supply) continue; // no headroom (AllHatsWorn would revert)
+            vm.recordLogs();
             vm.startPrank(s.executor);
-            try IEMWrite(s.eligibilityModule).setWearerEligibility(newcomer, cand, true, true) {} catch {}
-            try IEMWrite(s.eligibilityModule).mintHatToAddress(cand, newcomer) {
+            try IEMWriteMig(s.eligibilityModule).setWearerEligibility(newcomer, cand, true, true) {} catch {}
+            try IEMWriteMig(s.eligibilityModule).mintHatToAddress(cand, newcomer) {
                 vm.stopPrank();
-                if (IHatsMin(HATS).isWearerOfHat(newcomer, cand)) return (cand, newcomer);
+                if (IHatsMin(HATS).isWearerOfHat(newcomer, cand)) {
+                    return
+                        (cand, newcomer, "EligibilityModule superAdmin direct-mint (no open channel)", _sawJoinEvent());
+                }
             } catch {
                 vm.stopPrank();
             }
         }
-        return (0, address(0));
+        return (0, address(0), "none", false);
+    }
+
+    /// @dev Did the recorded logs carry an event tools/enumerate-wearers.sh indexes? Its only two
+    ///      sources are Executor.HatsMinted(address,uint256[]) and QuickJoin.QuickJoined(address,uint256[]).
+    function _sawJoinEvent() internal returns (bool) {
+        bytes32 hatsMinted = keccak256("HatsMinted(address,uint256[])");
+        bytes32 quickJoined = keccak256("QuickJoined(address,uint256[])");
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].topics.length == 0) continue;
+            if (logs[i].topics[0] == hatsMinted || logs[i].topics[0] == quickJoined) return true;
+        }
+        return false;
+    }
+
+    /// @dev Unwrap Executor.execute's `CallFailed(uint256 index, bytes lowLevelData)` so the drill can
+    ///      assert the INNER revert selector rather than accepting any revert (T6).
+    function _unwrapCallFailed(bytes memory err)
+        internal
+        pure
+        returns (bytes memory inner, uint256 index, bool wrapped)
+    {
+        if (err.length < 4 || bytes4(err) != bytes4(keccak256("CallFailed(uint256,bytes)"))) {
+            return (inner, 0, false);
+        }
+        bytes memory body = new bytes(err.length - 4);
+        for (uint256 i; i < body.length; ++i) {
+            body[i] = err[i + 4];
+        }
+        (index, inner) = abi.decode(body, (uint256, bytes));
+        wrapped = true;
     }
 
     function _appendAddr(address[] memory arr, address x) internal pure returns (address[] memory out) {
@@ -395,10 +495,14 @@ interface IHatsLocal {
     function isWearerOfHat(address user, uint256 hatId) external view returns (bool);
 }
 
-/// @dev EligibilityModule write surface used by the A5 drift drill (superAdmin = org Executor).
-interface IEMWrite {
-    function setWearerEligibility(address wearer, uint256 hatId, bool eligible, bool standing) external;
-    function mintHatToAddress(uint256 hatId, address wearer) external;
+/// @dev The REAL permissionless join surfaces the T6 drift drill prefers over an EM direct-mint.
+interface IQJJoin {
+    function accountRegistry() external view returns (address);
+    function quickJoinWithUser() external;
+}
+
+interface IUARJoin {
+    function registerAccount(string calldata username) external;
 }
 
 interface HVAnnounce {
