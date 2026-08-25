@@ -563,24 +563,33 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             console.log("  probe QuickJoin join path: OK (governance-only org; no open member subject)");
             return;
         }
-        bool openMember = _liveDefaultAllow(s, _memberSubject);
+        // T2 (assertTautology-1): the arm is selected from the CATALOG-RECORDED constant, never from the
+        // live oracle that seeded the default (_assertRecordedMemberGate already require()d they agree at
+        // seed time, so a live change fails loudly there rather than silently flipping this arm too).
+        bool openMember = s.expectOpenMember;
         address fresh = address(uint160(uint256(keccak256(abi.encode(s.orgId, "qj-join")))));
         require(!a.isMember(_memberSubject, fresh), "fresh user already a member");
 
         if (openMember) {
-            // OPEN member role (DP): the fresh user joins via QJ->Executor.mintHatsForUser->authority.mintHat
-            // (or the terminal executor-gated mint if QJ is not an authorized minter on this Executor).
+            // OPEN member role (DP): the fresh user joins via QJ->Executor.mintHatsForUser->authority.mintHat.
+            // T2: the executor-gated terminal mint is a fallback ONLY where QuickJoin is genuinely not an
+            // authorized minter on this Executor — NOT a blanket catch. A blanket catch converted a broken
+            // QJ->Executor->authority chain (every real join dead) into a PASS.
             uint256[] memory hatIds = new uint256[](1);
             hatIds[0] = _memberSubject;
-            vm.prank(s.qj);
-            try IExecMig(s.executor).mintHatsForUser(fresh, hatIds) {
+            if (IExecMig(s.executor).isAuthorizedHatMinter(s.qj)) {
+                vm.prank(s.qj);
+                IExecMig(s.executor).mintHatsForUser(fresh, hatIds);
                 require(a.isMember(_memberSubject, fresh), "open QuickJoin mint did not create member");
                 console.log("  probe QuickJoin join path: OK (OPEN member; QJ->Executor->authority.mintHat)");
-            } catch {
+            } else {
                 vm.prank(s.executor);
                 IMembershipAuthority(authority).mintHat(_memberSubject, fresh);
                 require(a.isMember(_memberSubject, fresh), "open authority.mintHat did not create member");
-                console.log("  probe QuickJoin join path: OK (OPEN member; terminal executor-gated mint)");
+                console.log(
+                    "  probe QuickJoin join path: OK (OPEN member; terminal executor-gated mint - QJ is NOT"
+                    " an authorized minter on this Executor)"
+                );
             }
             return;
         }
@@ -994,7 +1003,9 @@ abstract contract OrgCatalog is RehearseMigrationBase {
             toggleModule: 0x7653674711Bf5d53FC10F17fE9aA66431c586512,
             paymentManager: 0x10E96701746B567882b74E39a24AEe7267c22Bb5,
             zkEmailInvites: 0xADAf24f05EE0D647A7c2AF5cAD0F377F1B159FD2,
-            vouchVerbatim: false // Test6 uses zk-email continuity; vouch AMNESTY (recorded)
+            vouchVerbatim: false, // Test6 uses zk-email continuity; vouch AMNESTY (recorded)
+            expectOpenMember: false, // GATED (zk-email): live raw+combined (false,true) for a fresh address
+            banDrill: false
         });
     }
 
@@ -1015,7 +1026,9 @@ abstract contract OrgCatalog is RehearseMigrationBase {
             toggleModule: 0xe4e6A68c43d9d5d4731A44C20f639C76F1913F17,
             paymentManager: 0xebC2224Dc7Ee7DdcE889e49685dB095780Be17a1,
             zkEmailInvites: address(0),
-            vouchVerbatim: false // AMNESTY (recorded)
+            vouchVerbatim: false, // AMNESTY (recorded)
+            expectOpenMember: true, // OPEN: live raw+combined (true,true) for a fresh address (QuickJoin auto-join)
+            banDrill: false
         });
     }
 
@@ -1036,7 +1049,9 @@ abstract contract OrgCatalog is RehearseMigrationBase {
             toggleModule: 0xB4da98791573ddf15Bb811D497A4212904eBA3ED,
             paymentManager: 0x4009c825b38Fb0ebB6391d5FABe4FAf90e178dF1,
             zkEmailInvites: 0x32cc2D8563e691A3Ca43723A9F558f7AD8dbA9ec,
-            vouchVerbatim: true // KUBI Executive: VERBATIM port (counts + epochs), recon-mandated
+            vouchVerbatim: true, // KUBI Executive: VERBATIM port (counts + epochs), recon-mandated
+            expectOpenMember: false, // GATED (vouch): live raw+combined (false,true) for a fresh address
+            banDrill: true // T3 synthetic-ban drill — the Gnosis leg
         });
     }
 
@@ -1057,7 +1072,9 @@ abstract contract OrgCatalog is RehearseMigrationBase {
             toggleModule: 0x14Aced4F1B6fB1EF4030E7E7E19A3e6aB0B931a1,
             paymentManager: 0xAe470B8366AF331F52D9eA26efD7Cb2d276878B3,
             zkEmailInvites: address(0),
-            vouchVerbatim: false // AMNESTY (recorded)
+            vouchVerbatim: false, // AMNESTY (recorded)
+            expectOpenMember: false, // governance-only: QuickJoin.memberHatIds() is EMPTY (no member subject)
+            banDrill: true // T3 synthetic-ban drill — the Arbitrum leg
         });
     }
 }

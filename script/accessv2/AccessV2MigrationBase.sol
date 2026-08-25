@@ -268,6 +268,19 @@ abstract contract AccessV2MigrationBase is Script {
         address paymentManager;
         address zkEmailInvites; // 0 if none
         bool vouchVerbatim; // true = VERBATIM port (counts+epochs); false = AMNESTY
+        // T2 (assertTautology-1): the RECORDED per-org member-gate expectation. The A1 seeder and the A1
+        // join probe both used to consult the SAME _liveDefaultAllow oracle, so a wrong verdict flipped
+        // both and every sim passed self-consistently (a gated role misread as open would be seeded
+        // default-ALLOW and then "proved" open). This is a live-verified CONSTANT of the catalog
+        // (2026-08-25: DecentralPark member hat raw+combined (true,true) = OPEN; Test6 (false,true) and
+        // KUBI (false,true) = GATED; Poa has NO QuickJoin member hat). The seeder require()s the live
+        // gate still equals it, and the probe selects its arm from THIS, never from the live probe.
+        bool expectOpenMember;
+        // T3 (assertTautology-3): run the SYNTHETIC-BAN drill on this org — inject a real explicit-deny
+        // on a current member through the live EligibilityModule admin surface BEFORE seeding, so the
+        // RuleKind.Ban porting path actually executes (all four orgs' effective-ban sets were empty or
+        // near-empty, making every per-ban assert vacuous). One org per chain: KUBI (Gnosis), Poa (Arb).
+        bool banDrill;
     }
 
     /*──────────────────────── Build state (storage; fresh per sim run) ────────────────────────*/
@@ -582,6 +595,10 @@ abstract contract AccessV2MigrationBase is Script {
     ///      is already deny), so a gated legacy role stays gated post-cutover.
     function _seedLiveDefaults(OrgSpec memory s, address authority) internal {
         uint256 topHat = _topHatId(s);
+        // T2: the recorded expectation is checked HERE, at seed time, against the live gate — before a
+        // single default is emitted. A silent live-state change now fails loudly instead of seeding the
+        // other arm and being "proved" correct by a probe reading the same oracle.
+        _assertRecordedMemberGate(s);
         for (uint256 i; i < _subjects.length; ++i) {
             uint256 subject = _subjects[i];
             if (subject == topHat) continue;
@@ -595,12 +612,44 @@ abstract contract AccessV2MigrationBase is Script {
     ///      never-seen address (deterministic per org+subject). A fresh address has no explicit rule, so
     ///      getWearerRules returns the subject's DEFAULT rule flags — .eligible is the open/gated verdict.
     function _liveDefaultAllow(OrgSpec memory s, uint256 subject) internal view returns (bool) {
-        address fresh = address(uint160(uint256(keccak256(abi.encode(s.orgId, subject, "live-default-probe")))));
-        try IEMMig(s.eligibilityModule).getWearerRules(fresh, subject) returns (bool eligible, bool) {
-            return eligible;
+        try IEMMig(s.eligibilityModule).getWearerRules(_freshProbeAddr(s, subject), subject) returns (bool e, bool) {
+            return e;
         } catch {
             return false;
         }
+    }
+
+    /// @dev The deterministic never-seen address the A1 default probes use for `subject`.
+    function _freshProbeAddr(OrgSpec memory s, uint256 subject) internal pure returns (address) {
+        return address(uint160(uint256(keccak256(abi.encode(s.orgId, subject, "live-default-probe")))));
+    }
+
+    /// @dev T2 (assertTautology-1): reconcile the CATALOG-RECORDED member-gate constant against the LIVE
+    ///      EligibilityModule, in BOTH oracle shapes. (1) The recorded `expectOpenMember` must equal the
+    ///      raw per-wearer default verdict the seeder acts on. (2) The raw rule verdict must agree with
+    ///      the EM's COMBINED getWearerStatus for the same fresh address — the raw-vs-combined divergence
+    ///      the A3 ban logic documents (and KUBI's kicks exhibit) would otherwise let a (eligible=true,
+    ///      standing=false) legacy-CLOSED role be seeded default-ALLOW. Both are require()s, not probes:
+    ///      a divergence must stop the ceremony, not silently pick the other arm.
+    function _assertRecordedMemberGate(OrgSpec memory s) internal view {
+        if (_memberSubject == 0) {
+            require(!s.expectOpenMember, "catalog records OPEN member gate but org has no QuickJoin member subject");
+            console.log("  [T2] recorded member gate: n/a (governance-only org, no member subject)");
+            return;
+        }
+        address fresh = _freshProbeAddr(s, _memberSubject);
+        (bool rawEligible, bool rawStanding) = IEMMig(s.eligibilityModule).getWearerRules(fresh, _memberSubject);
+        (bool cEligible, bool cStanding) = IEMMig(s.eligibilityModule).getWearerStatus(fresh, _memberSubject);
+        require(rawEligible == s.expectOpenMember, "LIVE member gate diverged from the RECORDED expectation (A1)");
+        require(
+            (rawEligible && rawStanding) == (cEligible && cStanding),
+            "member-gate oracle shape: raw wearer rules disagree with the EM COMBINED verdict"
+        );
+        require(
+            s.expectOpenMember == (cEligible && cStanding),
+            "RECORDED member gate disagrees with the EM COMBINED verdict for a fresh address"
+        );
+        console.log("  [T2] recorded member gate matches live (raw + combined). openMember:", s.expectOpenMember);
     }
 
     /// @dev A3 (specOrder-1 / seedCompleteness-1): port legacy explicit-DENY wearer rules (bans/kicks) as
