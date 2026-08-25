@@ -471,18 +471,72 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         }
     }
 
+    /// @dev A2 (specOrder-9 / seedCompleteness-0): TaskManager permission-resolution parity. Two checks:
+    ///      (1) SHADOW: for a (user, project) whose legacy per-project mask DIFFERS from the user's global
+    ///          mask, the post-cutover authority resolution (ctx = pid+1) equals the legacy resolution
+    ///          computed INDEPENDENTLY from the fixture (`_legacyExpectedMask`) — proving per-project
+    ///          overrides are ported at the correct ctx with REPLACE (inherit=false) semantics, not
+    ///          flattened to a blanket 0xFF global. It also proves the shadow is MATERIALIZED (the
+    ///          per-project result differs from the pure-global ctx-0 result).
+    ///      (2) GLOBAL-ONLY: a global-mask holder resolves identically on a project with NO override
+    ///          (an unused ctx) — the §3 global-union fold, and the real mask (not 0xFF).
     function _probeTM(OrgSpec memory s, address authority, address[] memory candidates) internal view {
         IMembershipAuthority a = IMembershipAuthority(authority);
-        uint256[] memory permHats = _tmPermissionHats(s);
-        for (uint256 i; i < permHats.length; ++i) {
-            address holder = _findMemberOf(s, permHats[i], authority, candidates);
-            if (holder == address(0)) continue;
-            uint256 mask = a.hasPerm(holder, AccessV2PermKeys.TM_PERMS, bytes32(0));
-            require(mask != 0, "TM_PERMS resolves empty for a permission-holder");
-            console.log("  probe TaskManager permission: OK (mask nonzero for holder)");
-            return;
+
+        // (1) SHADOW parity — find a project row whose mask differs from that hat's global mask, held by
+        //     a real pre-cutover wearer among the candidates.
+        bool shadowChecked;
+        for (uint256 r; r < _tmProjPids.length && !shadowChecked; ++r) {
+            uint256 pid = _tmProjPids[r];
+            uint256 hat = _tmProjHats[r];
+            uint256 projMask = _tmProjMasks[r] & 0xFF;
+            if (projMask == _fixtureGlobalMask(hat)) continue; // not a genuine shadow for this hat
+            for (uint256 j; j < candidates.length; ++j) {
+                if (!_expectMember[hat][candidates[j]]) continue;
+                address user = candidates[j];
+                uint256 got = a.hasPerm(user, AccessV2PermKeys.TM_PERMS, bytes32(pid + 1));
+                uint256 want = _legacyExpectedMask(pid, user);
+                require(got == want, "TM shadow: authority resolution != legacy per-project resolution");
+                uint256 globalOnly = a.hasPerm(user, AccessV2PermKeys.TM_PERMS, bytes32(0));
+                require(want != globalOnly, "TM shadow: per-project mask did not shadow global (no effect)");
+                console.log("  probe TaskManager SHADOW: OK (per-project mask overrides global, exact parity)");
+                console.log("    project id / effective mask / global-only mask:", pid, got, globalOnly);
+                shadowChecked = true;
+                break;
+            }
         }
-        console.log("  probe TaskManager permission: no TM permission-holder among candidates (skipped)");
+        if (!shadowChecked) {
+            console.log("  probe TaskManager SHADOW: no shadowed (user,project) among candidates (skipped)");
+        }
+
+        // (2) GLOBAL-ONLY parity — a global-mask holder on a project with NO override for their hat
+        //     resolves to the global fold (the real mask). Use a sentinel ctx no project row targets.
+        uint256 unusedPid = _firstUnusedPid();
+        for (uint256 g; g < _tmGlobalHats.length; ++g) {
+            uint256 hat = _tmGlobalHats[g];
+            if ((_tmGlobalMasks[g] & 0xFF) == 0) continue;
+            for (uint256 j; j < candidates.length; ++j) {
+                if (!_expectMember[hat][candidates[j]]) continue;
+                address user = candidates[j];
+                uint256 got = a.hasPerm(user, AccessV2PermKeys.TM_PERMS, bytes32(unusedPid + 1));
+                uint256 want = _legacyExpectedMask(unusedPid, user);
+                require(got == want, "TM global-only: authority resolution != legacy global fold");
+                require(got != 0, "TM global-only: resolved empty for a global-mask holder");
+                console.log("  probe TaskManager GLOBAL-ONLY: OK (global fold on no-override project)");
+                return;
+            }
+        }
+        console.log("  probe TaskManager GLOBAL-ONLY: no global-mask holder among candidates (skipped)");
+    }
+
+    /// @dev A project id (uint256) that NO fixture per-project row targets — its ctx (pid+1) has no
+    ///      override for any hat, so resolution there is pure global-union.
+    function _firstUnusedPid() internal view returns (uint256) {
+        uint256 maxPid;
+        for (uint256 i; i < _tmProjPids.length; ++i) {
+            if (_tmProjPids[i] > maxPid) maxPid = _tmProjPids[i];
+        }
+        return maxPid + 1000; // comfortably past any real project id
     }
 
     /// @dev A1 (specOrder-0 / seedCompleteness-1): PER-ORG join semantics. The member role's LIVE default

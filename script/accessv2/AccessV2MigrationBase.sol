@@ -248,6 +248,18 @@ abstract contract AccessV2MigrationBase is Script {
     // _buildCutoverBatch appends its verify() as the LAST cutover call (§6 in-batch verification, C4).
     address internal _verifier;
 
+    // A2 (specOrder-9 / seedCompleteness-0): the LIVE TaskManager permission table, enumerated by
+    // tools/enumerate-tm-perms.sh into fixtures/<org>.tmperms.json (there is NO getter for
+    // rolePermGlobal/rolePermProj; the event stream is the only source of truth). Five parallel arrays:
+    // global (hat→mask at ctx 0) and per-project (pid,hat→mask at ctx = pid+1). Loaded per org by
+    // _loadTmPerms; consumed by _seedTmPerms (seeding) and the rehearsal shadow probe (parity).
+    uint256[] internal _tmGlobalHats;
+    uint256[] internal _tmGlobalMasks;
+    uint256[] internal _tmProjPids;
+    uint256[] internal _tmProjHats;
+    uint256[] internal _tmProjMasks;
+    bool internal _tmPermsLoaded;
+
     /*═══════════════════════════════ Chain helpers ═══════════════════════════════*/
     function _poaManager(OrgSpec memory s) internal pure returns (address) {
         return s.gnosis ? GNOSIS_POA_MANAGER : ARB_POA_MANAGER;
@@ -689,9 +701,113 @@ abstract contract AccessV2MigrationBase is Script {
         _attachBool(authority, IEDUMig(s.edu).creatorHatIds(), AccessV2PermKeys.EDU_CREATE);
         _attachBool(authority, IEDUMig(s.edu).memberHatIds(), AccessV2PermKeys.EDU_MEMBER);
         _attachBool(authority, IQJMig(s.qj).memberHatIds(), AccessV2PermKeys.QJ_AUTOJOIN);
-        // TM: permission hats → TM_PERMS global mask (ctx=0). Low 8 bits carry the mask; seed all-perms
-        //     (0xFF) for holders — behavior-preserving for the global fold (per-project inherit=true).
-        _attachMask(authority, _tmPermissionHats(s), AccessV2PermKeys.TM_PERMS, 0xFF);
+        // A2 (specOrder-9 / seedCompleteness-0): TM permission table — REAL masks, per-project rows.
+        _seedTmPerms(s, authority);
+    }
+
+    /// @dev A2: seed the LIVE TaskManager permission table from fixtures/<org>.tmperms.json — NOT a
+    ///      blanket 0xFF. The old builder wrote 0xFF at ctx 0 for every permission hat (org-wide TM
+    ///      privilege escalation) and dropped all per-project rolePermProj overrides. This ports:
+    ///        (1) each hat's REAL global mask at ctx 0 (the low-8-bit rolePermGlobal value); and
+    ///        (2) every nonzero per-project override at ctx = bytes32(pid+1) with inherit=FALSE, so
+    ///            the authority arm RESOLVES it exactly like the legacy `_permMask`
+    ///            (`rolePermProj[pid][hat] != 0 ? rolePermProj : rolePermGlobal`, OR-folded across the
+    ///            hats a user wears — TaskManager.sol:1481-1494 / freeze amendment W4 ctx = pid+1).
+    ///      Zero-mask project rows are absent from the fixture (they fall through to global; §4). Only
+    ///      discovered subjects (lens-6 permission hats) are seeded — a fixture hat with no live perm
+    ///      would not be a subject, so isMember is false and it contributes nothing regardless.
+    function _seedTmPerms(OrgSpec memory s, address authority) internal {
+        _loadTmPerms(s.name);
+        // (1) Global rows at ctx 0 — the REAL mask (skip zero: contributes nothing under the OR fold).
+        for (uint256 i; i < _tmGlobalHats.length; ++i) {
+            uint256 hat = _tmGlobalHats[i];
+            uint256 mask = _tmGlobalMasks[i] & 0xFF;
+            if (hat == 0 || mask == 0 || !_seen[hat]) continue;
+            _pushPerm(authority, hat, AccessV2PermKeys.TM_PERMS, AccessV2PermKeys.EXISTS_BIT | mask);
+        }
+        // (2) Per-project override rows at ctx = pid+1, inherit=FALSE (legacy proj REPLACES global).
+        //     Not via _pushPerm (its dedup is keyed (subject,key) and ctx-blind); raw _push with the ctx.
+        for (uint256 i; i < _tmProjPids.length; ++i) {
+            uint256 hat = _tmProjHats[i];
+            uint256 mask = _tmProjMasks[i] & 0xFF;
+            if (hat == 0 || mask == 0 || !_seen[hat]) continue;
+            bytes32 ctx = bytes32(_tmProjPids[i] + 1); // W4: TM ids start at 0, ctx 0 is global → +1
+            _push(
+                authority,
+                abi.encodeCall(
+                    IMembershipAuthority.setPerm,
+                    (hat, AccessV2PermKeys.TM_PERMS, ctx, AccessV2PermKeys.EXISTS_BIT | mask)
+                )
+            );
+        }
+    }
+
+    /// @dev Load fixtures/<org>.tmperms.json into the parallel arrays. Idempotent within a run (guarded).
+    ///      Fields are parsed as uint arrays (hat/pid values are quoted hex, masks are 0..255 numbers —
+    ///      vm.parseJsonUintArray handles both). A missing fixture is fatal: the TM perm table is
+    ///      mandatory §6 seed content, and silently seeding nothing would repeat the escalation the fix
+    ///      exists to close.
+    function _loadTmPerms(string memory org) internal {
+        if (_tmPermsLoaded) return;
+        delete _tmGlobalHats;
+        delete _tmGlobalMasks;
+        delete _tmProjPids;
+        delete _tmProjHats;
+        delete _tmProjMasks;
+        string memory path =
+            string.concat(vm.projectRoot(), "/script/accessv2/fixtures/", _lowerName(org), ".tmperms.json");
+        string memory json = vm.readFile(path);
+        _tmGlobalHats = vm.parseJsonUintArray(json, ".globalHats");
+        _tmGlobalMasks = vm.parseJsonUintArray(json, ".globalMasks");
+        _tmProjPids = vm.parseJsonUintArray(json, ".projPids");
+        _tmProjHats = vm.parseJsonUintArray(json, ".projHats");
+        _tmProjMasks = vm.parseJsonUintArray(json, ".projMasks");
+        _tmPermsLoaded = true;
+    }
+
+    /// @dev The fixture global mask for `hat` (0 if none). Small linear scans (a few rows per org).
+    function _fixtureGlobalMask(uint256 hat) internal view returns (uint256) {
+        for (uint256 i; i < _tmGlobalHats.length; ++i) {
+            if (_tmGlobalHats[i] == hat) return _tmGlobalMasks[i] & 0xFF;
+        }
+        return 0;
+    }
+
+    /// @dev The fixture per-project override mask for (pid, hat) (0 if none).
+    function _fixtureProjMask(uint256 pid, uint256 hat) internal view returns (uint256) {
+        for (uint256 i; i < _tmProjPids.length; ++i) {
+            if (_tmProjPids[i] == pid && _tmProjHats[i] == hat) return _tmProjMasks[i] & 0xFF;
+        }
+        return 0;
+    }
+
+    /// @dev The LEGACY effective TaskManager mask for `user` on project `pid`, computed INDEPENDENTLY of
+    ///      the seed builder from the fixture + the pre-cutover wearer snapshot (_expectMember). Mirrors
+    ///      TaskManager._permMask legacy arm EXACTLY: for each permission hat the user wore,
+    ///      `proj != 0 ? proj : global`, OR-folded. The rehearsal probe compares the post-cutover
+    ///      authority resolution against this — a seed-builder ctx/inherit bug diverges (non-tautological).
+    function _legacyExpectedMask(uint256 pid, address user) internal view returns (uint256 m) {
+        for (uint256 i; i < _tmGlobalHats.length; ++i) {
+            uint256 hat = _tmGlobalHats[i];
+            if (!_expectMember[hat][user]) continue;
+            uint256 proj = _fixtureProjMask(pid, hat);
+            m |= proj != 0 ? proj : (_tmGlobalMasks[i] & 0xFF);
+        }
+        // Hats that appear ONLY in per-project rows (no global row) also contribute their proj mask.
+        for (uint256 i; i < _tmProjHats.length; ++i) {
+            uint256 hat = _tmProjHats[i];
+            if (_tmProjPids[i] != pid || !_expectMember[hat][user]) continue;
+            if (_fixtureGlobalMask(hat) != 0) continue; // already folded in the global loop above
+            m |= _tmProjMasks[i] & 0xFF;
+        }
+    }
+
+    function _lowerName(string memory v) internal pure returns (string memory) {
+        bytes memory b = bytes(v);
+        for (uint256 i; i < b.length; ++i) {
+            if (b[i] >= 0x41 && b[i] <= 0x5A) b[i] = bytes1(uint8(b[i]) + 32);
+        }
+        return string(b);
     }
 
     function _attachBool(address authority, uint256[] memory ids, bytes32 key) internal {
