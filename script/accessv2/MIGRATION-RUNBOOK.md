@@ -100,6 +100,13 @@ Always pass the explicit `--gas-limit` from the table below; the try/catch defea
 | Poa | 1.99M / 1.21M | 0.40M | 4,000,000 |
 | **KUBI** | 2.09M / 0.21M / **3.13M** / 2.05M | 0.40M | **5,000,000** (seed.3 exceeds the usual 3M guidance) |
 
+**Proposal CREATION gas (A7, measured):** the largest seed proposal's `createProposal` costs
+4.1M–4.9M gas per org (Test6 4.39M, DP 4.34M, Poa 4.14M, KUBI 4.95M) — HV stores the full batch.
+Creation is a plain wallet tx (`eth_estimateGas` works — no try/catch trap), but the signer's wallet
+must not cap below ~5.5M, and creation must NOT go through the sponsored/gasless path: the global
+rulebook's HV `createProposal` hint would under-fund it. Org admins create seed/cutover proposals
+from a funded EOA.
+
 ### Per-org decisions (recorded per §6 — not migration defaults)
 
 - **delegable column**: open member role (QuickJoin) → `delegable=true`; every titled/officer role →
