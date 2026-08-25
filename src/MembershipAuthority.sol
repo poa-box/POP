@@ -64,6 +64,7 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
             if (!Lib._eligibleRole(l, subject, msg.sender)) revert NotClaimable();
             Lib._requireManager(l, subject, p.actor, Lib.CAP_GRANT);
             Lib._deletePending(l, pid);
+            emit PendingActionFinalized(pid);
         } else {
             if (!Lib._eligibleRole(l, subject, msg.sender)) revert NotClaimable();
         }
@@ -80,6 +81,9 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
         Lib.RuleRec storage r = l.ruleOf[subject][msg.sender];
         if (r.kind == AccessV2Types.RuleKind.Grant && (r.author == AccessV2Types.RuleAuthor.Delegated || r.delegable)) {
             delete l.ruleOf[subject][msg.sender];
+            // Subgraph event law: a silent delete here left renounced non-sticky members showing
+            // eligible/claimable in the fold mirror forever (subgraph review, high).
+            emit RuleCleared(subject, msg.sender);
         }
         Lib._flipOff(l, subject, msg.sender);
         emit RoleRenounced(subject, msg.sender);

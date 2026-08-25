@@ -114,6 +114,7 @@ library MembershipAuthorityLogic {
     );
     event PendingActionCancelled(uint256 indexed pendingId, address indexed by);
     event PendingActionVoided(uint256 indexed pendingId);
+    event PendingActionFinalized(uint256 indexed pendingId);
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
 
     /*═══════════════════════════════ Stored structs ═══════════════════════════════*/
@@ -433,7 +434,12 @@ library MembershipAuthorityLogic {
         Layout storage l = layout();
         _onlyExecutor(l);
         RuleRec storage r = l.ruleOf[subject][user];
-        if (r.kind == AccessV2Types.RuleKind.Grant) delete l.ruleOf[subject][user];
+        if (r.kind == AccessV2Types.RuleKind.Grant) {
+            delete l.ruleOf[subject][user];
+            // Subgraph event law: every rule deletion emits RuleCleared (a silent delete left the
+            // fold mirror showing withdrawn offers as claimable forever — subgraph review, high).
+            emit RuleCleared(subject, user);
+        }
         emit OfferWithdrawn(subject, user, msg.sender);
         _voidPending(l, subject, user);
         _reconcileAfterRuleWrite(l, subject, user, false, msg.sender, false);
@@ -473,6 +479,9 @@ library MembershipAuthorityLogic {
             }
             revert RemovalIneffective(srcs);
         }
+        // Emit ONLY on the successful path — the revert path above restores the rule, so the
+        // deletion is durable exactly here (subgraph event law: no silent rule deletions).
+        if (cleared) emit RuleCleared(subject, user);
         _flipOff(l, subject, user);
         emit RoleRemoved(subject, user, false, actor, delegated);
     }
@@ -481,8 +490,12 @@ library MembershipAuthorityLogic {
         Layout storage l = layout();
         _onlyExecutor(l);
         RuleRec storage r = l.ruleOf[subject][user];
-        if (r.kind == AccessV2Types.RuleKind.Ban) delete l.ruleOf[subject][user];
-        emit RuleCleared(subject, user);
+        // Emit ONLY when a Ban was actually deleted: the unconditional emit made the subgraph
+        // mirror clear a LIVE Grant that unremove never touches on-chain (subgraph review, medium).
+        if (r.kind == AccessV2Types.RuleKind.Ban) {
+            delete l.ruleOf[subject][user];
+            emit RuleCleared(subject, user);
+        }
         _voidPending(l, subject, user);
     }
 
@@ -584,6 +597,7 @@ library MembershipAuthorityLogic {
             _requireManager(l, subject, actor, action == AccessV2Types.PendingKind.Grant ? CAP_GRANT : CAP_REMOVE);
 
         _deletePending(l, pendingId);
+        emit PendingActionFinalized(pendingId);
 
         if (action == AccessV2Types.PendingKind.Grant) {
             // Defense-in-depth mirror of the delegatedGrant guard: never overwrite a sticky

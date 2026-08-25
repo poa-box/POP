@@ -179,6 +179,9 @@ interface IMembershipAuthority {
     );
     event PendingActionCancelled(uint256 indexed pendingId, address indexed by);
     event PendingActionVoided(uint256 indexed pendingId);
+    /// @notice A pending action was CONSUMED by its completing verb (claim consuming an Offer,
+    ///         finalize applying a Grant/Remove) — emitted so the subgraph never derives closure.
+    event PendingActionFinalized(uint256 indexed pendingId);
 
     // ── ERC-1155 token surface (ROLES ONLY, §5) ──
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);

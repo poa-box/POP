@@ -44,6 +44,7 @@ contract MembershipAuthorityBase is Test {
     event ConfigLint(uint256 indexed subjectId, uint8 lintCode);
     event UserVouchesCleared(uint256 indexed subjectId, address indexed user);
     event RuleCleared(uint256 indexed subjectId, address indexed user);
+    event PendingActionFinalized(uint256 indexed pendingId);
 
     function setUp() public virtual {
         auth = _deployAuthority(ORG_ID);
@@ -1336,5 +1337,102 @@ contract MembershipAuthoritySeedAcceptedAtTest is MembershipAuthorityBase {
 
         assertLe(auth.activeMemberSince(subject, alice), uint64(proposalCreatedAt), "seeded member CAN vote");
         assertGt(auth.activeMemberSince(subject, bob), uint64(proposalCreatedAt), "post-cutover claimer CANNOT vote");
+    }
+}
+
+/*════════════ Subgraph event law: no silent rule deletions / pending consumption (sg review) ════════════*/
+
+contract MembershipAuthorityEventLawTest is MembershipAuthorityBase {
+    uint256 internal open_;
+    uint256 internal member;
+
+    function setUp() public override {
+        super.setUp();
+        open_ = _defaultAllowRole("Open");
+        member = _role("Member", 0);
+    }
+
+    function _logsHaveRuleCleared(uint256 subject, address user) internal returns (bool found) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 topic = keccak256("RuleCleared(uint256,address)");
+        for (uint256 i; i < logs.length; ++i) {
+            if (
+                logs[i].topics.length == 3 && logs[i].topics[0] == topic && logs[i].topics[1] == bytes32(subject)
+                    && logs[i].topics[2] == bytes32(uint256(uint160(user)))
+            ) return true;
+        }
+    }
+
+    /// @dev renounce of a delegable grant deletes the rule — must emit RuleCleared.
+    function testRenounceDelegableGrantEmitsRuleCleared() public {
+        vm.prank(alice);
+        auth.claim(open_);
+        auth.grant(member, alice, true); // delegable governance grant
+        vm.recordLogs();
+        vm.prank(alice);
+        auth.renounce(member);
+        assertTrue(_logsHaveRuleCleared(member, alice), "renounce must emit RuleCleared for the deleted grant");
+        (bool present,,,) = auth.getRuleFlags(member, alice);
+        assertFalse(present, "rule gone on-chain");
+    }
+
+    /// @dev soft remove (ban=false) deletes a delegable grant — must emit RuleCleared.
+    function testSoftRemoveEmitsRuleCleared() public {
+        vm.prank(alice);
+        auth.claim(open_);
+        auth.grant(member, alice, true);
+        vm.recordLogs();
+        auth.remove(member, alice, false);
+        assertTrue(_logsHaveRuleCleared(member, alice), "soft remove must emit RuleCleared");
+    }
+
+    /// @dev withdrawOffer deletes the offer grant — must emit RuleCleared.
+    function testWithdrawOfferEmitsRuleCleared() public {
+        auth.offer(member, alice, false); // out-of-org offer writes the Grant rule
+        vm.recordLogs();
+        auth.withdrawOffer(member, alice);
+        assertTrue(_logsHaveRuleCleared(member, alice), "withdrawOffer must emit RuleCleared");
+    }
+
+    /// @dev unremove on a user holding a GRANT (no ban) deletes nothing — must NOT emit RuleCleared.
+    function testUnremoveWithoutBanEmitsNoRuleCleared() public {
+        vm.prank(alice);
+        auth.claim(open_);
+        auth.grant(member, alice, false); // sticky grant, no ban present
+        vm.recordLogs();
+        auth.unremove(member, alice);
+        assertFalse(_logsHaveRuleCleared(member, alice), "unremove must not emit RuleCleared when nothing deleted");
+        (bool present,,,) = auth.getRuleFlags(member, alice);
+        assertTrue(present, "grant untouched on-chain");
+    }
+
+    /// @dev claim() consuming an Offer pending emits PendingActionFinalized.
+    function testClaimConsumingOfferEmitsPendingFinalized() public {
+        auth.setManagerConfig(member, open_, 3, 0); // open_ members manage member: CAP_GRANT|CAP_REMOVE
+        vm.prank(alice);
+        auth.claim(open_);
+        vm.prank(bob);
+        auth.claim(open_);
+        vm.prank(bob);
+        uint256 pid = auth.delegatedOffer(member, alice);
+        vm.expectEmit(true, false, false, false);
+        emit PendingActionFinalized(pid);
+        vm.prank(alice);
+        auth.claim(member);
+    }
+
+    /// @dev finalize() consuming a Grant pending emits PendingActionFinalized.
+    function testFinalizeEmitsPendingFinalized() public {
+        auth.setManagerConfig(member, open_, 3, 0);
+        vm.prank(alice);
+        auth.claim(open_);
+        vm.prank(bob);
+        auth.claim(open_);
+        vm.prank(bob);
+        uint256 pid = auth.delegatedGrant(member, alice);
+        vm.expectEmit(true, false, false, false);
+        emit PendingActionFinalized(pid);
+        vm.prank(bob);
+        auth.finalize(pid);
     }
 }
