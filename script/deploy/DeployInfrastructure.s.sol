@@ -382,7 +382,6 @@ contract DeployInfrastructure is Script {
             '  "modulesFactory": "',
             vm.toString(modulesFactory),
             '",\n',
-            '",\n',
             '  "universalPasskeyFactory": "',
             vm.toString(universalPasskeyFactory),
             '",\n',

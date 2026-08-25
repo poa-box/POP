@@ -39,6 +39,7 @@ import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 import {RoleConfigStructs} from "../src/libs/RoleConfigStructs.sol";
 import {ModuleTypes} from "../src/libs/ModuleTypes.sol";
 import {TaskPerm} from "../src/libs/TaskPerm.sol";
+import {VotingErrors} from "../src/libs/VotingErrors.sol";
 import {IHybridVotingInit} from "../src/libs/ModuleDeploymentLib.sol";
 import {DefaultGlobalRules} from "../script/helpers/DefaultGlobalRules.sol";
 import {MockHats} from "./mocks/MockHats.sol";
@@ -220,8 +221,9 @@ contract DeployerTest is Test {
         assertEq(orgRegistry.getOrgContract(ORG_ID, ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID), r.directDemocracyVoting);
 
         // No Hats tree is created: nothing registers an EligibilityModule or a ToggleModule.
-        assertEq(orgRegistry.getOrgContract(ORG_ID, ModuleTypes.ELIGIBILITY_MODULE_ID), address(0), "no EM");
-        assertEq(orgRegistry.getOrgContract(ORG_ID, ModuleTypes.TOGGLE_MODULE_ID), address(0), "no toggle");
+        // `proxyOf` is the non-reverting probe — `getOrgContract` reverts ContractUnknown on a miss.
+        assertEq(orgRegistry.proxyOf(ORG_ID, ModuleTypes.ELIGIBILITY_MODULE_ID), address(0), "no EM");
+        assertEq(orgRegistry.proxyOf(ORG_ID, ModuleTypes.TOGGLE_MODULE_ID), address(0), "no toggle");
     }
 
     /// @notice Subject ids are derivable from the authority address alone — the deployer never reads
@@ -359,8 +361,38 @@ contract DeployerTest is Test {
         dd.vote(0, idxs, weights);
 
         vm.prank(voter2);
-        vm.expectRevert();
+        vm.expectRevert(VotingErrors.Unauthorized.selector);
         dd.vote(0, idxs, weights);
+    }
+
+    /// @notice HybridVoting classes are seeded with subject ids, so the authority arm resolves class
+    ///         membership straight from `classesSnapshot` — no `setClassSubject` proposal is needed
+    ///         for a new org, and the activation gate still excludes a post-proposal joiner.
+    function testHybridVoting_voteThroughAuthority() public {
+        OrgDeployer.DeploymentResult memory r = _deployDefaultOrg(ORG_ID);
+        HybridVoting hv = HybridVoting(payable(r.hybridVoting));
+
+        _join(r, voter1, "hv-early");
+        vm.warp(block.timestamp + 1);
+
+        vm.prank(orgOwner); // EXECUTIVE holds HV_CREATE
+        hv.createProposal(bytes("budget"), bytes32(0), 60, 2, new IExecutor.Call[][](2), new uint256[](0));
+
+        vm.warp(block.timestamp + 1);
+        _join(r, voter2, "hv-late");
+
+        uint8[] memory idxs = new uint8[](1);
+        uint8[] memory weights = new uint8[](1);
+        idxs[0] = 0;
+        weights[0] = 100;
+
+        vm.prank(voter1);
+        hv.vote(0, idxs, weights);
+
+        // voter2's DEFAULT membership activated after creation, so it carries no class power.
+        vm.prank(voter2);
+        vm.expectRevert(VotingErrors.Unauthorized.selector);
+        hv.vote(0, idxs, weights);
     }
 
     function testPaymaster_registeredAgainstAdminSubject() public {
@@ -472,6 +504,7 @@ contract DeployerTest is Test {
     function _defaultParams(bytes32 orgId) internal view returns (OrgDeployer.DeploymentParams memory params) {
         RoleConfigStructs.RoleConfig[] memory roles = new RoleConfigStructs.RoleConfig[](2);
         roles[0] = _role("DEFAULT", true, true, 0);
+        roles[0].distribution.mintToDeployer = true;
         roles[1] = _role("EXECUTIVE", true, false, 5);
         roles[1].distribution.mintToDeployer = true;
 
