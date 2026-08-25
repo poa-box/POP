@@ -667,12 +667,13 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
     }
 
     /// @dev T7 (assertTautology-7): stranger semantics for EVERY subject, both arms explicit per org.
-    ///      `_seedLiveDefaults` seeds default-ALLOW for any subject whose legacy EM default probes open,
-    ///      and MembershipAuthority.claim() flips membership for ANY caller on a default-ALLOW subject —
-    ///      but legacy openness ALSO required a permissionless mint channel (QuickJoin). A default-open
+    ///      MembershipAuthority.claim() flips membership for ANY caller on a default-ALLOW subject, but
+    ///      legacy openness ALSO required a permissionless mint channel (QuickJoin): a default-open EM
     ///      verdict on a non-QuickJoin hat (an officer/voting hat whose real gate was the executor-gated
-    ///      mint) therefore becomes a sponsored permissionless role grab post-cutover. Only the member
-    ///      subject's join semantics were ever probed.
+    ///      mint) becomes a sponsored permissionless role grab post-cutover. Only the member subject's
+    ///      join semantics were ever probed. This probe is the enforcement half of the `_seedLiveDefaults`
+    ///      titled-role suppression: it re-derives the verdict from the authority and fails the ceremony
+    ///      if ANY subject other than the recorded open member role is claimable.
     ///      The open/gated verdict here is read from the AUTHORITY itself (a fresh stranger's
     ///      isEligible — with no rule, vouch or email that is exactly the subject's default), not from
     ///      the legacy oracle that seeded it, so this is not a second self-referential check.
