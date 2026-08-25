@@ -39,7 +39,7 @@ import {Executor} from "../../src/Executor.sol";
 
 /*
  * ============================================================================
- * RehearseMigration — end-to-end per-org fork rehearsal (Wave D2, SPEC §6)
+ * RehearseMigration — end-to-end per-org fork rehearsal (SPEC §6)
  * ============================================================================
  *
  * Runs the COMPLETE ceremony against a real fork, under FOUNDRY_PROFILE=production:
@@ -181,7 +181,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         address routerImpl = address(new AuthorityRouter());
         address pmImpl = address(new PaymasterHub());
 
-        // A7 (simVsBroadcast-2): IDEMPOTENT protocol setup so the sim also runs on a POST-Phase-0 fork
+        // A7: IDEMPOTENT protocol setup so the sim also runs on a POST-Phase-0 fork
         // (the runbook mandates re-running the governed sim right before each org's proposals). Guards:
         //  - addContractType reverts TypeExists once a type is registered → only add when its beacon is
         //    absent (getBeaconById == 0);
@@ -362,15 +362,15 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             require(voucherSubject == vc.membershipHatId, "voucher subject not ported");
             if (!s.vouchVerbatim) continue;
             // VERBATIM: the ported per-wearer count must equal the number of voucher RECORDS the seed
-            // could actually reconstruct from the candidate set (records-first port — seedCompleteness-5).
-            // NOTE (candidate-completeness limitation, seedCompleteness-7 / A5): legacy
+            // could actually reconstruct from the candidate set (records-first port).
+            // NOTE (candidate-completeness limitation, A5): legacy
             // EligibilityModule.currentVouchCount may exceed this when a wearer was vouched by an address
             // OUTSIDE the candidate fixture (EM direct-mint / vouched-but-unclaimed channels the current
             // enumerate-wearers.sh misses). Those records are provably unportable with the current
             // candidate source, so byte-exact legacy-count parity is NOT asserted here; closing it
             // requires the A5 candidate-enumeration rewrite (event-log union of every join/vouch channel).
             // What IS asserted: the authority faithfully ported EVERY record the seed saw (round-trip).
-            // T4 (assertTautology-4): per-wearer COUNT parity PLUS per-record IDENTITY for EVERY
+            // T4: per-wearer COUNT parity PLUS per-record IDENTITY for EVERY
             // reconstructed record — not one sampled record per subject. With KUBI's all-quorum-1 /
             // length-1 voucher lists a cross-wearer misattribution (wearer[j]'s voucher array pushed for
             // wearer[j+1]) preserved every count and was caught only by luck.
@@ -557,7 +557,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         }
     }
 
-    /// @dev A2 + T5 (specOrder-9 / seedCompleteness-0 / assertTautology-5): TaskManager
+    /// @dev A2 + T5: TaskManager
     ///      permission-resolution parity against an INDEPENDENT oracle. The `want` side is no longer
     ///      folded from the same fixture that seeded the authority — it is `_captureTmOracle`'s
     ///      PRE-cutover replay of TaskManager._permMask's LEGACY arm, computed from the live TM's own
@@ -605,7 +605,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         console.log("  probe TaskManager GLOBAL-ONLY rows verified vs INDEPENDENT oracle:", globalChecked);
     }
 
-    /// @dev A1 (specOrder-0 / seedCompleteness-1): PER-ORG join semantics. The member role's LIVE default
+    /// @dev A1: PER-ORG join semantics. The member role's LIVE default
     ///      verdict drives the assertion — OPEN (DP): a fresh user joins through the exact QJ chain; GATED
     ///      (Test6 zk / KUBI vouch): a stranger CANNOT claim or be minted the role (the security
     ///      regression the audit caught — prove it closed), and for a VERBATIM vouch org the vouch->claim
@@ -616,7 +616,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             console.log("  probe QuickJoin join path: OK (governance-only org; no open member subject)");
             return;
         }
-        // T2 (assertTautology-1): the arm is selected from the CATALOG-RECORDED constant, never from the
+        // T2: the arm is selected from the CATALOG-RECORDED constant, never from the
         // live oracle that seeded the default (_assertRecordedMemberGate already require()d they agree at
         // seed time, so a live change fails loudly there rather than silently flipping this arm too).
         bool openMember = s.expectOpenMember;
@@ -666,7 +666,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         if (s.vouchVerbatim) _probeVouchClaim(s, authority, candidates);
     }
 
-    /// @dev T7 (assertTautology-7): stranger semantics for EVERY subject, both arms explicit per org.
+    /// @dev T7: stranger semantics for EVERY subject, both arms explicit per org.
     ///      MembershipAuthority.claim() flips membership for ANY caller on a default-ALLOW subject, but
     ///      legacy openness ALSO required a permissionless mint channel (QuickJoin): a default-open EM
     ///      verdict on a non-QuickJoin hat (an officer/voting hat whose real gate was the executor-gated
@@ -749,7 +749,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         }
     }
 
-    /// @dev A3 (specOrder-1 / seedCompleteness-1): every legacy EFFECTIVE deny/kick must be ported as a
+    /// @dev A3: every legacy EFFECTIVE deny/kick must be ported as a
     ///      RuleKind.Ban that keeps the wearer ineligible and non-claimable post-cutover. "Effective" is
     ///      load-bearing and LIVE-VERIFIED: a legacy explicit-deny rule bans a wearer only when the EM's
     ///      COMBINED getWearerStatus is ineligible. The DEPLOYED EM bytecode on Gnosis PREDATES the
@@ -782,7 +782,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             }
         }
         console.log("  BANS ported+verified:", total);
-        // T3 (assertTautology-3): on a drill org the ban path is NON-VACUOUS by construction — assert the
+        // T3: on a drill org the ban path is NON-VACUOUS by construction — assert the
         // exact injected pair specifically (not just "some ban existed"), including that the wearer's
         // PRIOR membership was never seeded and that they cannot claim their way back in.
         if (s.banDrill) {
@@ -867,7 +867,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         }
     }
 
-    /*═══════════════════ T1: zk-email continuity (spec "Test6 zkEmail continuity", assertTautology-0) ═══════════════════*/
+    /*═══════════════════ T1: zk-email continuity (spec "Test6 zkEmail continuity") ═══════════════════*/
 
     /// @dev The live module's domain-leaf kind (ZkEmailInvites.LEAF_DOMAIN).
     uint8 internal constant ZK_LEAF_DOMAIN = 0;

@@ -158,14 +158,13 @@ library MembershipAuthoritySeed {
         Logic._onlyExecutor(l);
         uint256 n = subjects.length;
         if (users.length != n) revert ArrayLengthMismatch();
-        // acceptedAt backdating is gated on PAUSED (lockdown contractDelta-1): every legitimate
-        // backdated seed — genesis, seed proposals, the delta-seed inside the cutover batch — runs
-        // while the authority is still born-paused (unpause is a LATER cutover call), so seeded
-        // members get acceptedAt = 1 (pre-existing: in-flight proposals stay votable, ruling R7).
-        // Once UNPAUSED, seedMemberships stamps block.timestamp like every runtime path — otherwise
-        // a post-cutover governance seed call would mint voters retroactively eligible for every
-        // open proposal, converting the anti-packing activation gate from "impossible" to "one
-        // seed call away".
+        // acceptedAt backdating is gated on PAUSED. Every legitimate backdated seed — genesis, seed
+        // proposals, the delta-seed inside the cutover batch — runs while the authority is still
+        // born-paused (unpause is a LATER cutover call), so seeded members get acceptedAt = 1 and
+        // count as pre-existing for in-flight proposals. Once UNPAUSED, seedMemberships stamps
+        // block.timestamp like every runtime path: otherwise a post-cutover governance seed would
+        // mint voters retroactively eligible for every open proposal, turning the anti-packing
+        // activation gate from "impossible" into "one seed call away".
         uint64 acceptedAt = l.paused ? 1 : uint64(block.timestamp);
         for (uint256 i; i < n;) {
             if (!l.membership[subjects[i]][users[i]].accepted) {
@@ -196,14 +195,14 @@ library MembershipAuthoritySeed {
         }
     }
 
-    /// @notice RECORDS-FIRST vouch seed (C2): port the ACTUAL per-voucher records for one wearer, not a
+    /// @notice RECORDS-FIRST vouch seed: port the ACTUAL per-voucher records for one wearer, not a
     ///         bare count. For each `voucher`, write the `vouchers[subject][user][voucher]` record at the
     ///         CURRENT epoch + generation, then set `currentVouchCount = #distinct records` and
     ///         `wearerVouchEpoch = currentEpoch`. This is what makes the ported state runtime-sound: a
     ///         legacy voucher can `revokeVouch` (record present ⇒ count decrements ⇒ reconcile fires
-    ///         below quorum) and CANNOT re-`vouch` on top (record present ⇒ AlreadyVouched), so the old
-    ///         count-only seed's two bugs — un-revokable ghosts and re-vouch double-counting — are gone.
-    /// @dev IDEMPOTENT + stale-aware (lockdown contractDelta-0). The liveness predicate is the SAME
+    ///         below quorum) and CANNOT re-`vouch` on top (record present ⇒ AlreadyVouched). A
+    ///         count-only seed would instead leave un-revokable ghosts and allow re-vouch double-counting.
+    /// @dev IDEMPOTENT + stale-aware. The liveness predicate is the SAME
     ///      triple vouch()/revokeVouch() use — (bool record, recordEpoch == epoch, recordGen == gen) —
     ///      never the bare boolean: a record left behind by clearUserVouches (gen bump) or resetVouches
     ///      (epoch bump) is STALE and gets REFRESHED (re-counted at the current epoch/gen), so

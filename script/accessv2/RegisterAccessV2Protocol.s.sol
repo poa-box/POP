@@ -14,7 +14,7 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
 
 /*
  * ============================================================================
- * Register the Access-v2 protocol pieces — PER-CHAIN, LOCAL (Wave D1, §6 step 0 / 0.5)
+ * Register the Access-v2 protocol pieces — PER-CHAIN, LOCAL (SPEC §6 step 0 / 0.5)
  * ============================================================================
  *
  * Stands up the NEW chain-wide Access-v2 protocol surface so per-org migration
@@ -173,7 +173,7 @@ abstract contract AccessV2RegisterBase is Script {
 
     /// @dev CREATE3-deploy (idempotently) the CutoverVerifier for this chain, pinning `hats` (canonical)
     ///      + this chain's `orgRegistry` + `paymasterHub` as immutables (the hub pin makes the router
-    ///      canonicality check on-chain — lockdown contractDelta-2).
+    ///      canonicality check on-chain).
     function _deployCutoverVerifier(address orgRegistry, address paymasterHub) internal returns (address verifier) {
         bytes memory code =
             abi.encodePacked(type(CutoverVerifier).creationCode, abi.encode(HATS, orgRegistry, paymasterHub));

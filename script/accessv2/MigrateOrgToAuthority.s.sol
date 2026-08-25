@@ -15,7 +15,7 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
 
 /*
  * ============================================================================
- * MigrateOrgToAuthority — the PRODUCTION per-org ceremony (Wave D2, SPEC §6)
+ * MigrateOrgToAuthority — the PRODUCTION per-org ceremony (SPEC §6)
  * ============================================================================
  *
  * Three surfaces, all env-driven by ORG = TEST6 | DP | KUBI | POA:
@@ -67,7 +67,7 @@ interface IHVGov {
 
 abstract contract MigrateOrgBase is OrgCatalog {
     address internal constant DD_DEPLOYER = 0x4aC8B5ebEb9D8C3dE3180ddF381D552d59e8835a;
-    // JSON output subdirectory. GOVERNED SIMS set "sim/" (lockdown storageSizeOps-1): their batches
+    // JSON output subdirectory. GOVERNED SIMS set "sim/": their batches
     // embed sim-ephemeral protocol addresses (freshly-deployed router/verifier on the fork) and must
     // NEVER clobber the production artifacts GenerateBatches writes to out/ directly.
     string internal _outSubdir = "";
@@ -82,7 +82,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
     function _proxyInitCode(OrgSpec memory s) internal view returns (bytes memory) {
         address beacon = IPoaManagerMig(_poaManager(s)).getBeaconById(MEMBERSHIP_AUTHORITY_TYPEID);
         require(beacon != address(0), "MA beacon not registered (run protocol wave first)");
-        // C5 (specOrder-5 front-run grief close): deploy the proxy WITH init data so it lands
+        // C5 (front-run grief close): deploy the proxy WITH init data so it lands
         // ATOMICALLY initialized (empty-genesis: executor/orgId/paused). An attacker can no longer
         // initialize the predicted CREATE2 slot first during the seed-proposal voting window.
         bytes memory initData = abi.encodeCall(IMembershipAuthority.initialize, (_minimalInit(s)));
@@ -99,7 +99,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
             address deployed = DeterministicDeployer(DD_DEPLOYER).deploy(_proxySalt(s), _proxyInitCode(s));
             require(deployed == authority, "DD address mismatch");
         } else {
-            // A7 (simVsBroadcast-5 / CLAUDE.md point 6): the CREATE2 slot is already occupied. Adopting it
+            // A7 (CLAUDE.md point 6): the CREATE2 slot is already occupied. Adopting it
             // blindly would let the ceremony bind FOREIGN bytecode (a colliding salt, or stale code
             // registered under a different version) as the org's authority. Two layered guards:
             //  (1) CODEHASH: the occupant runtime MUST be a BeaconProxy pointing at THIS org's MA beacon —
@@ -141,7 +141,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
         IExecutor.Call[][] memory batches = new IExecutor.Call[][](1);
         batches[0] = batch;
         id = IHVGov(s.hv).proposalsCount();
-        // A7 (simVsBroadcast-7): HybridVotingProposals._initProposal SSTOREs the ENTIRE batches calldata,
+        // A7: HybridVotingProposals._initProposal SSTOREs the ENTIRE batches calldata,
         // so createProposal — not announceWinner — is often the most expensive tx in the ceremony and is
         // the one orgs pay for via a sponsored passkey userOp. Measure it so ops can size the userOp gas
         // and confirm the HV createProposal rulebook hint (0 == uncapped) cannot hint-reject it.
@@ -214,7 +214,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
         // Seed batches — each one a REAL governance proposal (and emitted as proposal JSON, so the
         // sim-verified batches double as the reviewable out/ artifacts).
         IExecutor.Call[][] memory seedBatches = _buildSeedBatches(s, authority, candidates);
-        // A7 (simVsBroadcast-7): track the LARGEST createProposal cost across the seed batches — the
+        // A7: track the LARGEST createProposal cost across the seed batches — the
         // proposal orgs author via a sponsored passkey userOp — and report it against the HV createProposal
         // rulebook hint (0 == uncapped) so ops can confirm no hint-rejection and size the userOp.
         uint256 maxCreateGas;
@@ -265,7 +265,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
 
     /*──────────────────── A5 drift drill (delta-seed vs stale-batch revert) ────────────────────*/
 
-    /// @dev A5 (specOrder-4 / seedCompleteness-2): the drift drill. After the seeds executed, a NEW legacy
+    /// @dev A5: the drift drill. After the seeds executed, a NEW legacy
     ///      member joins (force-eligible + mint via the EligibilityModule superAdmin = Executor). Then:
     ///        (i)  the STALE cutover (built pre-drift, expectedSupplies baked before the join) REVERTS
     ///             on-chain — the CutoverVerifier SupplyDrift guard catches the fresh wearer that the
@@ -334,7 +334,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
         vm.revertToState(snap);
     }
 
-    /// @dev T6 (assertTautology-6): a fresh legacy wearer joins through the org's REAL join channel,
+    /// @dev T6: a fresh legacy wearer joins through the org's REAL join channel,
     ///      preferred in this order — the executor-superAdmin direct-mint is a LAST resort, not the
     ///      default, precisely because it emits neither Executor.HatsMinted nor QuickJoin.QuickJoined and
     ///      is therefore invisible to tools/enumerate-wearers.sh (so the "re-enumerate -> regenerate ->
@@ -481,7 +481,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
             );
         }
         json = string.concat(json, "\n  ]\n}\n");
-        // out/ is gitignored + regenerated (ruling R6) — create it on demand so a fresh checkout can
+        // out/ is gitignored + regenerated — create it on demand so a fresh checkout can
         // generate without a committed artifact directory.
         string memory dir = string.concat(vm.projectRoot(), "/script/accessv2/out/", _outSubdir);
         vm.createDir(dir, true);
@@ -555,7 +555,7 @@ contract GenerateBatches is MigrateOrgBase {
         // protocol wave repointed hub.HATS() to the router; before that wave this correctly reverts).
         address router = _hubHats(s);
         require(_isRouter(router), "hub HATS() is not the AuthorityRouter yet (run protocol wave first)");
-        // Wire the CANONICAL CutoverVerifier (lockdown storageSizeOps-0: this was previously never
+        // Wire the CANONICAL CutoverVerifier (this was previously never
         // set, so the PRODUCTION cutover JSON carried NO in-batch verification). CREATE3 address is
         // deterministic (salt-only — same type/version strings as RegisterAccessV2Protocol); require
         // deployed code so a pre-protocol-wave generation fails loudly instead of emitting a batch

@@ -81,8 +81,8 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
         Lib.RuleRec storage r = l.ruleOf[subject][msg.sender];
         if (r.kind == AccessV2Types.RuleKind.Grant && (r.author == AccessV2Types.RuleAuthor.Delegated || r.delegable)) {
             delete l.ruleOf[subject][msg.sender];
-            // Subgraph event law: a silent delete here left renounced non-sticky members showing
-            // eligible/claimable in the fold mirror forever (subgraph review, high).
+            // Every durable rule deletion emits: a silent delete here would leave renounced
+            // non-sticky members eligible/claimable in the subgraph's fold mirror forever.
             emit RuleCleared(subject, msg.sender);
         }
         Lib._flipOff(l, subject, msg.sender);
@@ -110,9 +110,9 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
         Lib.Layout storage l = Lib.layout();
         Lib._gateNonExecutor(l);
         if (user == address(0)) revert ZeroAddress();
-        // Legacy-parity guard (lockdown contractDelta-4): vouchFor reverts CannotVouchForSelf, and the
-        // C1 self-voucher relaxation (Execs-vouch-Execs configs) made this reachable — without it a
-        // sitting member could count a self-vouch toward their own retention quorum.
+        // Legacy parity: a self-vouch is rejected. Reachable because a subject may be its own
+        // voucher subject (Execs-vouch-Execs); without this a sitting member could count a
+        // self-vouch toward their own retention quorum.
         if (msg.sender == user) revert CannotVouchForSelf();
         Lib.VouchCfg storage cfg = l.vouchConfigs[subject];
         if (cfg.quorum == 0) revert WiringIncompatible();
