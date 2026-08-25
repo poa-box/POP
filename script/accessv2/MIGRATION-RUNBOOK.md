@@ -6,8 +6,8 @@ Broadcast order for the Hats → MembershipAuthority cutover. Normative design: 
 per-proposal gas figures are measured, not estimated. Re-run the sims immediately before each
 broadcast — they assert against live state and fail loudly if anything drifted.
 
-**Nothing in this runbook has been broadcast.** The v1 (`script/rolemanager/`) runbook is
-superseded — do not run it.
+**Nothing in this runbook has been broadcast.** The superseded v1 RoleManager runbook and its
+scripts (`script/rolemanager/`, never broadcast) were deleted in the 2026-08 script cleanup.
 
 ---
 
