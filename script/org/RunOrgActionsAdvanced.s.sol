@@ -9,26 +9,26 @@ import {TaskManager} from "../../src/TaskManager.sol";
 import {HybridVoting} from "../../src/HybridVoting.sol";
 import {ParticipationToken} from "../../src/ParticipationToken.sol";
 import {QuickJoin} from "../../src/QuickJoin.sol";
-import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {Executor, IExecutor} from "../../src/Executor.sol";
 import {IHybridVotingInit} from "../../src/libs/ModuleDeploymentLib.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {UniversalAccountRegistry} from "../../src/UniversalAccountRegistry.sol";
-import {IEligibilityModule} from "../../src/interfaces/IHatsModules.sol";
+import {IMembershipAuthority} from "../../src/interfaces/IMembershipAuthority.sol";
 import {ModuleTypes} from "../../src/libs/ModuleTypes.sol";
 import {RoleConfigStructs} from "../../src/libs/RoleConfigStructs.sol";
 import {ModulesFactory} from "../../src/factories/ModulesFactory.sol";
 
 /**
  * @title RunOrgActionsAdvanced
- * @notice Advanced demonstration showcasing vouching system and complete org lifecycle
- * @dev Extends basic org actions with vouching demonstrations
+ * @notice Advanced demonstration showcasing the vouch attestor and the complete org lifecycle
+ * @dev Extends basic org actions with vouching demonstrations. Access v2: every role is a subject
+ *      on the org's MembershipAuthority — there is no Hats tree and no EligibilityModule.
  *
  * This script demonstrates:
  * 1. Organization deployment
- * 2. Member onboarding (QuickJoin + hat minting)
- * 3. **Vouching system (vouch for COORDINATOR hat)**
- * 4. **Hat minting after vouching**
+ * 2. Member onboarding (QuickJoin auto-join)
+ * 3. **Vouch attestor (vouch for the COORDINATOR subject)**
+ * 4. **User claim after being vouched**
  * 5. **Vouch revocation**
  * 6. Participation token management
  * 7. Task creation and lifecycle (TaskManager)
@@ -170,9 +170,9 @@ contract RunOrgActionsAdvanced is Script {
         address taskManager;
         address educationHub;
         address paymentManager;
-        address eligibilityModule;
-        uint256 topHatId;
-        uint256[] roleHatIds;
+        address membershipAuthority;
+        uint256 adminSubjectId;
+        uint256[] roleSubjectIds;
     }
 
     struct MemberAddresses {
@@ -195,7 +195,6 @@ contract RunOrgActionsAdvanced is Script {
     OrgContracts public org;
     MemberAddresses public members;
     MemberKeys public memberKeys;
-    IHats public hats;
 
     /*=========================== MAIN ===========================*/
 
@@ -238,12 +237,9 @@ contract RunOrgActionsAdvanced is Script {
         string memory infraJson = vm.readFile("script/config/infrastructure.json");
         address orgDeployerAddr = vm.parseJsonAddress(infraJson, ".orgDeployer");
         address globalAccountRegistry = vm.parseJsonAddress(infraJson, ".globalAccountRegistry");
-        address hatsAddr = vm.parseJsonAddress(infraJson, ".hatsProtocol");
         address orgRegistryAddr = vm.parseJsonAddress(infraJson, ".orgRegistry");
 
         require(orgDeployerAddr != address(0), "OrgDeployer not found - deploy infrastructure first");
-
-        hats = IHats(hatsAddr);
 
         // Get org config path
         string memory configPath = vm.envOr("ORG_CONFIG_PATH", string("script/config/org-config-advanced-demo.json"));
@@ -303,15 +299,16 @@ contract RunOrgActionsAdvanced is Script {
         org.educationHub = result.educationHub;
         org.paymentManager = result.paymentManager;
 
-        // Get eligibility module and role hat IDs from OrgRegistry
+        // Authority + role subject ids from OrgRegistry
         OrgRegistry orgRegistry = OrgRegistry(orgRegistryAddr);
-        org.eligibilityModule = orgRegistry.getOrgContract(orgId, ModuleTypes.ELIGIBILITY_MODULE_ID);
+        org.membershipAuthority = result.membershipAuthority;
+        org.adminSubjectId = orgRegistry.getTopHat(orgId);
 
-        org.roleHatIds = new uint256[](4); // 4 roles in config
-        org.roleHatIds[0] = orgRegistry.getRoleHat(orgId, 0); // MEMBER
-        org.roleHatIds[1] = orgRegistry.getRoleHat(orgId, 1); // COORDINATOR
-        org.roleHatIds[2] = orgRegistry.getRoleHat(orgId, 2); // CONTRIBUTOR
-        org.roleHatIds[3] = orgRegistry.getRoleHat(orgId, 3); // ADMIN
+        org.roleSubjectIds = new uint256[](4); // 4 roles in config
+        org.roleSubjectIds[0] = orgRegistry.getRoleHat(orgId, 0); // MEMBER
+        org.roleSubjectIds[1] = orgRegistry.getRoleHat(orgId, 1); // COORDINATOR
+        org.roleSubjectIds[2] = orgRegistry.getRoleHat(orgId, 2); // CONTRIBUTOR
+        org.roleSubjectIds[3] = orgRegistry.getRoleHat(orgId, 3); // ADMIN
 
         console.log("\n[OK] Organization Deployed Successfully");
         console.log("  Executor:", org.executor);
@@ -319,7 +316,7 @@ contract RunOrgActionsAdvanced is Script {
         console.log("  TaskManager:", org.taskManager);
         console.log("  ParticipationToken:", org.participationToken);
         console.log("  QuickJoin:", org.quickJoin);
-        console.log("  Role Hat IDs:", org.roleHatIds.length);
+        console.log("  Role subjects:", org.roleSubjectIds.length);
     }
 
     /*=========================== STEP 2: ONBOARD ===========================*/
@@ -386,107 +383,76 @@ contract RunOrgActionsAdvanced is Script {
 
     function _demonstrateVouching() internal {
         console.log("\n=======================================================");
-        console.log("STEP 3: Demonstrating Two-Level Vouching System");
+        console.log("STEP 3: Demonstrating the Vouch Attestor");
         console.log("=======================================================\n");
 
-        uint256 memberHatId = org.roleHatIds[0]; // MEMBER role (index 0)
-        uint256 coordinatorHatId = org.roleHatIds[1]; // COORDINATOR role (index 1)
-        IEligibilityModule eligMod = IEligibilityModule(org.eligibilityModule);
+        uint256 memberSubject = org.roleSubjectIds[0]; // MEMBER role (index 0)
+        uint256 coordinatorSubject = org.roleSubjectIds[1]; // COORDINATOR role (index 1)
+        uint256 adminSubject = org.roleSubjectIds[3]; // ADMIN role (index 3)
+        IMembershipAuthority auth = IMembershipAuthority(org.membershipAuthority);
         uint256 deployerPrivateKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
 
-        console.log("Member Hat ID:", memberHatId);
-        console.log("Coordinator Hat ID:", coordinatorHatId);
-        console.log("Eligibility Module:", org.eligibilityModule);
-        console.log("\nVouching Rules:");
-        console.log("  MEMBER hat: 1 vouch from ADMIN/COORDINATOR/MEMBER (hierarchy)");
-        console.log("  COORDINATOR hat: 1 vouch from ADMIN only");
+        console.log("MEMBER subject:", memberSubject);
+        console.log("COORDINATOR subject:", coordinatorSubject);
+        console.log("MembershipAuthority:", org.membershipAuthority);
+        console.log("\nVouch rules (from the org config's per-role attestors):");
+        console.log("  MEMBER: quorum vouches from the configured voucher subject");
+        console.log("  COORDINATOR: quorum vouches from the configured voucher subject");
+        console.log("\nA vouch makes the target ELIGIBLE; membership needs the target's own claim.");
 
-        /* ─────────── Part 1: Admin vouches for member1 to get MEMBER hat ─────────── */
-        console.log("\n[Part 1: Vouching for MEMBER hat]");
+        require(auth.isMember(adminSubject, members.deployer), "Deployer is not an ADMIN member - cannot vouch");
 
-        // Verify deployer has ADMIN hat
-        uint256 adminHatId = org.roleHatIds[3];
-        console.log("\n-> Verifying deployer has ADMIN hat...");
-        console.log("  Deployer address:", members.deployer);
-        console.log("  ADMIN hat ID:", adminHatId);
-        bool deployerHasAdminHat = hats.isWearerOfHat(members.deployer, adminHatId);
-        console.log("  Deployer has ADMIN hat:", deployerHasAdminHat);
-        require(deployerHasAdminHat, "Deployer does not have ADMIN hat - cannot vouch");
+        /* --------- Part 1: ADMIN vouches for member1, member1 claims --------- */
+        console.log("\n[Part 1: Vouching for MEMBER]");
+        console.log("  member1 is a member:", auth.isMember(memberSubject, members.member1));
+        console.log("  vouch count:", auth.vouchCount(memberSubject, members.member1));
 
-        console.log("\n-> Checking member1 initial status...");
-        console.log("  Has MEMBER hat:", hats.isWearerOfHat(members.member1, memberHatId));
-        console.log("  Vouch count:", eligMod.currentVouchCount(memberHatId, members.member1));
-
-        console.log("\n-> Admin vouching for member1 to get MEMBER hat...");
         vm.broadcast(deployerPrivateKey);
-        eligMod.vouchFor(members.member1, memberHatId);
-        console.log("  [OK] Admin vouched for member1");
-        console.log("  Vouch count:", eligMod.currentVouchCount(memberHatId, members.member1));
+        auth.vouch(memberSubject, members.member1);
+        console.log("  [OK] deployer vouched for member1; count:", auth.vouchCount(memberSubject, members.member1));
 
-        console.log("\n-> member1 claiming MEMBER hat after being vouched...");
         vm.broadcast(memberKeys.member1);
-        eligMod.claimVouchedHat(memberHatId);
-        console.log("  [OK] member1 claimed MEMBER hat");
-        bool hasMemberHat = hats.isWearerOfHat(members.member1, memberHatId);
-        console.log("  member1 has MEMBER hat:", hasMemberHat);
+        auth.claim(memberSubject);
+        console.log("  [OK] member1 claimed MEMBER:", auth.isMember(memberSubject, members.member1));
 
-        /* ─────────── Part 2: Admin vouches for coordinator to get COORDINATOR hat ─────────── */
-        console.log("\n[Part 2: Vouching for COORDINATOR hat (separate coordinator account)]");
-
-        console.log("\n-> Checking coordinator initial status...");
-        console.log("  Has COORDINATOR hat:", hats.isWearerOfHat(members.coordinator, coordinatorHatId));
-        console.log("  Vouch count:", eligMod.currentVouchCount(coordinatorHatId, members.coordinator));
-
-        console.log("\n-> Admin vouching for coordinator to get COORDINATOR hat...");
+        /* --------- Part 2: ADMIN vouches for the coordinator --------- */
+        console.log("\n[Part 2: Vouching for COORDINATOR]");
         vm.broadcast(deployerPrivateKey);
-        eligMod.vouchFor(members.coordinator, coordinatorHatId);
-        console.log("  [OK] Admin vouched for coordinator");
-        console.log("  Vouch count:", eligMod.currentVouchCount(coordinatorHatId, members.coordinator));
+        auth.vouch(coordinatorSubject, members.coordinator);
+        console.log("  [OK] deployer vouched for coordinator");
 
-        console.log("\n-> coordinator claiming COORDINATOR hat after being vouched...");
         vm.broadcast(memberKeys.coordinator);
-        eligMod.claimVouchedHat(coordinatorHatId);
-        console.log("  [OK] coordinator claimed COORDINATOR hat");
-        bool hasCoordinatorHat = hats.isWearerOfHat(members.coordinator, coordinatorHatId);
-        console.log("  coordinator has COORDINATOR hat:", hasCoordinatorHat);
+        auth.claim(coordinatorSubject);
+        console.log("  [OK] coordinator claimed COORDINATOR:", auth.isMember(coordinatorSubject, members.coordinator));
 
-        /* ─────────── Part 3: member1 (now MEMBER) vouches for member2 ─────────── */
-        console.log("\n[Part 3: Demonstrating MEMBER can vouch for new MEMBER]");
-
-        console.log("\n-> member1 (who has MEMBER hat) vouching for member2...");
+        /* --------- Part 3: a MEMBER vouches for the next MEMBER --------- */
+        console.log("\n[Part 3: A MEMBER vouches for member2]");
         vm.broadcast(memberKeys.member1);
-        eligMod.vouchFor(members.member2, memberHatId);
-        console.log("  [OK] member1 vouched for member2");
-        console.log("  Vouch count:", eligMod.currentVouchCount(memberHatId, members.member2));
+        auth.vouch(memberSubject, members.member2);
+        console.log("  [OK] member1 vouched for member2; count:", auth.vouchCount(memberSubject, members.member2));
 
-        console.log("\n-> member2 claiming MEMBER hat after being vouched...");
         vm.broadcast(memberKeys.member2);
-        eligMod.claimVouchedHat(memberHatId);
-        console.log("  [OK] member2 claimed MEMBER hat");
-        bool member2HasMemberHat = hats.isWearerOfHat(members.member2, memberHatId);
-        console.log("  member2 has MEMBER hat:", member2HasMemberHat);
+        auth.claim(memberSubject);
+        console.log("  [OK] member2 claimed MEMBER:", auth.isMember(memberSubject, members.member2));
 
-        /* ─────────── Part 4: Demonstrate vouch revocation ─────────── */
-        console.log("\n[Part 4: Demonstrating vouch revocation]");
-
-        console.log("\n-> Admin revoking vouch for coordinator COORDINATOR hat...");
+        /* --------- Part 4: revoking a vouch drops eligibility --------- */
+        // The membership itself survives until someone calls `reconcile` — the declared
+        // event-lag window between an attestor lapse and the repair burn.
+        console.log("\n[Part 4: Revoking a vouch]");
         vm.broadcast(deployerPrivateKey);
-        eligMod.revokeVouch(members.coordinator, coordinatorHatId);
-        console.log("  [OK] Vouch revoked");
-        console.log("  Vouch count:", eligMod.currentVouchCount(coordinatorHatId, members.coordinator));
+        auth.revokeVouch(coordinatorSubject, members.coordinator);
+        console.log("  [OK] vouch revoked; count:", auth.vouchCount(coordinatorSubject, members.coordinator));
+        console.log("  coordinator still eligible:", auth.eligible(coordinatorSubject, members.coordinator));
 
-        // Re-vouch to ensure coordinator can continue demo
-        console.log("\n-> Re-vouching coordinator for continued demo...");
         vm.broadcast(deployerPrivateKey);
-        eligMod.vouchFor(members.coordinator, coordinatorHatId);
-        console.log("  [OK] coordinator re-vouched");
+        auth.vouch(coordinatorSubject, members.coordinator);
+        console.log("  [OK] coordinator re-vouched for the rest of the demo");
 
-        console.log("\n[OK] Two-Level Vouching System with Claim Pattern Demonstrated");
+        console.log("\n[OK] Vouch attestor demonstrated");
         console.log("  member1: MEMBER (vouched by ADMIN, claimed)");
         console.log("  member2: MEMBER (vouched by member1, claimed)");
         console.log("  coordinator: COORDINATOR (vouched by ADMIN, claimed)");
-        console.log("  Hierarchy allows MEMBERs to vouch for new MEMBERs!");
-        console.log("  Users must explicitly claim hats after being vouched!");
+        console.log("  Vouching grants ELIGIBILITY; the user's claim is what grants MEMBERSHIP.");
     }
 
     /*=========================== STEP 4: TOKENS ===========================*/
@@ -545,9 +511,9 @@ contract RunOrgActionsAdvanced is Script {
 
         // Set up task permissions: MEMBER, COORDINATOR, and ADMIN can claim tasks
         uint256[] memory claimHats = new uint256[](3);
-        claimHats[0] = org.roleHatIds[0]; // MEMBER
-        claimHats[1] = org.roleHatIds[1]; // COORDINATOR
-        claimHats[2] = org.roleHatIds[3]; // ADMIN
+        claimHats[0] = org.roleSubjectIds[0]; // MEMBER
+        claimHats[1] = org.roleSubjectIds[1]; // COORDINATOR
+        claimHats[2] = org.roleSubjectIds[3]; // ADMIN
 
         vm.broadcast(memberKeys.coordinator);
         bytes32 projectId = tm.createProject(

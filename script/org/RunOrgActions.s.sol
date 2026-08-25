@@ -9,7 +9,6 @@ import {TaskManager} from "../../src/TaskManager.sol";
 import {HybridVoting} from "../../src/HybridVoting.sol";
 import {ParticipationToken} from "../../src/ParticipationToken.sol";
 import {QuickJoin} from "../../src/QuickJoin.sol";
-import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {Executor, IExecutor} from "../../src/Executor.sol";
 import {IHybridVotingInit} from "../../src/libs/ModuleDeploymentLib.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
@@ -190,7 +189,6 @@ contract RunOrgActions is Script {
     OrgContracts public org;
     MemberAddresses public members;
     MemberKeys public memberKeys;
-    IHats public hats;
 
     /*=========================== MAIN ===========================*/
 
@@ -230,12 +228,9 @@ contract RunOrgActions is Script {
         string memory infraJson = vm.readFile("script/config/infrastructure.json");
         address orgDeployerAddr = vm.parseJsonAddress(infraJson, ".orgDeployer");
         address globalAccountRegistry = vm.parseJsonAddress(infraJson, ".globalAccountRegistry");
-        address hatsAddr = vm.parseJsonAddress(infraJson, ".hatsProtocol");
         address orgRegistryAddr = vm.parseJsonAddress(infraJson, ".orgRegistry");
 
         require(orgDeployerAddr != address(0), "OrgDeployer not found - deploy infrastructure first");
-
-        hats = IHats(hatsAddr);
 
         // Get org config path
         string memory configPath = vm.envOr("ORG_CONFIG_PATH", string("script/config/org-config-governance-demo.json"));
