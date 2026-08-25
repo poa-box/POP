@@ -200,6 +200,8 @@ abstract contract MigrateOrgBase is OrgCatalog {
         // Predeploy EXACTLY as broadcast will: DD CREATE2 at the predicted address.
         // DeterministicDeployer.deploy is onlyOwner (Hudson) — same signer as the broadcast step.
         _discoverSubjects(s);
+        // T3: real legacy kick injected BEFORE the seed proposals are built (ban path non-vacuity).
+        _injectSyntheticBan(s, candidates);
         vm.startPrank(HUDSON);
         address authority = _ddDeployAuthority(s);
         vm.stopPrank();

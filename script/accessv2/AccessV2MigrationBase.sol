@@ -182,6 +182,12 @@ interface IEMWriteMig {
     function setWearerEligibility(address wearer, uint256 hatId, bool eligible, bool standing) external;
     function mintHatToAddress(uint256 hatId, address wearer) external;
     function setEmailVerified(address wearer, uint256[] calldata hatIds) external;
+    // A real governance kick on the DEPLOYED pre-FIX-0 EM needs all three: the explicit deny alone is
+    // ADDITIVE there (EligibilityLogic._getWearerStatus ORs hierarchy with the vouch verdict, and the
+    // FIX-0 explicit-ban short-circuit is absent from the live bytecode), so a vouched wearer stays
+    // eligible until their vouch count is cleared too.
+    function clearWearerVouches(address wearer, uint256 hatId) external;
+    function clearEmailVerified(address wearer, uint256 hatId) external;
 }
 
 interface IToggleMig {
@@ -308,6 +314,11 @@ abstract contract AccessV2MigrationBase is Script {
     uint256[] internal _tmProjHats;
     uint256[] internal _tmProjMasks;
     bool internal _tmPermsLoaded;
+
+    // T3 (assertTautology-3): the (subject, user) pair the SYNTHETIC-BAN drill kicked on the live
+    // EligibilityModule before seeding. Zero when the drill did not run for this org.
+    uint256 internal _synthBanSubject;
+    address internal _synthBanUser;
 
     /*═══════════════════════════════ Chain helpers ═══════════════════════════════*/
     function _poaManager(OrgSpec memory s) internal pure returns (address) {
@@ -721,6 +732,102 @@ abstract contract AccessV2MigrationBase is Script {
         } catch {
             return false;
         }
+    }
+
+    /*═══════════════════════════════ T3: SYNTHETIC-BAN DRILL (assertTautology-3) ═══════════════════════════════*/
+
+    /// @notice Inject a REAL legacy kick before the seed so the RuleKind.Ban porting path actually
+    ///         executes against a live ban. Rationale (assertTautology-3): the behavior-preserving
+    ///         EFFECTIVE-ban set is empty or near-empty on all four orgs, so `_buildBans` could
+    ///         mis-encode RuleKind, drop chunks or seed nothing and every sim still PASSed — the
+    ///         per-ban asserts ran ZERO times.
+    /// @dev    Writes through the org's LIVE EligibilityModule admin surface (`setWearerEligibility`,
+    ///         superAdmin == the org Executor — the same surface a real kick uses), pranked as the
+    ///         Executor, and only ACCEPTS the pair when the module's COMBINED `getWearerStatus` actually
+    ///         reports the wearer ineligible: on the deployed pre-FIX-0 EM an explicit deny is ADDITIVE
+    ///         and can be vouch/hierarchy-overridden, which is precisely why the live effective-ban set
+    ///         is empty. Candidates that would break the rest of the ceremony are skipped (the Executor
+    ///         itself, HybridVoting creator-hat wearers — the governed sims need one to author
+    ///         proposals — and any wearer who is the SOLE member of the subject).
+    ///         Each attempt is snapshot-isolated so a non-effective deny leaves NO explicit rule behind.
+    function _injectSyntheticBan(OrgSpec memory s, address[] memory candidates) internal {
+        if (!s.banDrill) return;
+        uint256 topHat = _topHatId(s);
+        uint256 foundSubject;
+        address foundUser;
+        for (uint256 si; si < _subjects.length && foundSubject == 0; ++si) {
+            uint256 subject = _subjects[si];
+            if (subject == topHat) continue;
+            address[] memory members = _currentMembers(s, subject, candidates);
+            if (members.length < 2) continue; // never empty a subject
+            for (uint256 j; j < members.length; ++j) {
+                address user = members[j];
+                if (user == s.executor) continue;
+                uint256 snap = vm.snapshotState();
+                bool wrote = _kickOnLegacyEM(s, user, subject);
+                if (!wrote) {
+                    vm.revertToState(snap);
+                    continue;
+                }
+                // Accept only a kick that is EFFECTIVE (combined-ineligible, flagged by the ban scanner,
+                // and no longer a Hats wearer) AND that leaves the org governable — the governed sims
+                // still need a live HybridVoting creator-hat wearer among the candidates to author the
+                // seed/cutover proposals (on KUBI every member wears a creator hat, so excluding all of
+                // them upfront would leave no drill target at all).
+                bool effective = !_emCombinedEligible(s, user, subject) && _isLegacyBanned(s, user, subject)
+                    && !IHatsMin(HATS).isWearerOfHat(user, subject) && _anyHvCreatorAmong(s, candidates);
+                if (effective) {
+                    foundSubject = subject;
+                    foundUser = user;
+                    break; // keep the state: the kick stands for the rest of the ceremony
+                }
+                vm.revertToState(snap);
+            }
+        }
+        require(foundSubject != 0, "T3: synthetic-ban drill could not make any explicit deny EFFECTIVE");
+        _synthBanSubject = foundSubject;
+        _synthBanUser = foundUser;
+        console.log("  [T3] synthetic ban injected on subject:", foundSubject);
+        console.log("       kicked wearer:", foundUser);
+    }
+
+    /// @dev A REAL governance kick on the org's LIVE EligibilityModule, pranked as the superAdmin
+    ///      (the org Executor). All three writes are needed on the DEPLOYED pre-FIX-0 bytecode: the
+    ///      explicit (false,false) rule is only the hierarchy arm there, so a wearer who meets the vouch
+    ///      quorum (KUBI/Poa: every non-admin subject is vouch-configured) stays eligible until
+    ///      clearWearerVouches zeroes the count. clearEmailVerified is belt-and-braces (the email path is
+    ///      already skipped once an explicit rule exists). Returns false if the deny itself did not land.
+    function _kickOnLegacyEM(OrgSpec memory s, address user, uint256 subject) internal returns (bool) {
+        vm.prank(s.executor);
+        try IEMWriteMig(s.eligibilityModule).setWearerEligibility(user, subject, false, false) {}
+        catch {
+            return false;
+        }
+        vm.prank(s.executor);
+        try IEMWriteMig(s.eligibilityModule).clearWearerVouches(user, subject) {} catch {}
+        vm.prank(s.executor);
+        try IEMWriteMig(s.eligibilityModule).clearEmailVerified(user, subject) {} catch {}
+        return true;
+    }
+
+    function _emCombinedEligible(OrgSpec memory s, address user, uint256 subject) internal view returns (bool) {
+        try IEMMig(s.eligibilityModule).getWearerStatus(user, subject) returns (bool e, bool) {
+            return e;
+        } catch {
+            return false;
+        }
+    }
+
+    /// @dev At least one candidate still wears a HybridVoting creator hat (the governed sims need one to
+    ///      author proposals). Evaluated AFTER the drill's kick lands, inside the snapshot.
+    function _anyHvCreatorAmong(OrgSpec memory s, address[] memory candidates) internal view returns (bool) {
+        uint256[] memory ch = IHVMig(s.hv).creatorHats();
+        for (uint256 i; i < ch.length; ++i) {
+            for (uint256 j; j < candidates.length; ++j) {
+                if (IHatsMin(HATS).isWearerOfHat(candidates[j], ch[i])) return true;
+            }
+        }
+        return false;
     }
 
     /// @dev Push seedRules+seedMemberships for one (subject, member-slice) — the invariant unit.

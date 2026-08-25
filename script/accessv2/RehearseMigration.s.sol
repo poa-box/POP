@@ -118,6 +118,9 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         //     the SAME Call[] content the real proposals will carry (one source of truth).
         _discoverSubjects(s);
         console.log("  subjects discovered:", _subjects.length);
+        // T3: inject a REAL legacy kick BEFORE any seed content is built, so the ban-porting path runs
+        //     against a live effective ban instead of an empty set.
+        _injectSyntheticBan(s, candidates);
         address authority = _predeployAuthority(s);
         IExecutor.Call[][] memory seedBatches = _buildSeedBatches(s, authority, candidates);
         console.log("  seed batches (proposals):", seedBatches.length);
@@ -676,6 +679,28 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             }
         }
         console.log("  BANS ported+verified:", total);
+        // T3 (assertTautology-3): on a drill org the ban path is NON-VACUOUS by construction — assert the
+        // exact injected pair specifically (not just "some ban existed"), including that the wearer's
+        // PRIOR membership was never seeded and that they cannot claim their way back in.
+        if (s.banDrill) {
+            require(_synthBanSubject != 0, "T3: ban drill org but no synthetic ban was injected");
+            require(total >= 1, "T3: synthetic ban did not reach the ported ban set");
+            (, bool sbEligible,, AccessV2Types.RuleKind sbKind) = a.getStatus(_synthBanSubject, _synthBanUser);
+            require(sbKind == AccessV2Types.RuleKind.Ban, "T3: synthetic ban not ported as RuleKind.Ban");
+            require(!sbEligible, "T3: synthetically-banned wearer is eligible post-cutover");
+            require(!a.isMember(_synthBanSubject, _synthBanUser), "T3: synthetically-banned wearer is a member");
+            require(
+                !_expectMember[_synthBanSubject][_synthBanUser],
+                "T3: synthetically-banned wearer's PRIOR membership was seeded (ban lost the race)"
+            );
+            vm.prank(_synthBanUser);
+            try IMembershipAuthority(authority).claim(_synthBanSubject) {
+                revert("T3: synthetically-banned wearer could still claim");
+            } catch (bytes memory e) {
+                require(bytes4(e) == IMembershipAuthority.NotClaimable.selector, "T3: banned-claim wrong revert");
+            }
+            console.log("  [T3] synthetic-ban drill: ported as Ban, ineligible, non-member, claim rejected");
+        }
         // Defense-in-depth: a ported-banned wearer's claim reverts even where the subject is default-ALLOW.
         if (firstBanned != address(0)) {
             vm.prank(firstBanned);
@@ -686,16 +711,23 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
             }
         }
         // Reconcile the EFFECTIVE ban count against the RAW explicit-deny count (the recon enumeration).
-        uint256 rawDenies = _rawExplicitDenyCount(s, candidates);
+        (uint256 rawDenies, uint256 denySubjects) = _rawExplicitDenyCensus(s, candidates);
         console.log("  raw explicit-deny rules found (recon enumeration):", rawDenies);
+        console.log("  distinct subjects carrying a raw deny:", denySubjects);
         require(rawDenies >= total, "raw-deny enumeration must be a superset of effective bans");
-        if (keccak256(bytes(s.name)) == keccak256(bytes("kubi"))) {
-            // The recon flagged KUBI's raw deny rules (0x439831a0/0xb1392efc on Executive B,
-            // 0x12e32ea6/0x3daa26ce on member A). The enumeration MACHINERY must still surface them
-            // (>=2), proving the ban scanner works — but on the LIVE pre-FIX-0 EM every one is
-            // vouch/hierarchy-OVERRIDDEN (getWearerStatus == eligible), so the behavior-preserving
-            // effective-ban set is 0. Porting them anyway would regress live-eligible members.
-            require(rawDenies >= 2, "KUBI: raw-deny enumeration must find >=2 kicks (scanner sanity)");
+        // NOTE: `_lower`/`_lowerName` cast `string memory -> bytes memory` and lowercase IN PLACE, so
+        // s.name is already lowercased by the first _loadCandidates/_loadTmPerms call. Compare through
+        // _lower() so the branch is case-robust either way.
+        if (keccak256(bytes(_lower(s.name))) == keccak256("kubi")) {
+            // The recon flagged KUBI's FOUR raw deny rules — 0x439831a0/0xb1392efc on the Executive hat
+            // and 0x12e32ea6/0x3daa26ce on the member hat — all re-verified live. T3 pins the census
+            // instead of the old `>= 2` floor (which passed even if subject discovery dropped the
+            // Executive hat entirely, or the candidate fixture lost both Executive-banned addresses —
+            // exactly the halved-scanner failure the assert exists to catch): the scanner must find
+            // EXACTLY the 4 recon kicks plus the 1 synthetic-ban-drill kick, spread over EXACTLY the 2
+            // subjects that carry them.
+            require(rawDenies == 5, "KUBI: raw-deny census != 4 recon kicks + 1 drill kick (scanner halved?)");
+            require(denySubjects == 2, "KUBI: raw denies must span EXACTLY 2 subjects (member + Executive)");
             if (total == 0) {
                 console.log(
                     "  [A3 FINDING] KUBI raw deny rules are all vouch/hierarchy-OVERRIDDEN on the live"
@@ -710,16 +742,25 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
     ///      per-wearer rule is NOT eligible), independent of the combined verdict. This is the recon's
     ///      enumeration surface — used only to prove the ban scanner sees the live deny rules and to
     ///      reconcile them against the (behavior-preserving) effective-ban set.
-    function _rawExplicitDenyCount(OrgSpec memory s, address[] memory candidates) internal view returns (uint256 n) {
+    ///      Returns both the total pair count and the number of DISTINCT subjects carrying at least one
+    ///      raw deny — the second figure is what pins the census against a halved scanner (T3).
+    function _rawExplicitDenyCensus(OrgSpec memory s, address[] memory candidates)
+        internal
+        view
+        returns (uint256 n, uint256 subjectsWithDenies)
+    {
         for (uint256 si; si < _subjects.length; ++si) {
             uint256 subject = _subjects[si];
+            uint256 perSubject;
             for (uint256 j; j < candidates.length; ++j) {
                 try IEMMig(s.eligibilityModule).hasSpecificWearerRules(candidates[j], subject) returns (bool hasRule) {
                     if (!hasRule) continue;
                     (bool eligible,) = IEMMig(s.eligibilityModule).getWearerRules(candidates[j], subject);
-                    if (!eligible) n++;
+                    if (!eligible) perSubject++;
                 } catch {}
             }
+            n += perSubject;
+            if (perSubject > 0) subjectsWithDenies++;
         }
     }
 
