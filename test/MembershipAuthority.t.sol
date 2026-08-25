@@ -1175,6 +1175,87 @@ contract MembershipAuthoritySeedVouchersTest is MembershipAuthorityBase {
         assertEq(auth.vouchCount(subject, alice), 1, "fresh vouch at new gen");
     }
 
+    /// @dev lockdown contractDelta-0: an exact re-run must be a no-op (previously it clobbered the
+    ///      count to 0 — evicting quorum-dependent members at the next reconcile and jamming both
+    ///      revokeVouch (c==0) and re-vouch (AlreadyVouched)).
+    function testSeedVouchersExactRerunIsIdempotent() public {
+        address[] memory vs = new address[](2);
+        vs[0] = bob;
+        vs[1] = dave;
+        auth.seedVouchers(subject, alice, vs);
+        assertEq(auth.vouchCount(subject, alice), 2);
+        auth.seedVouchers(subject, alice, vs); // exact re-run (repair/replayed seed proposal)
+        assertEq(auth.vouchCount(subject, alice), 2, "re-run must not clobber the count");
+        vm.prank(bob);
+        auth.revokeVouch(subject, alice); // ported voucher still revocable after the re-run
+        assertEq(auth.vouchCount(subject, alice), 1);
+    }
+
+    /// @dev lockdown contractDelta-0: repair-by-reseed after clearUserVouches. The gen bump strands
+    ///      the old records; a re-seed must REFRESH them (stale-aware liveness), not silently skip.
+    function testSeedVouchersRepairAfterClearUserVouches() public {
+        address[] memory vs = new address[](2);
+        vs[0] = bob;
+        vs[1] = dave;
+        auth.seedVouchers(subject, alice, vs);
+        auth.clearUserVouches(subject, alice);
+        assertEq(auth.vouchCount(subject, alice), 0);
+        auth.seedVouchers(subject, alice, vs); // governance re-port
+        assertEq(auth.vouchCount(subject, alice), 2, "stale records must be refreshed and counted");
+        vm.prank(dave);
+        auth.revokeVouch(subject, alice); // refreshed record is live for revoke
+        assertEq(auth.vouchCount(subject, alice), 1);
+        vm.prank(bob);
+        vm.expectRevert(IMembershipAuthority.AlreadyVouched.selector);
+        auth.vouch(subject, alice); // and live for the double-vouch guard
+    }
+
+    /// @dev lockdown contractDelta-0: a voucher list split across two calls must SUM, not overwrite.
+    function testSeedVouchersSplitCallsAccumulate() public {
+        _seedVoucher(alice, bob);
+        assertEq(auth.vouchCount(subject, alice), 1);
+        _seedVoucher(alice, dave);
+        assertEq(auth.vouchCount(subject, alice), 2, "second call must accumulate");
+    }
+
+    /// @dev lockdown contractDelta-1: acceptedAt backdating is PAUSED-gated. While paused (the whole
+    ///      ceremony) seeds backdate to 1; once unpaused, seedMemberships stamps block.timestamp so a
+    ///      post-cutover governance seed cannot mint retroactively-eligible voters.
+    function testSeedMembershipsBackdatesOnlyWhilePaused() public {
+        uint256[] memory subs = new uint256[](1);
+        address[] memory usrs = new address[](1);
+        AccessV2Types.RuleKind[] memory kinds = new AccessV2Types.RuleKind[](1);
+        bool[] memory del = new bool[](1);
+        subs[0] = subject;
+        kinds[0] = AccessV2Types.RuleKind.Grant;
+
+        auth.setPaused(true);
+        usrs[0] = alice;
+        auth.seedRules(subs, usrs, kinds, del);
+        auth.seedMemberships(subs, usrs);
+        assertEq(auth.activeMemberSince(subject, alice), 1, "paused seed backdates to epoch");
+
+        auth.setPaused(false);
+        vm.warp(vm.getBlockTimestamp() + 100);
+        usrs[0] = carol;
+        auth.seedRules(subs, usrs, kinds, del);
+        auth.seedMemberships(subs, usrs);
+        assertEq(
+            auth.activeMemberSince(subject, carol),
+            vm.getBlockTimestamp(),
+            "unpaused seed stamps now (anti-packing preserved)"
+        );
+    }
+
+    /// @dev lockdown contractDelta-4 (legacy vouchFor parity): with self-voucher configs now legal,
+    ///      a member must not count a self-vouch toward their own retention quorum.
+    function testCannotVouchForSelf() public {
+        auth.configureVouchAttestor(voucher, 1, voucher); // self-voucher config (linted, legal)
+        vm.prank(bob);
+        vm.expectRevert(IMembershipAuthority.CannotVouchForSelf.selector);
+        auth.vouch(voucher, bob);
+    }
+
     function testSeedVouchersRejectsZeroUser() public {
         address[] memory vs = new address[](1);
         vs[0] = bob;

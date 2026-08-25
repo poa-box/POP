@@ -106,6 +106,10 @@ contract MembershipAuthority is Initializable, IMembershipAuthority {
         Lib.Layout storage l = Lib.layout();
         Lib._gateNonExecutor(l);
         if (user == address(0)) revert ZeroAddress();
+        // Legacy-parity guard (lockdown contractDelta-4): vouchFor reverts CannotVouchForSelf, and the
+        // C1 self-voucher relaxation (Execs-vouch-Execs configs) made this reachable — without it a
+        // sitting member could count a self-vouch toward their own retention quorum.
+        if (msg.sender == user) revert CannotVouchForSelf();
         Lib.VouchCfg storage cfg = l.vouchConfigs[subject];
         if (cfg.quorum == 0) revert WiringIncompatible();
         if (!Lib._isMember(l, cfg.voucherSubject, msg.sender)) revert NotAuthorizedManager();

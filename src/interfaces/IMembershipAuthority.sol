@@ -124,6 +124,7 @@ interface IMembershipAuthority {
     // signature; needed for revokeVouch's per-voucher accounting.
     error AlreadyVouched();
     error HasNotVouched();
+    error CannotVouchForSelf();
     error PendingActionExists(); // one in-flight pending per (subject,user) at a time
 
     /*═══════════════════════════════ Events ═══════════════════════════════*/

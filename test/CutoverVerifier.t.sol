@@ -62,6 +62,18 @@ contract MockHats {
     }
 }
 
+contract MockHub {
+    address internal _hats;
+
+    function setHatsPtr(address h) external {
+        _hats = h;
+    }
+
+    function HATS() external view returns (address) {
+        return _hats;
+    }
+}
+
 contract MockOrgRegistry {
     mapping(bytes32 => address) internal _exec;
     mapping(bytes32 => bool) internal _exists;
@@ -84,6 +96,7 @@ contract CutoverVerifierTest is Test {
     MockAuthority internal authority;
     MockHats internal hats;
     MockOrgRegistry internal orgRegistry;
+    MockHub internal hub;
 
     bytes32 internal constant ORG_ID = keccak256("org.cutover.test");
     address internal executor = address(0xE9EC);
@@ -97,7 +110,9 @@ contract CutoverVerifierTest is Test {
         authority = new MockAuthority();
         hats = new MockHats();
         orgRegistry = new MockOrgRegistry();
-        verifier = new CutoverVerifier(address(hats), address(orgRegistry));
+        hub = new MockHub();
+        hub.setHatsPtr(address(router)); // the SUPPLIED router IS the hub's live pointer (canonical)
+        verifier = new CutoverVerifier(address(hats), address(orgRegistry), address(hub));
         _happyState();
     }
 
@@ -135,6 +150,20 @@ contract CutoverVerifierTest is Test {
 
     function _verify() internal view {
         verifier.verify(ORG_ID, address(authority), address(router), _subjects(), _counts(), _supplies());
+    }
+
+    /// @dev lockdown contractDelta-2: a batch naming any router OTHER than the hub's live HATS()
+    ///      pointer reverts RouterNotCanonical — check (d) is enforced on-chain, not self-referentially.
+    function testRevertsOnNonCanonicalRouter() public {
+        MockRouter foreign = new MockRouter();
+        foreign.setAuthorityOf(ADMIN, address(authority));
+        foreign.setAuthorityOf(ROLE, address(authority));
+        foreign.setWears(executor, ADMIN, true);
+        foreign.setActive(ADMIN, true);
+        vm.expectRevert(
+            abi.encodeWithSelector(CutoverVerifier.RouterNotCanonical.selector, address(router), address(foreign))
+        );
+        verifier.verify(ORG_ID, address(authority), address(foreign), _subjects(), _counts(), _supplies());
     }
 
     function testImmutablesPinned() public view {

@@ -1028,9 +1028,12 @@ abstract contract AccessV2MigrationBase is Script {
         // seedRules/seedMemberships are executor-gated and pause-exempt, and run before the unpause.
         (IExecutor.Call[] memory delta,) = _buildDeltaSeed(s, authority, candidates);
 
-        // The batch is `delta` + 11 core calls + 1 trailing CutoverVerifier.verify (when wired).
-        bool withVerify = _verifier != address(0);
-        batch = new IExecutor.Call[](delta.length + (withVerify ? 12 : 11));
+        // The batch is `delta` + 11 core calls + 1 trailing CutoverVerifier.verify. The verifier is
+        // MANDATORY (lockdown storageSizeOps-0): an unverified cutover batch must be UNBUILDABLE —
+        // the silent `withVerify` omission previously let GenerateBatches emit production JSON with
+        // NO in-batch verification at all. Every caller must wire _verifier first.
+        require(_verifier != address(0), "CutoverVerifier not wired (_verifier unset) - refusing to build cutover");
+        batch = new IExecutor.Call[](delta.length + 12);
         require(batch.length <= MAX_CALLS, "cutover batch exceeds Executor MAX_CALLS (freeze legacy joins)");
         uint256 k;
 
@@ -1088,7 +1091,7 @@ abstract contract AccessV2MigrationBase is Script {
         //     org Executor + is active through the router. A failed check reverts the ENTIRE batch, so
         //     the runbook's "the cutover batch itself require()s counts and router-through resolution"
         //     is now TRUE (was previously sim-only — specOrder-2 / simVsBroadcast-1 / seedCompleteness-2).
-        if (withVerify) {
+        {
             (uint256[] memory subjects, uint32[] memory expectedCounts, uint32[] memory expectedSupplies) =
                 _cutoverExpectedState(s, authority, candidates);
             batch[k++] = IExecutor.Call({

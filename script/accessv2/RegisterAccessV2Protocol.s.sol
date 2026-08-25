@@ -172,9 +172,11 @@ abstract contract AccessV2RegisterBase is Script {
     }
 
     /// @dev CREATE3-deploy (idempotently) the CutoverVerifier for this chain, pinning `hats` (canonical)
-    ///      + this chain's `orgRegistry` as immutables.
-    function _deployCutoverVerifier(address orgRegistry) internal returns (address verifier) {
-        bytes memory code = abi.encodePacked(type(CutoverVerifier).creationCode, abi.encode(HATS, orgRegistry));
+    ///      + this chain's `orgRegistry` + `paymasterHub` as immutables (the hub pin makes the router
+    ///      canonicality check on-chain — lockdown contractDelta-2).
+    function _deployCutoverVerifier(address orgRegistry, address paymasterHub) internal returns (address verifier) {
+        bytes memory code =
+            abi.encodePacked(type(CutoverVerifier).creationCode, abi.encode(HATS, orgRegistry, paymasterHub));
         verifier = _ddDeploy(CUTOVER_VERIFIER_TYPE, CUTOVER_VERIFIER_VERSION, code);
     }
 
@@ -231,7 +233,7 @@ abstract contract AccessV2RegisterBase is Script {
         ISatelliteAdmin sat = ISatelliteAdmin(GNOSIS_SATELLITE);
         sat.addContractType("MembershipAuthority", maImpl);
         sat.addContractType("AuthorityRouter", routerImpl);
-        sat.addContractType("CutoverVerifier", _deployCutoverVerifier(GNOSIS_ORG_REGISTRY));
+        sat.addContractType("CutoverVerifier", _deployCutoverVerifier(GNOSIS_ORG_REGISTRY, GNOSIS_PAYMASTER));
         routerProxy = _deployRouterSingleton(routerImpl, GNOSIS_ORG_REGISTRY, GNOSIS_PAYMASTER);
         sat.upgradeBeaconDirect("PaymasterHub", pmImpl, PM_VERSION);
         sat.adminCall(GNOSIS_PAYMASTER, _setHatsCalldata(routerProxy));
@@ -245,7 +247,7 @@ abstract contract AccessV2RegisterBase is Script {
         IHubAdmin hub = IHubAdmin(ARB_HUB);
         hub.addContractType("MembershipAuthority", maImpl);
         hub.addContractType("AuthorityRouter", routerImpl);
-        hub.addContractType("CutoverVerifier", _deployCutoverVerifier(ARB_ORG_REGISTRY));
+        hub.addContractType("CutoverVerifier", _deployCutoverVerifier(ARB_ORG_REGISTRY, ARB_PAYMASTER));
         routerProxy = _deployRouterSingleton(routerImpl, ARB_ORG_REGISTRY, ARB_PAYMASTER);
         hub.upgradeBeaconLocal("PaymasterHub", pmImpl, PM_VERSION);
         hub.adminCall(ARB_PAYMASTER, _setHatsCalldata(routerProxy));

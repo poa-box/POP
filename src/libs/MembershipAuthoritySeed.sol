@@ -158,13 +158,18 @@ library MembershipAuthoritySeed {
         Logic._onlyExecutor(l);
         uint256 n = subjects.length;
         if (users.length != n) revert ArrayLengthMismatch();
+        // acceptedAt backdating is gated on PAUSED (lockdown contractDelta-1): every legitimate
+        // backdated seed — genesis, seed proposals, the delta-seed inside the cutover batch — runs
+        // while the authority is still born-paused (unpause is a LATER cutover call), so seeded
+        // members get acceptedAt = 1 (pre-existing: in-flight proposals stay votable, ruling R7).
+        // Once UNPAUSED, seedMemberships stamps block.timestamp like every runtime path — otherwise
+        // a post-cutover governance seed call would mint voters retroactively eligible for every
+        // open proposal, converting the anti-packing activation gate from "impossible" to "one
+        // seed call away".
+        uint64 acceptedAt = l.paused ? 1 : uint64(block.timestamp);
         for (uint256 i; i < n;) {
             if (!l.membership[subjects[i]][users[i]].accepted) {
-                // acceptedAt = 1 (epoch), NOT block.timestamp (ruling R7): seeded members are
-                // pre-existing, so activeMemberSince = 1 <= any in-flight proposal's createdAt keeps
-                // those proposals votable, while post-cutover claim() members (acceptedAt = now) stay
-                // gated out of pre-claim proposals — the anti-packing property survives.
-                Logic._flipOnAt(l, subjects[i], users[i], 1);
+                Logic._flipOnAt(l, subjects[i], users[i], acceptedAt);
                 emit RoleGranted(subjects[i], users[i], msg.sender, false);
             }
             unchecked {
@@ -198,33 +203,40 @@ library MembershipAuthoritySeed {
     ///         legacy voucher can `revokeVouch` (record present ⇒ count decrements ⇒ reconcile fires
     ///         below quorum) and CANNOT re-`vouch` on top (record present ⇒ AlreadyVouched), so the old
     ///         count-only seed's two bugs — un-revokable ghosts and re-vouch double-counting — are gone.
-    /// @dev Dedups within the call (a repeated voucher is counted once), so the count can never be
-    ///      inflated past the number of distinct real vouchers.
+    /// @dev IDEMPOTENT + stale-aware (lockdown contractDelta-0). The liveness predicate is the SAME
+    ///      triple vouch()/revokeVouch() use — (bool record, recordEpoch == epoch, recordGen == gen) —
+    ///      never the bare boolean: a record left behind by clearUserVouches (gen bump) or resetVouches
+    ///      (epoch bump) is STALE and gets REFRESHED (re-counted at the current epoch/gen), so
+    ///      repair-by-reseed works. The count ACCUMULATES from the wearer's current live count (0 if
+    ///      their wearer-epoch is stale) instead of being overwritten with this call's writes, so an
+    ///      exact re-run is a no-op (never clobbers to 0), and a voucher list split across calls sums.
     function seedVouchers(uint256 subject, address user, address[] calldata vouchers) external {
         Logic.Layout storage l = Logic.layout();
         Logic._onlyExecutor(l);
         if (user == address(0)) revert ZeroAddress();
         uint64 epoch = l.vouchEpoch[subject];
         uint64 gen = l.userVouchGen[subject][user];
-        uint32 written;
+        uint32 live = l.wearerVouchEpoch[subject][user] == epoch ? l.currentVouchCount[subject][user] : 0;
         for (uint256 i; i < vouchers.length;) {
             address v = vouchers[i];
-            if (!l.vouchers[subject][user][v]) {
+            bool isLive = l.vouchers[subject][user][v] && l.voucherRecordEpoch[subject][user][v] == epoch
+                && l.voucherRecordGen[subject][user][v] == gen;
+            if (!isLive) {
                 l.vouchers[subject][user][v] = true;
                 l.voucherRecordEpoch[subject][user][v] = epoch;
                 l.voucherRecordGen[subject][user][v] = gen;
                 emit VoucherSeeded(subject, user, v);
                 unchecked {
-                    ++written;
+                    ++live;
                 }
             }
             unchecked {
                 ++i;
             }
         }
-        l.currentVouchCount[subject][user] = written;
+        l.currentVouchCount[subject][user] = live;
         l.wearerVouchEpoch[subject][user] = epoch;
-        emit VouchSeeded(subject, user, written);
+        emit VouchSeeded(subject, user, live);
     }
 
     function seedEmailVerified(uint256 subject, address[] calldata users) external {

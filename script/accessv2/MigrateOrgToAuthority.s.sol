@@ -65,6 +65,10 @@ interface IHVGov {
 
 abstract contract MigrateOrgBase is OrgCatalog {
     address internal constant DD_DEPLOYER = 0x4aC8B5ebEb9D8C3dE3180ddF381D552d59e8835a;
+    // JSON output subdirectory. GOVERNED SIMS set "sim/" (lockdown storageSizeOps-1): their batches
+    // embed sim-ephemeral protocol addresses (freshly-deployed router/verifier on the fork) and must
+    // NEVER clobber the production artifacts GenerateBatches writes to out/ directly.
+    string internal _outSubdir = "";
     uint32 internal constant VOTE_MINUTES = 10; // sim cadence; real proposals use org-chosen durations
 
     /*──────────────────── DD CREATE2 predeploy (shared by broadcast + sim) ────────────────────*/
@@ -184,6 +188,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
     /*──────────────────── Governed end-to-end sim (per org) ────────────────────*/
 
     function _governedMigrate(OrgSpec memory s) internal {
+        _outSubdir = "sim/"; // sim-ephemeral addresses -> out/sim/, never the production out/ files
         address[] memory candidates = _loadCandidates(s.name);
         console.log(string.concat("\n=== GOVERNED MIGRATE (sim): ", s.name, " ==="));
         require(_topHatDomain(s) != 0, "recorded topHat domain is zero");
@@ -368,7 +373,7 @@ abstract contract MigrateOrgBase is OrgCatalog {
         json = string.concat(json, "\n  ]\n}\n");
         // out/ is gitignored + regenerated (ruling R6) — create it on demand so a fresh checkout can
         // generate without a committed artifact directory.
-        string memory dir = string.concat(vm.projectRoot(), "/script/accessv2/out");
+        string memory dir = string.concat(vm.projectRoot(), "/script/accessv2/out/", _outSubdir);
         vm.createDir(dir, true);
         string memory path = string.concat(dir, "/", _lower(s.name), ".", kind, ".", vm.toString(idx), ".json");
         vm.writeFile(path, json);
@@ -436,6 +441,17 @@ contract GenerateBatches is MigrateOrgBase {
         // protocol wave repointed hub.HATS() to the router; before that wave this correctly reverts).
         address router = _hubHats(s);
         require(_isRouter(router), "hub HATS() is not the AuthorityRouter yet (run protocol wave first)");
+        // Wire the CANONICAL CutoverVerifier (lockdown storageSizeOps-0: this was previously never
+        // set, so the PRODUCTION cutover JSON carried NO in-batch verification). CREATE3 address is
+        // deterministic (salt-only — same type/version strings as RegisterAccessV2Protocol); require
+        // deployed code so a pre-protocol-wave generation fails loudly instead of emitting a batch
+        // that targets an empty address.
+        {
+            DeterministicDeployer dd = DeterministicDeployer(DD_DEPLOYER);
+            address verifier = dd.computeAddress(dd.computeSalt("CutoverVerifier", "v1"));
+            require(verifier.code.length > 0, "CutoverVerifier not deployed (run protocol wave first)");
+            _verifier = verifier;
+        }
         // A5 delta mode: candidates should be RE-ENUMERATED (tools/enumerate-wearers.sh) immediately
         // before this call so any legacy joiner since the seed is picked up as a delta-seed slice at the
         // head of the cutover batch. bindIdx > 0 iff a delta is present.

@@ -22,6 +22,14 @@ interface IMembershipAuthorityCutover {
     function memberCount(uint256 subject) external view returns (uint256);
 }
 
+/// @dev PaymasterHub's live hats pointer — the CANONICAL router identity. Pinning the hub and
+///      resolving the router THROUGH it makes check (d) sound on-chain: a batch generated against
+///      any other router (rehearsal leftover, stale catalog constant, re-registered singleton)
+///      reverts instead of passing self-referential checks while hub sponsorship silently breaks.
+interface IPaymasterHatsPtr {
+    function HATS() external view returns (address);
+}
+
 /// @title CutoverVerifier
 /// @notice STATELESS, plain (non-upgradeable, ZERO storage) verifier for the Access-v2 per-org cutover
 ///         ceremony (ACCESS-V2-SPEC.md §6 step 3). Intended as the LAST call of the cutover Executor
@@ -41,6 +49,8 @@ contract CutoverVerifier {
     address public immutable hats;
     /// @notice OrgRegistry (the org → Executor resolution source).
     address public immutable orgRegistry;
+    /// @notice PaymasterHub proxy — its live HATS() pointer defines the CANONICAL router.
+    address public immutable paymasterHub;
 
     /*═══════════════════════════════ Errors (one per check) ═══════════════════════════════*/
 
@@ -57,6 +67,11 @@ contract CutoverVerifier {
     ///      snapshot and announceWinner — the authority memberCount is BLIND to a fresh legacy wearer,
     ///      so the enumeration-INDEPENDENT supply is the only on-chain signal that a newcomer would be
     ///      toggled off unported. An exact-equality guard makes the regenerate-with-delta discipline real.
+    ///      HONEST SCOPE: an aggregate counter cannot see COMPENSATING churn (one mint + one burn on the
+    ///      same hat inside the voting window nets to equality), nor dynamic-ineligibility flips that
+    ///      move no counter. Those residuals are mitigated procedurally — the runbook's legacy-join
+    ///      freeze between final generation and cutover — and are recoverable post-cutover via
+    ///      governance grant/remove; a per-wearer set commitment was judged not worth the calldata.
     error SupplyDrift(uint256 subject, uint32 expected, uint32 actual);
     /// (c3) memberCount exceeds the canonical Hats supply (the self-referential-parity guard).
     error MemberCountExceedsSupply(uint256 subject, uint256 memberCount, uint32 hatSupply);
@@ -65,9 +80,13 @@ contract CutoverVerifier {
     /// (d2) the admin (topHat) hat is not active through the router (viewHat.active == false).
     error AdminHatInactive(uint256 adminSubject);
 
-    constructor(address hats_, address orgRegistry_) {
+    /// @notice `router` is not the hub's live HATS() pointer — the batch names a NON-CANONICAL router.
+    error RouterNotCanonical(address expected, address actual);
+
+    constructor(address hats_, address orgRegistry_, address paymasterHub_) {
         hats = hats_;
         orgRegistry = orgRegistry_;
+        paymasterHub = paymasterHub_;
     }
 
     /*═══════════════════════════════ Verify ═══════════════════════════════*/
@@ -91,6 +110,11 @@ contract CutoverVerifier {
         uint256 n = subjects.length;
         if (n == 0) revert NoSubjects();
         if (expectedCounts.length != n || expectedSupplies.length != n) revert ArrayLengthMismatch();
+
+        // (0) the supplied router IS the hub's live hats pointer — otherwise every later check is
+        //     self-referential against a router the sponsorship surface never consults.
+        address canonical = IPaymasterHatsPtr(paymasterHub).HATS();
+        if (router != canonical) revert RouterNotCanonical(canonical, router);
 
         // (b) the authority must be UNPAUSED post-cutover (writes live again).
         if (IMembershipAuthorityCutover(authority).paused()) revert AuthorityPaused();

@@ -232,7 +232,7 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         // Deploy the stateless CutoverVerifier (immutable hats + orgRegistry, ZERO storage) so the
         // cutover batch carries its in-batch verify() as the LAST call (§6, C4). Fresh instance per sim
         // mirrors the Phase-0 protocol singleton; production resolves the registered per-chain address.
-        _verifier = address(new CutoverVerifier(HATS, _orgRegistry(s)));
+        _verifier = address(new CutoverVerifier(HATS, _orgRegistry(s), _paymaster(s)));
     }
 
     /// @dev A7 idempotency helper: has PoaManager registered a beacon for this contract type yet?
