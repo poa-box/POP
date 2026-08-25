@@ -172,10 +172,9 @@ contract GovernanceFactory {
 
         /* 1. Deploy HybridVoting (Governance Mechanism) */
         {
-            // Resolve proposal creator roles to subject ids
-            uint256[] memory creatorSubjects = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.hybridProposalCreatorRolesBitmap
-            );
+            // Proposal-creator subjects
+            uint256[] memory creatorSubjects =
+                RoleResolver.resolveRoleBitmap(roleSubjectIds, params.hybridProposalCreatorRolesBitmap);
 
             // Update voting classes with token addresses and class subject ids. Classes with an empty
             // id list are backfilled with the subjects of canVote=true roles ONLY, so RoleConfig.canVote
@@ -212,14 +211,11 @@ contract GovernanceFactory {
 
         /* 2. Deploy DirectDemocracyVoting (Polling Mechanism) */
         {
-            // Resolve voting and creator roles to subject ids
-            uint256[] memory votingSubjects = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.ddVotingRolesBitmap
-            );
+            // Poll voter / creator subjects
+            uint256[] memory votingSubjects = RoleResolver.resolveRoleBitmap(roleSubjectIds, params.ddVotingRolesBitmap);
 
-            uint256[] memory creatorSubjects = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.ddCreatorRolesBitmap
-            );
+            uint256[] memory creatorSubjects =
+                RoleResolver.resolveRoleBitmap(roleSubjectIds, params.ddCreatorRolesBitmap);
 
             ddBeacon = BeaconDeploymentLib.createBeacon(
                 ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, params.poaManager, executor, params.autoUpgrade, address(0)

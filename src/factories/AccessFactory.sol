@@ -60,7 +60,6 @@ contract AccessFactory {
     struct AuthorityParams {
         bytes32 orgId;
         address poaManager;
-        address orgRegistry;
         address executor;
         address deployer; // OrgDeployer address for registration callbacks
         address paymasterHub;
@@ -115,7 +114,7 @@ contract AccessFactory {
      */
     function deployAuthority(AuthorityParams memory params) external returns (AuthorityResult memory result) {
         if (
-            params.poaManager == address(0) || params.orgRegistry == address(0) || params.executor == address(0)
+            params.poaManager == address(0) || params.executor == address(0) || params.deployer == address(0)
                 || params.paymasterHub == address(0)
         ) {
             revert InvalidAddress();
@@ -181,9 +180,8 @@ contract AccessFactory {
         {
             // Auto-join subjects for new members. Once the authority is wired these are re-derived
             // from the QJ_AUTOJOIN perm rows; the stored list is the rollback-path copy.
-            uint256[] memory memberSubjects = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.quickJoinRolesBitmap
-            );
+            uint256[] memory memberSubjects =
+                RoleResolver.resolveRoleBitmap(params.roleSubjectIds, params.roleAssignments.quickJoinRolesBitmap);
 
             quickJoinBeacon = _createBeacon(
                 ModuleTypes.QUICK_JOIN_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)
@@ -211,13 +209,11 @@ contract AccessFactory {
                 : string(abi.encodePacked(params.orgName, " Token"));
             string memory tSymbol = bytes(params.tokenSymbol).length > 0 ? params.tokenSymbol : "PT";
 
-            uint256[] memory memberSubjects = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.tokenMemberRolesBitmap
-            );
+            uint256[] memory memberSubjects =
+                RoleResolver.resolveRoleBitmap(params.roleSubjectIds, params.roleAssignments.tokenMemberRolesBitmap);
 
-            uint256[] memory approverSubjects = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.tokenApproverRolesBitmap
-            );
+            uint256[] memory approverSubjects =
+                RoleResolver.resolveRoleBitmap(params.roleSubjectIds, params.roleAssignments.tokenApproverRolesBitmap);
 
             participationTokenBeacon = _createBeacon(
                 ModuleTypes.PARTICIPATION_TOKEN_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)

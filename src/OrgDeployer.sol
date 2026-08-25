@@ -650,7 +650,6 @@ contract OrgDeployer is Initializable {
         AccessFactory.AuthorityParams memory p;
         p.orgId = params.orgId;
         p.poaManager = l.poaManager;
-        p.orgRegistry = address(l.orgRegistry);
         p.executor = executor;
         p.deployer = address(this);
         p.paymasterHub = l.paymasterHub;
