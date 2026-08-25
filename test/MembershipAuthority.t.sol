@@ -1267,7 +1267,18 @@ contract MembershipAuthoritySeedVouchersTest is MembershipAuthorityBase {
 /*═══════════════════════════════ C3: seed acceptedAt = epoch(1), anti-packing survives ═══════════════════════════════*/
 
 contract MembershipAuthoritySeedAcceptedAtTest is MembershipAuthorityBase {
+    /// @dev Seed the way the CEREMONY does: while the authority is still born-PAUSED. The lock-down
+    ///      round gated acceptedAt backdating on `l.paused` (contractDelta-1), so a seed that models
+    ///      the real migration must pause first — every ceremony seed call (genesis, the seed
+    ///      proposals, the A5 delta-seed at the head of the cutover batch) runs before the unpause,
+    ///      which is a LATER cutover call. `_seedMemberUnpaused` is the post-cutover shape.
     function _seedMember(uint256 subject, address user) internal {
+        auth.setPaused(true);
+        _seedMemberUnpaused(subject, user);
+        auth.setPaused(false);
+    }
+
+    function _seedMemberUnpaused(uint256 subject, address user) internal {
         uint256[] memory subs = new uint256[](1);
         subs[0] = subject;
         address[] memory users = new address[](1);
@@ -1283,10 +1294,23 @@ contract MembershipAuthoritySeedAcceptedAtTest is MembershipAuthorityBase {
     function testSeededMemberAcceptedAtIsEpochOne() public {
         vm.warp(1_000_000); // seed happens at a real timestamp
         uint256 subject = _role("Titled", 0);
-        _seedMember(subject, alice);
+        _seedMember(subject, alice); // paused — the ceremony shape
         (,, uint64 acceptedAt,) = auth.getStatus(subject, alice);
         assertEq(acceptedAt, 1, "seeded acceptedAt = epoch 1, not block.timestamp");
         assertEq(auth.activeMemberSince(subject, alice), 1, "activeMemberSince = 1");
+    }
+
+    /// @dev The other half of the paused gate (contractDelta-1): once the authority is UNPAUSED, a
+    ///      governance seedMemberships call is NOT a backdating lever. Without this arm a post-cutover
+    ///      seed proposal would mint voters retroactively eligible for every in-flight proposal,
+    ///      bypassing the anti-packing activation gate.
+    function testUnpausedSeedStampsNowNotEpochOne() public {
+        vm.warp(1_000_000);
+        uint256 subject = _role("Titled", 0);
+        assertFalse(auth.paused(), "authority must be unpaused for this arm");
+        _seedMemberUnpaused(subject, bob);
+        (,, uint64 acceptedAt,) = auth.getStatus(subject, bob);
+        assertEq(acceptedAt, 1_000_000, "unpaused seed must stamp block.timestamp (no retroactive voters)");
     }
 
     function testClaimMemberAcceptedAtIsBlockTimestamp() public {
