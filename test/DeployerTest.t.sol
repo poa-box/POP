@@ -491,6 +491,16 @@ contract DeployerTest is Test {
         deployer.deployFullOrg(params);
     }
 
+    /// @notice A closed role in the QuickJoin bitmap deploys fine but bricks every join, so the
+    ///         deployer rejects the pairing up front instead of letting it reach runtime.
+    function testDeploy_rejectsClosedRoleInTheQuickJoinBitmap() public {
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        params.roleAssignments.quickJoinRolesBitmap = 1 << ROLE_EXECUTIVE; // EXECUTIVE is deny-by-default
+        vm.prank(orgOwner);
+        vm.expectRevert(abi.encodeWithSelector(OrgDeployer.QuickJoinRoleNotOpen.selector, ROLE_EXECUTIVE));
+        deployer.deployFullOrg(params);
+    }
+
     function testDeploy_rejectsDuplicateOrgId() public {
         _deployDefaultOrg(ORG_ID);
         OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);

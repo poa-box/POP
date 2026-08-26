@@ -95,6 +95,9 @@ contract OrgDeployer is Initializable {
     error OrgExistsMismatch();
     error Reentrant();
     error InvalidRoleConfiguration();
+    /// @notice `quickJoinRolesBitmap` addresses a role that is not default-ALLOW, which would make
+    ///         every QuickJoin call revert at runtime.
+    error QuickJoinRoleNotOpen(uint256 roleIndex);
     /// @notice A factory tried to register after the org left bootstrap mode.
     error DeploymentComplete();
 
@@ -355,6 +358,7 @@ contract OrgDeployer is Initializable {
         uint256 len = params.roles.length;
         if (len == 0 || len > MAX_ROLES) revert InvalidRoleConfiguration();
 
+        uint256 quickJoinBitmap = params.roleAssignments.quickJoinRolesBitmap;
         for (uint256 i = 0; i < len; i++) {
             RoleConfigStructs.RoleConfig calldata role = params.roles[i];
             if (bytes(role.name).length == 0) revert InvalidRoleConfiguration();
@@ -362,6 +366,10 @@ contract OrgDeployer is Initializable {
                 if (role.vouching.quorum == 0) revert InvalidRoleConfiguration();
                 if (role.vouching.voucherRoleIndex >= len) revert InvalidRoleConfiguration();
             }
+            // QJ_AUTOJOIN is only reachable for a default-ALLOW (open) role: QuickJoin enumerates the
+            // subjects carrying the perm without any eligibility filter, and the authority rejects a
+            // non-eligible stranger — so a closed role in the bitmap bricks EVERY join at runtime.
+            if (!role.open && quickJoinBitmap & (1 << i) != 0) revert QuickJoinRoleNotOpen(i);
         }
 
         uint256 groupCount = params.groups.length;
