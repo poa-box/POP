@@ -818,9 +818,8 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
         console.log("  raw explicit-deny rules found (recon enumeration):", rawDenies);
         console.log("  distinct subjects carrying a raw deny:", denySubjects);
         require(rawDenies >= total, "raw-deny enumeration must be a superset of effective bans");
-        // NOTE: `_lower`/`_lowerName` cast `string memory -> bytes memory` and lowercase IN PLACE, so
-        // s.name is already lowercased by the first _loadCandidates/_loadTmPerms call. Compare through
-        // _lower() so the branch is case-robust either way.
+        // _lower/_lowerName now COPY (the in-place aliasing bug is fixed), so s.name stays "KUBI";
+        // compare through _lower() anyway so the branch is case-robust.
         if (keccak256(bytes(_lower(s.name))) == keccak256("kubi")) {
             // The recon flagged KUBI's FOUR raw deny rules — 0x439831a0/0xb1392efc on the Executive hat
             // and 0x12e32ea6/0x3daa26ce on the member hat — all re-verified live. T3 pins the census
@@ -1110,9 +1109,13 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
     }
 
     function _lower(string memory v) internal pure returns (string memory) {
-        bytes memory b = bytes(v);
-        for (uint256 i; i < b.length; ++i) {
-            if (b[i] >= 0x41 && b[i] <= 0x5A) b[i] = bytes1(uint8(b[i]) + 32);
+        // COPY before lowercasing: `bytes(v)` aliases the caller's string, and the old in-place
+        // mutation corrupted OrgSpec.name for every later reader — _announceGasLimit's "KUBI"
+        // comparison silently missed, emitting 4M instead of 5M into KUBI's proposal JSONs.
+        bytes memory src = bytes(v);
+        bytes memory b = new bytes(src.length);
+        for (uint256 i; i < src.length; ++i) {
+            b[i] = (src[i] >= 0x41 && src[i] <= 0x5A) ? bytes1(uint8(src[i]) + 32) : src[i];
         }
         return string(b);
     }

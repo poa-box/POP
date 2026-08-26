@@ -8,8 +8,10 @@ pragma solidity ^0.8.20;
 ///      authority code. No key in this spec uses MAX — the tag is RESERVED so adding a scalar key
 ///      later is a new constant, not a semantics migration (rejected-findings §1).
 ///
-///      ctx CONVENTION (§3): ctx == bytes32(0) is GLOBAL; ctx == bytes32(projectId) is TaskManager
-///      per-project. CTX RESOLUTION: project entry exists ? (inheritGlobal ? COMBINE(global,project)
+///      ctx CONVENTION (§3, freeze amendment W4): ctx == bytes32(0) is GLOBAL; TaskManager
+///      per-project rows use ctx == bytes32(projectId + 1) — the +1 offset exists because TM
+///      project ids start at 0, which would collide with the GLOBAL ctx. Hand-authored setPerm
+///      rows MUST apply the offset. CTX RESOLUTION: project entry exists ? (inheritGlobal ? COMBINE(global,project)
 ///      : project) : global, where COMBINE is the key's top-byte fold tag.
 ///
 ///      KEY DERIVATION: `key = (uint256(tag) << 248) | (uint256(keccak256(label)) >> 8)` — the low
@@ -30,7 +32,8 @@ library AccessV2PermKeys {
     bytes32 internal constant HV_CREATE =
         bytes32((uint256(TAG_BOOL_ANY) << 248) | (uint256(keccak256("poa.perm.hv.create")) >> 8));
 
-    // ── TaskManager (OR-mask) ── ctx = projectId; value is the TaskPerm bitmask (uint8 saturation gone, §4)
+    // ── TaskManager (OR-mask) ── ctx = bytes32(projectId + 1) per W4 (0 would collide with GLOBAL);
+    //    value is the TaskPerm bitmask (uint8 saturation gone, §4)
     bytes32 internal constant TM_PERMS =
         bytes32((uint256(TAG_OR_MASK) << 248) | (uint256(keccak256("poa.perm.tm.perms")) >> 8));
 

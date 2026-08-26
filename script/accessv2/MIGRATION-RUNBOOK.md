@@ -28,13 +28,24 @@ v1, PaymasterHub v20, OrgRegistry v2, DD/HV v13, TM/PT/QJ v8, EducationHub v4, E
 FOUNDRY_PROFILE=production forge script script/accessv2/<script>:<SimX> --fork-url <gnosis-gateway|arbitrum> -vvv
 ```
 
+**Env pre-flight (every broadcast step):** `source .env` providing `PRIVATE_KEY` (or
+`DEPLOYER_PRIVATE_KEY`) for Hudson `0xA6F4…b2c9` — the DeterministicDeployer owner AND the
+Satellite (Gnosis) / Hub (Arbitrum) owner — funded on both chains.
+
+**Exact broadcast entrypoints** (sim first, then broadcast, per script per chain):
+- `RegisterAccessV2Protocol.s.sol`: `Step1_DeployImplsGnosis` → `Step2_RegisterAndWireGnosis`;
+  `Step1b_DeployImplsArbitrum` → `Step2b_RegisterAndWireArbitrum`
+- `UpgradeAccessV2Modules.s.sol`: `Step1_DeployImplsGnosis` → `Step2_UpgradeBeaconsGnosis`;
+  `Step1b_DeployImplsArbitrum` → `Step2b_UpgradeBeaconsArbitrum`
+- `SyncAccessV2GlobalRules.s.sol`: `BroadcastGnosis`; `BroadcastArbitrum`
+
 Use `gnosis-gateway` (plain `gnosis` alias rate-limits). A `-32029` / "EVM error" mid-sim is public-RPC
 flakiness — retry, or switch to `gnosis-drpc`; a real failure reproduces on both endpoints.
 
 **Subgraph gate (§6 step-0 item 7):** the v2 subgraph (authority template + fold mirror + pending
 entity) must be published to Studio AND the decentralized gateway on both chains BEFORE the first
 cutover proposal is created (the app reads the gateway, not Studio).
-STATUS 2026-08-26: **Gnosis LIVE and verified** — Studio serves the post-fix PR-211 build
+STATUS 2026-08-25: **Gnosis LIVE and verified** — Studio serves the post-fix PR-211 build
 (deployment QmUAxz2tPcj3FekGtSKnewauZho1rhEqhsMZWffHKASfmb, 0 indexing errors, synced to head;
 verified by probing a fix-removed field). **Arbitrum still syncing.** Before the FIRST cutover
 proposal on each chain, confirm the GATEWAY (not just Studio) serves this schema — the frontend
@@ -43,6 +54,9 @@ capability probe will refuse the v2 surfaces otherwise (by design).
 ## Phase 1 — per-org ceremony (order: Test6 → Decentral Park → Poa → KUBI)
 
 Each org: three ops surfaces in `MigrateOrgToAuthority.s.sol`, env-driven `ORG=TEST6|DP|KUBI|POA`.
+**Chains: Test6, Decentral Park, KUBI = Gnosis (`--rpc-url gnosis`, forks `gnosis-gateway`);
+Poa = Arbitrum (`--rpc-url arbitrum`, forks `arbitrum`).** Substitute accordingly in every
+command below (examples show Gnosis).
 
 1. **Predeploy** (broadcast, Hudson — DeterministicDeployer.deploy is onlyOwner):
    ```sh
@@ -60,10 +74,14 @@ Each org: three ops surfaces in `MigrateOrgToAuthority.s.sol`, env-driven `ORG=T
    ORG=TEST6 FOUNDRY_PROFILE=production forge script script/accessv2/MigrateOrgToAuthority.s.sol:GenerateBatches \
      --fork-url gnosis-gateway
    ```
-   Writes `out/<org>.seed.N.json` + `out/<org>.cutover.1.json`. Batches are LIVE-STATE-DERIVED:
-   **regenerate right before the cutover proposal is created** (the delta-seed discipline). For
-   KUBI-sized orgs, freeze legacy joins (QuickJoin allowlist off) between final generation and
-   cutover execution.
+   Writes `out/<org>.seed.N.json` + `out/<org>.cutover.1.json`. Batches are LIVE-STATE-DERIVED
+   from TWO fixtures that must be refreshed first: `bash script/accessv2/tools/enumerate-wearers.sh`
+   (candidate set) AND `bash script/accessv2/tools/enumerate-tm-perms.sh` (TaskManager masks —
+   the ONLY source for per-project rows; no on-chain getter exists).
+   **Regenerate right before the cutover proposal is created** (the delta-seed discipline) — and
+   note the re-run REWRITES the `seed.N.json` files too: at that point propose ONLY the fresh
+   `cutover.1.json`; the already-executed seed files are dead artifacts. For KUBI-sized orgs,
+   freeze legacy joins (QuickJoin allowlist off) between final generation and cutover execution.
 
 3. **Proposals** (the org, via frontend): each JSON is one 1-option executable HybridVoting
    proposal, created IN ORDER (seed.1 … seed.N, then cutover.1), each finalized with an EXPLICIT
@@ -72,7 +90,11 @@ Each org: three ops surfaces in `MigrateOrgToAuthority.s.sol`, env-driven `ORG=T
    cast send <HV> 'announceWinner(uint256)' <id> --gas-limit <figure below>
    ```
 
-4. **Verify**: re-run the org's governed sim (below) BEFORE step 3. The §6 verification reads are
+4. **Frontend go/no-go for real orgs (KUBI):** the activation-gate UI copy (why a mid-vote
+   joiner can't vote yet) and the Executor.CallFailed selector→message map exist in the frontend
+   branch but are NOT yet rendered (WAVE-E-FRONTEND.md open items). Fine for Test6/DP; render
+   them before cutting over an org with active non-technical members.
+5. **Verify**: re-run the org's governed sim (below) BEFORE step 3. The §6 verification reads are
    realized by `CutoverVerifier.verify` (C4) appended as the LAST call of the cutover batch — it
    `require()`s per-subject memberCount == the generation-time count, memberCount <= canonical Hats
    supply, and router-through resolution of the admin id; a failed check reverts the WHOLE batch, so
@@ -98,17 +120,21 @@ Always pass the explicit `--gas-limit` from the table below; the try/catch defea
 
 ### Measured announceWinner gas (fork rehearsal, production profile)
 
-| Org | seed proposals | cutover | recommended `--gas-limit` |
+| Org | seed proposals (announceWinner, in order) | cutover | recommended `--gas-limit` |
 |-----|----------------|---------|---------------------------|
-| Test6 | 2.18M / 0.40M / 2.23M | 0.40M | 4,000,000 per proposal |
-| Decentral Park | 2.13M / 0.40M / 0.99M | 0.41M | 4,000,000 |
-| Poa | 1.99M / 1.21M | 0.40M | 4,000,000 |
-| **KUBI** | 2.09M / 0.21M / **3.13M** / 2.05M | 0.40M | **5,000,000** (seed.3 exceeds the usual 3M guidance) |
+| Test6 | 2.09M / 1.48M / 2.38M (3 proposals) | 0.47M | 4,000,000 per proposal |
+| Decentral Park | 1.97M / 0.93M / 1.03M (3) | 0.46M | 4,000,000 |
+| Poa | 2.04M / 0.66M / 1.12M (3) | 0.45M | 4,000,000 |
+| **KUBI** | 2.02M / 1.87M / **2.96M** / 2.71M / 0.23M (**5 proposals**) | 0.45M | **5,000,000** |
 
-**Proposal CREATION gas (A7, measured):** the largest seed proposal's `createProposal` costs
-4.1M–4.9M gas per org (Test6 4.39M, DP 4.34M, Poa 4.14M, KUBI 4.95M) — HV stores the full batch.
+(Re-measured 2026-08-26 after the A6 subject-discovery completion grew the batch sets — KUBI went
+from 4 to 5 seed proposals. The generated JSONs carry these limits per org.)
+
+**Proposal CREATION gas (A7, re-measured 2026-08-26):** the largest seed proposal's
+`createProposal` costs 4.26M–5.07M per org (Test6 4.51M, DP 4.34M, Poa 4.26M, KUBI 5.06M) —
+HV stores the full batch.
 Creation is a plain wallet tx (`eth_estimateGas` works — no try/catch trap), but the signer's wallet
-must not cap below ~5.5M, and creation must NOT go through the sponsored/gasless path: the global
+must not cap below ~6M, and creation must NOT go through the sponsored/gasless path: the global
 rulebook's HV `createProposal` hint would under-fund it. Org admins create seed/cutover proposals
 from a funded EOA.
 

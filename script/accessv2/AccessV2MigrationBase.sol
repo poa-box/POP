@@ -1215,9 +1215,12 @@ abstract contract AccessV2MigrationBase is Script {
     }
 
     function _lowerName(string memory v) internal pure returns (string memory) {
-        bytes memory b = bytes(v);
-        for (uint256 i; i < b.length; ++i) {
-            if (b[i] >= 0x41 && b[i] <= 0x5A) b[i] = bytes1(uint8(b[i]) + 32);
+        // Copy before lowercasing: `bytes(v)` aliases the caller's string; in-place mutation would
+        // corrupt OrgSpec.name for every later reader (the KUBI gas-limit branch bug).
+        bytes memory src = bytes(v);
+        bytes memory b = new bytes(src.length);
+        for (uint256 i; i < src.length; ++i) {
+            b[i] = (src[i] >= 0x41 && src[i] <= 0x5A) ? bytes1(uint8(src[i]) + 32) : src[i];
         }
         return string(b);
     }

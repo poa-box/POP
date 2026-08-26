@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
 
+// HISTORICAL ARTIFACT — the pre-build gas-benchmark prototype. Referenced by NOTHING in the
+// build or test graph; kept for the recorded benchmark numbers only. DO NOT sync with the real
+// implementation and do not cite its behavior as current.
+
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {HatManager} from "../../src/libs/HatManager.sol";
 

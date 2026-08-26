@@ -77,7 +77,8 @@ interface IMembershipAuthority {
     error ArrayLengthMismatch();
     error UnknownSubject();
     error NotAuthorizedManager(); // delegated caller lacks the cap / manager-subject membership
-    error Paused(); // a NON-EXECUTOR write attempted while paused (ruling 5; reads stay live)
+    error Paused(); // a NON-EXECUTOR write attempted while paused (ruling 5; reads stay live); ALSO
+    // reused by the shared reentrancy lock in the hub + Logic lib (Seed reuses AlreadyMember)
 
     // Subject / composition caps (§1)
     error RoleLimit(); // 16 roles per user, checked at accepted-flip
@@ -90,7 +91,8 @@ interface IMembershipAuthority {
     error SubjectFull(uint256 subjectId, address lapsedCandidate);
 
     error SubjectExists(); // adopted id / composition already registered
-    error NotAGroup(); // composition write on a role subject
+    error NotAGroup(); // composition write on a role subject; ALSO raised (selector reuse) by role
+    // verbs (claim/grant/remove/mintHat) when the subject is a GROUP — groups have no acceptance
     error SelfManagedCycle(); // manager-subject direct cycle (v1 SelfManagedGroup heir)
 
     // Membership lifecycle (§2/§4)

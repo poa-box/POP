@@ -490,6 +490,9 @@ contract OrgRegistry is Initializable, OwnableUpgradeable {
     }
 
     /* ══════════ HATS TREE REGISTRATION ══════════ */
+    /// @dev For Access-v2-native orgs the "hat" ids stored here are AUTHORITY SUBJECT IDS adopted
+    ///      into the same fields (ABI frozen): topHat = the org ADMIN subject. The AuthorityRouter's
+    ///      legacy-bind gate reads getTopHat(orgId) >> 224, so this field stays load-bearing.
     function registerHatsTree(bytes32 orgId, uint256 topHatId, uint256[] calldata roleHatIds) external {
         Layout storage l = _layout();
         OrgInfo storage o = l.orgOf[orgId];

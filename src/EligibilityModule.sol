@@ -504,7 +504,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     }
 
     /**
-     * @notice Batch set wearer eligibility across multiple hats - optimized for HatsTreeSetup
+     * @notice Batch set wearer eligibility across multiple hats - optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @dev Sets eligibility for multiple (wearer, hatId) pairs in a single call
      * @param wearers Array of wearer addresses
      * @param hatIds Array of hat IDs (must match wearers length)
@@ -567,7 +567,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     /**
      * @notice Batch mint hats to multiple wearers
-     * @dev Mints multiple hats in a single call - optimized for HatsTreeSetup
+     * @dev Mints multiple hats in a single call - optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @param hatIds Array of hat IDs to mint
      * @param wearers Array of addresses to receive hats
      */
@@ -587,7 +587,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     /**
      * @notice Batch register hat creations for subgraph indexing
-     * @dev Registers multiple hats in a single call - optimized for HatsTreeSetup
+     * @dev Registers multiple hats in a single call - optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @param hatIds Array of hat IDs that were created
      * @param parentHatIds Array of parent hat IDs
      * @param defaultEligibles Array of default eligibility flags
@@ -621,7 +621,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     }
 
     /**
-     * @dev Registers multiple hats with metadata in a single call - optimized for HatsTreeSetup
+     * @dev Registers multiple hats with metadata in a single call - optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @dev This version also emits HatMetadataUpdated events for subgraph indexing
      * @param hatIds Array of hat IDs that were created
      * @param parentHatIds Array of parent hat IDs
@@ -731,7 +731,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     }
 
     /// @notice Register a hat that was created externally and emit the HatCreatedWithEligibility event
-    /// @dev Used by HatsTreeSetup to emit events for subgraph indexing without needing admin rights to create hats
+    /// @dev Used by legacy tree setup (HatsTreeSetup, deleted in Wave F) to emit events for subgraph indexing without needing admin rights to create hats
     /// @param hatId The ID of the hat that was created
     /// @param parentHatId The ID of the parent hat
     /// @param defaultEligible Whether wearers are eligible by default
