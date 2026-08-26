@@ -433,6 +433,29 @@ contract DeployerTest is Test {
         );
     }
 
+    /// @notice A role with no lists in the project config gets NO project row — the row builder
+    ///         shrinks its arrays, so a skipped role must not leave a zero-subject entry behind.
+    function testBootstrapProject_skipsRolesWithNoProjectPermissions() public {
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        params.bootstrap = _bootstrapWithExecutiveOnlyProject();
+
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory r = deployer.deployFullOrg(params);
+        IMembershipAuthority auth = IMembershipAuthority(r.membershipAuthority);
+
+        bytes32 ctx = bytes32(uint256(1));
+        assertEq(
+            auth.getPerm(_roleSubject(ROLE_DEFAULT), AccessV2PermKeys.TM_PERMS, ctx),
+            0,
+            "the un-listed role has no project row"
+        );
+        assertEq(
+            auth.getPerm(_roleSubject(ROLE_EXECUTIVE), AccessV2PermKeys.TM_PERMS, ctx) & AccessV2PermKeys.VALUE_MASK,
+            uint256(TaskPerm.CREATE | TaskPerm.REVIEW),
+            "the listed role keeps its exact mask"
+        );
+    }
+
     /*──────── validation ────────*/
 
     function testDeploy_rejectsBitmapAddressingAMissingRole() public {
@@ -635,6 +658,31 @@ contract DeployerTest is Test {
             claimHats: both,
             reviewHats: execOnly,
             assignHats: execOnly,
+            bountyTokens: new address[](0),
+            bountyCaps: new uint256[](0)
+        });
+
+        return
+            OrgDeployer.BootstrapConfig({projects: projects, tasks: new ITaskManagerBootstrap.BootstrapTaskConfig[](0)});
+    }
+
+    /// @dev One project that names only the EXECUTIVE role, so role 0 produces an empty mask.
+    function _bootstrapWithExecutiveOnlyProject() internal pure returns (OrgDeployer.BootstrapConfig memory) {
+        ITaskManagerBootstrap.BootstrapProjectConfig[] memory projects =
+            new ITaskManagerBootstrap.BootstrapProjectConfig[](1);
+
+        uint256[] memory execOnly = new uint256[](1);
+        execOnly[0] = ROLE_EXECUTIVE;
+
+        projects[0] = ITaskManagerBootstrap.BootstrapProjectConfig({
+            title: bytes("Execs Only"),
+            metadataHash: bytes32(0),
+            cap: 1000 ether,
+            managers: new address[](0),
+            createHats: execOnly,
+            claimHats: new uint256[](0),
+            reviewHats: execOnly,
+            assignHats: new uint256[](0),
             bountyTokens: new address[](0),
             bountyCaps: new uint256[](0)
         });
