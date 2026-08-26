@@ -4,8 +4,9 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 import "forge-std/console.sol";
 import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-// Shared contract type registry (single source of truth for the 13 application types)
+// Shared contract type registry (single source of truth for the application types)
 import {DeployHelper} from "../helpers/DeployHelper.s.sol";
 
 // Infrastructure
@@ -14,6 +15,7 @@ import {PoaManager} from "../../src/PoaManager.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {OrgDeployer, ITaskManagerBootstrap} from "../../src/OrgDeployer.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
+import {AuthorityRouter} from "../../src/AuthorityRouter.sol";
 import {DefaultGlobalRules} from "../helpers/DefaultGlobalRules.sol";
 import {UniversalAccountRegistry} from "../../src/UniversalAccountRegistry.sol";
 
@@ -71,6 +73,7 @@ contract DeployHomeChain is DeployHelper {
         address orgRegistry;
         address orgDeployer;
         address paymasterHub;
+        address authorityRouter;
         address globalAccountRegistry;
         address universalPasskeyFactory;
         address governanceFactory;
@@ -210,6 +213,16 @@ contract DeployHomeChain is DeployHelper {
         PoaManager(infra.poaManager)
             .adminCall(infra.paymasterHub, abi.encodeWithSignature("unpauseSolidarityDistribution()"));
         console.log("Solidarity distribution unpaused for onboarding");
+
+        // Access-v2 read path: deploy the AuthorityRouter singleton and repoint the hub + OrgRegistry
+        // at it (see DeployHelper._wireAuthorityRouter — without this every org-admin surface is dead).
+        {
+            address routerImpl = address(new AuthorityRouter());
+            PoaManager(infra.poaManager).addContractType("AuthorityRouter", routerImpl);
+            infra.authorityRouter = _wireAuthorityRouter(
+                PoaManager(infra.poaManager), routerImpl, infra.orgRegistry, infra.paymasterHub, deployer
+            );
+        }
 
         // Seed the global rulebook — without this, orgs deployed with autoWhitelistContracts
         // resolve ZERO sponsored selectors (the deployer registers target types only).
@@ -495,6 +508,7 @@ contract DeployHomeChain is DeployHelper {
         vm.serializeAddress(home, "orgRegistry", infra.orgRegistry);
         vm.serializeAddress(home, "orgDeployer", infra.orgDeployer);
         vm.serializeAddress(home, "paymasterHub", infra.paymasterHub);
+        vm.serializeAddress(home, "authorityRouter", infra.authorityRouter);
         vm.serializeAddress(home, "globalAccountRegistry", infra.globalAccountRegistry);
         vm.serializeAddress(home, "universalPasskeyFactory", infra.universalPasskeyFactory);
         vm.serializeAddress(home, "governanceFactory", infra.governanceFactory);
@@ -541,6 +555,7 @@ contract DeploySatellite is DeployHelper {
         address orgRegistry;
         address orgDeployer;
         address paymasterHub;
+        address authorityRouter;
         address globalAccountRegistry;
         address universalPasskeyFactory;
         address governanceFactory;
@@ -653,6 +668,17 @@ contract DeploySatellite is DeployHelper {
         pm.adminCall(infra.paymasterHub, abi.encodeWithSignature("unpauseSolidarityDistribution()"));
         console.log("Solidarity distribution unpaused for onboarding");
 
+        // --- AuthorityRouter singleton (Access-v2 read path) ---
+        // The impl was DD-deployed + type-registered by _deployAndRegisterInfraTypesDD; the singleton
+        // proxy is wired here, before OrgRegistry ownership leaves the deployer.
+        infra.authorityRouter = _wireAuthorityRouter(
+            pm,
+            pm.getCurrentImplementationById(keccak256("AuthorityRouter")),
+            infra.orgRegistry,
+            infra.paymasterHub,
+            deployer
+        );
+
         // --- OrgDeployer proxy ---
         address deployerBeacon = pm.getBeaconById(keccak256("OrgDeployer"));
         bytes memory orgDeployerInit = abi.encodeWithSignature(
@@ -753,6 +779,7 @@ contract DeploySatellite is DeployHelper {
         vm.serializeAddress(satObj, "orgRegistry", infra.orgRegistry);
         vm.serializeAddress(satObj, "orgDeployer", infra.orgDeployer);
         vm.serializeAddress(satObj, "paymasterHub", infra.paymasterHub);
+        vm.serializeAddress(satObj, "authorityRouter", infra.authorityRouter);
         vm.serializeAddress(satObj, "globalAccountRegistry", infra.globalAccountRegistry);
         vm.serializeAddress(satObj, "universalPasskeyFactory", infra.universalPasskeyFactory);
         vm.serializeAddress(satObj, "governanceFactory", infra.governanceFactory);

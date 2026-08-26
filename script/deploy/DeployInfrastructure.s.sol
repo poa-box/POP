@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 import "forge-std/console.sol";
 import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 // Implementation contracts
 import {HybridVoting} from "../../src/HybridVoting.sol";
@@ -20,6 +21,8 @@ import {ToggleModule} from "../../src/ToggleModule.sol";
 import {PasskeyAccount} from "../../src/PasskeyAccount.sol";
 import {PasskeyAccountFactory} from "../../src/PasskeyAccountFactory.sol";
 import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
+import {MembershipAuthority} from "../../src/MembershipAuthority.sol";
+import {AuthorityRouter} from "../../src/AuthorityRouter.sol";
 
 // Infrastructure
 import {ImplementationRegistry} from "../../src/ImplementationRegistry.sol";
@@ -72,6 +75,7 @@ contract DeployInfrastructure is Script {
     address public orgRegistry;
     address public implRegistry;
     address public paymasterHub;
+    address public authorityRouter;
     address public universalPasskeyFactory;
 
     // Factories
@@ -116,6 +120,7 @@ contract DeployInfrastructure is Script {
         address passkeyAccountImpl = address(new PasskeyAccount());
         address passkeyAccountFactoryImpl = address(new PasskeyAccountFactory());
         address zkEmailInvitesImpl = address(new ZkEmailInvites());
+        address membershipAuthorityImpl = address(new MembershipAuthority());
         address implRegImpl = address(new ImplementationRegistry());
         address orgRegImpl = address(new OrgRegistry());
         address deployerImpl = address(new OrgDeployer());
@@ -175,6 +180,28 @@ contract DeployInfrastructure is Script {
         // (initialize() sets distributionPaused=true for collection-only mode)
         PoaManager(poaManager).adminCall(paymasterHub, abi.encodeWithSignature("unpauseSolidarityDistribution()"));
         console.log("Solidarity distribution unpaused for onboarding");
+
+        // Access-v2 read path: the AuthorityRouter singleton.
+        // Access-v2 orgs carry NEW-STYLE subject ids (`uint160(authority) << 64 | seq`, always < 2^224)
+        // as their PaymasterHub admin/operator hat and as the OrgRegistry metadata-admin hat. Real Hats
+        // returns balance 0 for those ids, so without this repoint every onlyOrgAdmin call (setPause /
+        // setOperatorHat / withdrawOrgDeposit) and updateOrgMetaAsAdmin reverts forever on this chain.
+        // Legacy Hats ids pass straight through the router, so the repoint is behaviour-neutral.
+        // ORDERING: the router's initializer needs OrgRegistry + PaymasterHub, so both are initialized
+        // against real Hats and repointed here (never leave the router proxy uninitialized).
+        {
+            address routerImpl = address(new AuthorityRouter());
+            PoaManager(poaManager).addContractType("AuthorityRouter", routerImpl);
+            authorityRouter = address(
+                new ERC1967Proxy(
+                    routerImpl,
+                    abi.encodeCall(AuthorityRouter.initialize, (HATS_PROTOCOL, orgRegistry, paymasterHub, deployer))
+                )
+            );
+            PoaManager(poaManager).adminCall(paymasterHub, abi.encodeWithSignature("setHats(address)", authorityRouter));
+            console.log("AuthorityRouter:", authorityRouter);
+            console.log("PaymasterHub repointed to the router");
+        }
 
         // Deploy OrgDeployer proxy (universalPasskeyFactory set later after deployment)
         address deployerBeacon = PoaManager(poaManager).getBeaconById(keccak256("OrgDeployer"));
@@ -240,6 +267,9 @@ contract DeployInfrastructure is Script {
         // ZkEmailInvites beacon registered unconditionally; the per-org module stays dormant
         // until OrgDeployer.setZkEmailInfrastructure wires the verifier + DKIM registry.
         pm.addContractType("ZkEmailInvites", zkEmailInvitesImpl);
+        // MANDATORY for Access v2: AccessFactory.deployAuthority resolves MEMBERSHIP_AUTHORITY_ID off
+        // the PoaManager, so every org deploy reverts on a chain missing this type.
+        pm.addContractType("MembershipAuthority", membershipAuthorityImpl);
 
         console.log("\n--- Contract Types Registered ---");
 
@@ -341,6 +371,8 @@ contract DeployInfrastructure is Script {
         console.log("BEACON_ToggleModule:", pm.getBeaconById(keccak256("ToggleModule")));
         console.log("BEACON_PasskeyAccount:", pm.getBeaconById(keccak256("PasskeyAccount")));
         console.log("BEACON_PasskeyAccountFactory:", pm.getBeaconById(keccak256("PasskeyAccountFactory")));
+        console.log("BEACON_MembershipAuthority:", pm.getBeaconById(keccak256("MembershipAuthority")));
+        console.log("AuthorityRouter (singleton):", authorityRouter);
 
         // Write addresses to JSON file for easy org deployment
         // Split into parts to avoid stack depth issues
@@ -366,6 +398,9 @@ contract DeployInfrastructure is Script {
             '",\n',
             '  "implRegistry": "',
             vm.toString(implRegistry),
+            '",\n',
+            '  "authorityRouter": "',
+            vm.toString(authorityRouter),
             '",\n',
             '  "hatsProtocol": "',
             vm.toString(HATS_PROTOCOL),

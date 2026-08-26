@@ -11,6 +11,7 @@ pragma solidity ^0.8.21;
 
 import "forge-std/Test.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {PoaManager} from "../src/PoaManager.sol";
 import {ImplementationRegistry} from "../src/ImplementationRegistry.sol";
@@ -32,6 +33,8 @@ import {PasskeyAccount} from "../src/PasskeyAccount.sol";
 import {PasskeyAccountFactory} from "../src/PasskeyAccountFactory.sol";
 import {UniversalAccountRegistry} from "../src/UniversalAccountRegistry.sol";
 import {MembershipAuthority} from "../src/MembershipAuthority.sol";
+import {AuthorityRouter} from "../src/AuthorityRouter.sol";
+import {PaymasterHubErrors} from "../src/libs/PaymasterHubErrors.sol";
 import {IMembershipAuthority} from "../src/interfaces/IMembershipAuthority.sol";
 import {AccessV2Types} from "../src/libs/AccessV2Types.sol";
 import {AccessV2Ids} from "../src/libs/AccessV2Ids.sol";
@@ -496,7 +499,60 @@ contract DeployerTest is Test {
         deployer.deployFullOrg(params);
     }
 
+    /// @notice END-TO-END fresh-chain read path: with the hub pointed at the AuthorityRouter (exactly
+    ///         what MainDeploy / DeployInfrastructure now wire), a deployer-produced org's ADMIN
+    ///         authority subject resolves and its wearer can drive the hub's onlyOrgAdmin surface.
+    /// @dev Regression for the genesis gap where the scripts left `hub.hats` on real Hats: new-style
+    ///      subject ids (< 2^224) resolve to balance 0 there, so every onlyOrgAdmin call — setPause,
+    ///      setOperatorHat, withdrawOrgDeposit (which has NO poaManager bypass) — reverted forever.
+    function testPaymaster_orgAdminResolvesThroughTheRouter() public {
+        OrgDeployer.DeploymentResult memory r = _deployDefaultOrg(ORG_ID);
+
+        // Before the repoint the hub reads a plain Hats surface, so the ADMIN subject has no wearer.
+        vm.prank(r.executor);
+        vm.expectRevert(PaymasterHubErrors.NotAdmin.selector);
+        paymasterHub.setPause(ORG_ID, true);
+
+        AuthorityRouter router = _deployAuthorityRouter();
+        vm.prank(address(poaManager));
+        paymasterHub.setHats(address(router));
+
+        // The router classifies the new-style id structurally and self-routes it to the org authority.
+        assertTrue(router.isWearerOfHat(r.executor, _adminSubject()), "router resolves the ADMIN subject");
+        assertEq(paymasterHub.HATS(), address(router), "hub reads through the router");
+
+        // The admin-subject wearer now drives the hub's org-admin surface for real.
+        vm.prank(r.executor);
+        paymasterHub.setPause(ORG_ID, true);
+        assertTrue(paymasterHub.getOrgConfig(ORG_ID).paused, "org paused by the ADMIN-subject wearer");
+
+        uint256 openRoleSubject = _roleSubject(ROLE_DEFAULT);
+        vm.prank(r.executor);
+        paymasterHub.setOperatorHat(ORG_ID, openRoleSubject);
+        assertEq(paymasterHub.getOrgConfig(ORG_ID).operatorHatId, openRoleSubject, "operator subject repointed");
+
+        // A stranger is still rejected — the router does not widen the gate.
+        vm.prank(address(0xDEAD));
+        vm.expectRevert(PaymasterHubErrors.NotAdmin.selector);
+        paymasterHub.setPause(ORG_ID, false);
+    }
+
     /*══════════════════════════════════════ HELPERS ══════════════════════════════════════*/
+
+    /// @dev The chain-wide Access-v2 read surface, wired exactly as the deploy scripts wire it.
+    function _deployAuthorityRouter() internal returns (AuthorityRouter) {
+        return AuthorityRouter(
+            address(
+                new ERC1967Proxy(
+                    address(new AuthorityRouter()),
+                    abi.encodeCall(
+                        AuthorityRouter.initialize,
+                        (address(mockHats), address(orgRegistry), address(paymasterHub), poaAdmin)
+                    )
+                )
+            )
+        );
+    }
 
     function _adminSubject() internal view returns (uint256) {
         return orgRegistry.getTopHat(ORG_ID);
