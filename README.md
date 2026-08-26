@@ -406,6 +406,14 @@ CI enforces upgrade safety. The repository tracks three storage-layout snapshots
 
 The CI workflow runs [`script/upgrades/ValidateUpgrade.s.sol`](script/upgrades/ValidateUpgrade.s.sol) against `upgrades/baseline/` and fails the build if a storage-breaking change is detected. `test/UpgradeSafety.t.sol` complements it with end-to-end tests that seed state, perform a real beacon upgrade, and assert the state survived. **Do not edit `upgrades/` by hand**; it is auto-generated. If your change requires a baseline update, surface it in the PR description so reviewers can verify the storage diff is intentional.
 
+> **Known stale entry.** All three snapshot directories still contain `HatsTreeSetup.sol`, whose
+> source was deleted with the v1 access rails. It is inert today — the upgrade-safety job only
+> activates once `.github/upgrades.json` exists (it does not), `upgrades/` is not on any forge build
+> path, and `test/UpgradeSafety.t.sol` never reads these files — and it is deliberately **not**
+> hand-deleted, because `upgrades/` is CI-generated. Whoever enables the workflow should regenerate
+> the directory and must not list `HatsTreeSetup` (or any other deleted contract) in
+> `.github/upgrades.json`.
+
 ---
 
 ## Access Control
