@@ -31,7 +31,6 @@ library ModuleTypes {
     bytes32 constant PASSKEY_ACCOUNT_ID = keccak256("PasskeyAccount");
     bytes32 constant PASSKEY_ACCOUNT_FACTORY_ID = keccak256("PasskeyAccountFactory");
     bytes32 constant ZKEMAIL_INVITES_ID = keccak256("ZkEmailInvites");
-    bytes32 constant ROLE_MANAGER_ID = keccak256("RoleManager");
     // Access-v2: the per-org MembershipAuthority (BeaconProxy) and the protocol-owned AuthorityRouter
     // singleton. MEMBERSHIP_AUTHORITY_ID keys the authority's user-facing selectors in the PaymasterHub
     // global rulebook (claim/renounce/vouch/delegated-verb set — see DefaultGlobalRules).

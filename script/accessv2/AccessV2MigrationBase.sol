@@ -14,7 +14,7 @@ import {ZkEmailProof} from "../../src/zkemail/IVerifier.sol";
 
 /*
  * ============================================================================
- * AccessV2MigrationBase — reusable per-org migration engine (Wave D2, SPEC §6)
+ * AccessV2MigrationBase — reusable per-org migration engine (SPEC §6)
  * ============================================================================
  *
  * The shared machinery behind MigrateOrgToAuthority (proposal-calldata generation)
@@ -53,7 +53,7 @@ interface IHatsMin {
     function isEligible(address wearer, uint256 hatId) external view returns (bool);
     function isInGoodStanding(address wearer, uint256 hatId) external view returns (bool);
     // viewHat returns the full 9-field hat record — we adopt maxSupply (the honest live cap, R1)
-    // and details (the live role name, specOrder-10) verbatim.
+    // and details (the live role name) verbatim.
     function viewHat(uint256 hatId)
         external
         view
@@ -71,8 +71,8 @@ interface IHatsMin {
 }
 
 /// @dev HybridVoting voting-class enumeration — class hatIds are consumed as authority subjects
-///      (activeMemberSince) post-cutover, so they must be discovered/seeded (finding
-///      seedCompleteness-6). Struct field order MUST match HybridVoting.ClassConfig exactly.
+///      (activeMemberSince) post-cutover, so they must be discovered/seeded.
+///      Struct field order MUST match HybridVoting.ClassConfig exactly.
 interface IHVClasses {
     struct ClassCfg {
         uint8 strategy;
@@ -279,7 +279,7 @@ abstract contract AccessV2MigrationBase is Script {
         address paymentManager;
         address zkEmailInvites; // 0 if none
         bool vouchVerbatim; // true = VERBATIM port (counts+epochs); false = AMNESTY
-        // T2 (assertTautology-1): the RECORDED per-org member-gate expectation. The A1 seeder and the A1
+        // T2: the RECORDED per-org member-gate expectation. The A1 seeder and the A1
         // join probe both used to consult the SAME _liveDefaultAllow oracle, so a wrong verdict flipped
         // both and every sim passed self-consistently (a gated role misread as open would be seeded
         // default-ALLOW and then "proved" open). This is a live-verified CONSTANT of the catalog
@@ -287,7 +287,7 @@ abstract contract AccessV2MigrationBase is Script {
         // KUBI (false,true) = GATED; Poa has NO QuickJoin member hat). The seeder require()s the live
         // gate still equals it, and the probe selects its arm from THIS, never from the live probe.
         bool expectOpenMember;
-        // T3 (assertTautology-3): run the SYNTHETIC-BAN drill on this org — inject a real explicit-deny
+        // T3: run the SYNTHETIC-BAN drill on this org — inject a real explicit-deny
         // on a current member through the live EligibilityModule admin surface BEFORE seeding, so the
         // RuleKind.Ban porting path actually executes (all four orgs' effective-ban sets were empty or
         // near-empty, making every per-ban assert vacuous). One org per chain: KUBI (Gnosis), Poa (Arb).
@@ -308,7 +308,7 @@ abstract contract AccessV2MigrationBase is Script {
     // _buildCutoverBatch appends its verify() as the LAST cutover call (§6 in-batch verification, C4).
     address internal _verifier;
 
-    // A2 (specOrder-9 / seedCompleteness-0): the LIVE TaskManager permission table, enumerated by
+    // A2: the LIVE TaskManager permission table, enumerated by
     // tools/enumerate-tm-perms.sh into fixtures/<org>.tmperms.json (there is NO getter for
     // rolePermGlobal/rolePermProj; the event stream is the only source of truth). Five parallel arrays:
     // global (hat→mask at ctx 0) and per-project (pid,hat→mask at ctx = pid+1). Loaded per org by
@@ -320,7 +320,7 @@ abstract contract AccessV2MigrationBase is Script {
     uint256[] internal _tmProjMasks;
     bool internal _tmPermsLoaded;
 
-    // T3 (assertTautology-3): the (subject, user) pair the SYNTHETIC-BAN drill kicked on the live
+    // T3: the (subject, user) pair the SYNTHETIC-BAN drill kicked on the live
     // EligibilityModule before seeding. Zero when the drill did not run for this org.
     uint256 internal _synthBanSubject;
     address internal _synthBanUser;
@@ -385,7 +385,7 @@ abstract contract AccessV2MigrationBase is Script {
         _addArray(IEDUMig(s.edu).creatorHatIds());
         _addArray(IEDUMig(s.edu).memberHatIds());
         _addArray(_tmPermissionHats(s));
-        // A6 (seedCompleteness-6): the TM authority arm resolves creator (lens 5) and organizer
+        // A6: the TM authority arm resolves creator (lens 5) and organizer
         // (lens 11) hats through _authorityHoldsAny (pure isMember, no perm key), and HybridVoting
         // resolves each voting-class hatId via activeMemberSince. All three are AUTHORITY SUBJECTS
         // post-cutover — omitting them disenfranchises voters / breaks TM create+organize. They are
@@ -427,7 +427,7 @@ abstract contract AccessV2MigrationBase is Script {
         }
     }
 
-    /*═══════════════════════════════ Live hat record adoption (R1, specOrder-10) ═══════════════════════════════*/
+    /*═══════════════════════════════ Live hat record adoption (R1) ═══════════════════════════════*/
 
     /// @dev maxMembers adopts the legacy hat's maxSupply VERBATIM (R1) — the honest live cap, neither
     ///      tightened to the current count nor guessed-unlimited. Hats guarantees supply ≤ maxSupply, so
@@ -437,7 +437,7 @@ abstract contract AccessV2MigrationBase is Script {
         return maxSupply;
     }
 
-    /// @dev Role name adopts the live hat details (specOrder-10); falls back to "Role#N" when the
+    /// @dev Role name adopts the live hat details; falls back to "Role#N" when the
     ///      legacy hat carries an empty details string.
     function _hatName(uint256 id, string memory fallbackName) internal view returns (string memory) {
         (string memory details,,,,,,,,) = IHatsMin(HATS).viewHat(id);
@@ -472,7 +472,7 @@ abstract contract AccessV2MigrationBase is Script {
     /*═══════════════════════════════ PREDEPLOY (§6 step 1) ═══════════════════════════════*/
 
     /// @notice Deploy the authority BeaconProxy WITH init data in the SAME transaction (C5 —
-    ///         front-run grief close, finding specOrder-5). The proxy is created via
+    ///         front-run grief close). The proxy is created via
     ///         `BeaconProxy(beacon, abi.encodeCall(initialize, EMPTY-GENESIS cfg))` so it lands
     ///         ATOMICALLY initialized (executor/orgId/paused) — an attacker can no longer initialize
     ///         the predicted CREATE2 address first (poisoning the slot) during the seed-proposal
@@ -554,7 +554,7 @@ abstract contract AccessV2MigrationBase is Script {
 
         /*── Batch 1: register → admin subject → admin membership → subjects → defaults → rename → perms ──*/
         // NOTE (C5): the proxy was ALREADY initialized ATOMICALLY at deploy with an EMPTY genesis
-        // (executor/orgId/paused only — front-run grief close, specOrder-5). So batch 1 does NOT call
+        // (executor/orgId/paused only — front-run grief close). So batch 1 does NOT call
         // initialize; the admin SUBJECT is created here (seedSubjects), AFTER registerOrgContract, so
         // its SubjectCreated event indexes post-registration.
         _newBatch();
@@ -568,7 +568,7 @@ abstract contract AccessV2MigrationBase is Script {
 
         // (0) ADMIN subject + membership LEAD the batch (lock-out guard): create the topHat subject,
         //     then grant + accept the Executor as its sole member, before any other subject/rule.
-        //     The admin grant is STICKY (delegable=false, R5 / specOrder-8): a delegated CAP_REMOVE
+        //     The admin grant is STICKY (delegable=false, R5): a delegated CAP_REMOVE
         //     manager must never be able to clear the Executor's admin membership (org lock-out).
         _pushAdminSubject(authority, topHat);
         _pushSeedSlice(authority, topHat, _single(s.executor), false);
@@ -576,7 +576,7 @@ abstract contract AccessV2MigrationBase is Script {
         // (1) Role subjects (maxMembers=0 during seeding; tightened after memberships).
         _pushRoleSubjects(authority);
 
-        // (2) LIVE-ADOPTED default eligibility (A1 / specOrder-0 / seedCompleteness-1). Do NOT force the
+        // (2) LIVE-ADOPTED default eligibility (A1). Do NOT force the
         //     QuickJoin member role open: probe the LEGACY EligibilityModule default for a FRESH address
         //     per subject and seed default-ALLOW ONLY where the gate is genuinely open TODAY. DP's member
         //     hat is open (true); Test6's (zk-email) and KUBI's (vouch) member hats deny a fresh address
@@ -610,7 +610,7 @@ abstract contract AccessV2MigrationBase is Script {
     ///      sole EXPLICIT member (root-by-address). Only default-ALLOW is emitted (the authority default
     ///      is already deny), so a gated legacy role stays gated post-cutover.
     ///
-    ///      T7 (assertTautology-7) — TITLED-ROLE SUPPRESSION, spec §2 DEFAULT ("Open roles = default-ALLOW
+    ///      T7 — TITLED-ROLE SUPPRESSION, spec §2 DEFAULT ("Open roles = default-ALLOW
     ///      + user claim (QuickJoin keeps working); TITLED roles = deny-by-default + explicit grants").
     ///      Legacy eligibility != legacy wearing: an EM-default-open verdict on a hat with NO permissionless
     ///      mint channel (anything other than the QuickJoin member role) was never self-assumable — wearing
@@ -668,7 +668,7 @@ abstract contract AccessV2MigrationBase is Script {
         return address(uint160(uint256(keccak256(abi.encode(s.orgId, subject, "live-default-probe")))));
     }
 
-    /// @dev T2 (assertTautology-1): reconcile the CATALOG-RECORDED member-gate constant against the LIVE
+    /// @dev T2: reconcile the CATALOG-RECORDED member-gate constant against the LIVE
     ///      EligibilityModule, in BOTH oracle shapes. (1) The recorded `expectOpenMember` must equal the
     ///      raw per-wearer default verdict the seeder acts on. (2) The raw rule verdict must agree with
     ///      the EM's COMBINED getWearerStatus for the same fresh address — the raw-vs-combined divergence
@@ -696,7 +696,7 @@ abstract contract AccessV2MigrationBase is Script {
         console.log("  [T2] recorded member gate matches live (raw + combined). openMember:", s.expectOpenMember);
     }
 
-    /// @dev A3 (specOrder-1 / seedCompleteness-1): port legacy explicit-DENY wearer rules (bans/kicks) as
+    /// @dev A3: port legacy explicit-DENY wearer rules (bans/kicks) as
     ///      governance-authored STICKY RuleKind.Ban rows. §6 step 2 lists "bans" as seed content; without
     ///      this every legacy ban evaporates and (on any default-ALLOW subject) the banned user can
     ///      sponsored-claim straight back in. Enumerated candidates × subjects on the fork: a ban is an
@@ -767,10 +767,10 @@ abstract contract AccessV2MigrationBase is Script {
         }
     }
 
-    /*═══════════════════════════════ T3: SYNTHETIC-BAN DRILL (assertTautology-3) ═══════════════════════════════*/
+    /*═══════════════════════════════ T3: SYNTHETIC-BAN DRILL ═══════════════════════════════*/
 
     /// @notice Inject a REAL legacy kick before the seed so the RuleKind.Ban porting path actually
-    ///         executes against a live ban. Rationale (assertTautology-3): the behavior-preserving
+    ///         executes against a live ban. Rationale: the behavior-preserving
     ///         EFFECTIVE-ban set is empty or near-empty on all four orgs, so `_buildBans` could
     ///         mis-encode RuleKind, drop chunks or seed nothing and every sim still PASSed — the
     ///         per-ban asserts ran ZERO times.
@@ -892,7 +892,7 @@ abstract contract AccessV2MigrationBase is Script {
         uint32[] memory maxm = new uint32[](1);
         ids[0] = topHat;
         kinds[0] = AccessV2Types.SubjectKind.Role;
-        names[0] = _hatName(topHat, "Admin"); // live details, fallback "Admin" (specOrder-10)
+        names[0] = _hatName(topHat, "Admin"); // live details, fallback "Admin"
         maxm[0] = _hatMaxSupply(topHat); // legacy maxSupply verbatim (R1) — topHat is 1
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
     }
@@ -908,7 +908,7 @@ abstract contract AccessV2MigrationBase is Script {
         for (uint256 i = 1; i < _subjects.length; ++i) {
             ids[i - 1] = _subjects[i];
             kinds[i - 1] = AccessV2Types.SubjectKind.Role;
-            names[i - 1] = _hatName(_subjects[i], string.concat("Role#", vm.toString(i))); // specOrder-10
+            names[i - 1] = _hatName(_subjects[i], string.concat("Role#", vm.toString(i))); // live details
             maxm[i - 1] = _hatMaxSupply(_subjects[i]); // legacy maxSupply verbatim (R1)
         }
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
@@ -926,7 +926,7 @@ abstract contract AccessV2MigrationBase is Script {
         _attachBool(authority, IEDUMig(s.edu).creatorHatIds(), AccessV2PermKeys.EDU_CREATE);
         _attachBool(authority, IEDUMig(s.edu).memberHatIds(), AccessV2PermKeys.EDU_MEMBER);
         _attachBool(authority, IQJMig(s.qj).memberHatIds(), AccessV2PermKeys.QJ_AUTOJOIN);
-        // A2 (specOrder-9 / seedCompleteness-0): TM permission table — REAL masks, per-project rows.
+        // A2: TM permission table — REAL masks, per-project rows.
         _seedTmPerms(s, authority);
     }
 
@@ -990,7 +990,7 @@ abstract contract AccessV2MigrationBase is Script {
         _tmPermsLoaded = true;
     }
 
-    /*═══════════════ T5: INDEPENDENT legacy TaskManager oracle (assertTautology-5) ═══════════════*/
+    /*═══════════════ T5: INDEPENDENT legacy TaskManager oracle ═══════════════*/
     /*
      * The A2 probe compared the seeded authority state against `_legacyExpectedMask`, folded from the
      * SAME fixture that seeded it — a shared-source tautology that also omitted legacy `_permMask`'s
@@ -1274,7 +1274,7 @@ abstract contract AccessV2MigrationBase is Script {
             // VERBATIM at subject-creation time (_pushRoleSubjects / _pushAdminSubject). That is the
             // honest live cap — headroom above the current count — so post-cutover grant/claim/vouch
             // on titled roles does NOT revert SubjectFull, and it never produces the linted
-            // VouchWithMaxMembers anti-pattern (seedCompleteness-3). The open member role's maxSupply
+            // VouchWithMaxMembers anti-pattern. The open member role's maxSupply
             // is likewise adopted verbatim (QuickJoin was already bounded by it legacy-side).
         }
     }
@@ -1344,7 +1344,7 @@ abstract contract AccessV2MigrationBase is Script {
         uint32[] memory maxm = new uint32[](1);
         ids[0] = id;
         kinds[0] = AccessV2Types.SubjectKind.Role;
-        names[0] = _hatName(id, "VoucherRole"); // live details, fallback "VoucherRole" (specOrder-10)
+        names[0] = _hatName(id, "VoucherRole"); // live details, fallback "VoucherRole"
         maxm[0] = _hatMaxSupply(id); // legacy maxSupply verbatim (R1)
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
     }
@@ -1428,7 +1428,7 @@ abstract contract AccessV2MigrationBase is Script {
         bool[] memory offs = new bool[](roleHats.length);
         // offs default false → setHatStatus(false)
 
-        // A5 (§6 step-3, specOrder-4 / seedCompleteness-2): DELTA-SEED first — legacy wearers who joined
+        // A5 (§6 step-3): DELTA-SEED first — legacy wearers who joined
         // since the authority was seeded (isWearerOfHat but NOT yet an authority member) are granted +
         // accepted here, INSIDE the atomic cutover, so they are not silently toggled off unported. When
         // there is no drift the delta is EMPTY (bindIndex == 0, the pre-A5 shape). This is executable —
@@ -1436,7 +1436,7 @@ abstract contract AccessV2MigrationBase is Script {
         (IExecutor.Call[] memory delta,) = _buildDeltaSeed(s, authority, candidates);
 
         // The batch is `delta` + 11 core calls + 1 trailing CutoverVerifier.verify. The verifier is
-        // MANDATORY (lockdown storageSizeOps-0): an unverified cutover batch must be UNBUILDABLE —
+        // MANDATORY: an unverified cutover batch must be UNBUILDABLE —
         // the silent `withVerify` omission previously let GenerateBatches emit production JSON with
         // NO in-batch verification at all. Every caller must wire _verifier first.
         require(_verifier != address(0), "CutoverVerifier not wired (_verifier unset) - refusing to build cutover");
@@ -1497,7 +1497,7 @@ abstract contract AccessV2MigrationBase is Script {
         //     memberCount <= canonical Hats supply, (d) the admin (topHat, subjects[0]) resolves to the
         //     org Executor + is active through the router. A failed check reverts the ENTIRE batch, so
         //     the runbook's "the cutover batch itself require()s counts and router-through resolution"
-        //     is now TRUE (was previously sim-only — specOrder-2 / simVsBroadcast-1 / seedCompleteness-2).
+        //     is now TRUE (was previously sim-only).
         {
             (uint256[] memory subjects, uint32[] memory expectedCounts, uint32[] memory expectedSupplies) =
                 _cutoverExpectedState(s, authority, candidates);

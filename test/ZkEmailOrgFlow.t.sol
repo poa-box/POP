@@ -31,7 +31,7 @@ import {IDKIMRegistry} from "../src/zkemail/IDKIMRegistry.sol";
 import {OrgDeployer, ITaskManagerBootstrap} from "../src/OrgDeployer.sol";
 import {ModulesFactory} from "../src/factories/ModulesFactory.sol";
 import {ModuleTypes} from "../src/libs/ModuleTypes.sol";
-import {EligibilityModule} from "../src/EligibilityModule.sol";
+import {IMembershipAuthority} from "../src/interfaces/IMembershipAuthority.sol";
 import {RoleConfigStructs} from "../src/libs/RoleConfigStructs.sol";
 import {IHybridVotingInit} from "../src/libs/ModuleDeploymentLib.sol";
 import {PaymasterHub} from "../src/PaymasterHub.sol";
@@ -318,21 +318,15 @@ contract ZkEmailOrgFlowTest is DeployerTest {
 
         ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
 
-        // A real zk-email invite grants a GATED role hat, not an open one — mirrors live Test6, where
-        // the Member hat is default-INeligible and the specific claimer is made eligible by governance.
-        // (The H-03 gate deliberately rejects granting an open-to-everyone hat: see the reject test.)
-        // Take any genesis role hat and GATE it explicitly, then grant this claimer eligibility.
-        uint256 targetHat = orgRegistry.getRoleHat(ZK_ORG_ID, 0);
-        assertTrue(targetHat != 0, "role hat exists");
+        // A zk-email invite grants a GATED subject, never an open one (the H-03 gate rejects
+        // open-to-everyone subjects — see the reject test). The EXECUTIVE role is deny-by-default;
+        // governance grants this claimer an explicit eligibility source on it.
+        uint256 targetHat = orgRegistry.getRoleHat(ZK_ORG_ID, 1);
+        assertTrue(targetHat != 0, "role subject exists");
 
-        address eligibilityModule = orgRegistry.getOrgContract(ZK_ORG_ID, ModuleTypes.ELIGIBILITY_MODULE_ID);
         address claimer = address(0xC0FFEE);
-        // Gate the hat (default-ineligible) and grant this claimer eligibility — governance (executor)
-        // is the eligibility-module superAdmin.
-        vm.startPrank(result.executor);
-        EligibilityModule(eligibilityModule).setDefaultEligibility(targetHat, false, false);
-        EligibilityModule(eligibilityModule).setWearerEligibility(claimer, targetHat, true, true);
-        vm.stopPrank();
+        vm.prank(result.executor);
+        IMembershipAuthority(result.membershipAuthority).grant(targetHat, claimer, true);
 
         uint256[] memory hats = new uint256[](1);
         hats[0] = targetHat;
@@ -350,8 +344,10 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         vm.prank(claimer);
         zk.claimRoleByDomain(p, claimer, hats, _emptyProof());
 
-        // Confirm the claimer wears the hat now.
-        assertTrue(IHats(SEPOLIA_HATS).isWearerOfHat(claimer, targetHat), "claimer wears the role hat");
+        // Confirm the claimer holds the subject now.
+        assertTrue(
+            IMembershipAuthority(result.membershipAuthority).isMember(targetHat, claimer), "claimer holds the role"
+        );
 
         // Nullifier was consumed.
         assertTrue(zk.isNullifierUsed(p.emailNullifier), "nullifier consumed");
@@ -368,10 +364,10 @@ contract ZkEmailOrgFlowTest is DeployerTest {
 
         ZkEmailInvites zk = ZkEmailInvites(result.zkEmailInvites);
 
-        // The genesis index-0 role hat is default-eligible (open) in the deployer config — an attacker's
-        // target. Allowlist it and try to claim: the gate must reject it fail-closed.
+        // The genesis index-0 role subject is default-ALLOW (open) in the deployer config — an
+        // attacker's target. Allowlist it and try to claim: the gate must reject it fail-closed.
         uint256 openHat = orgRegistry.getRoleHat(ZK_ORG_ID, 0);
-        assertTrue(openHat != 0, "default role hat exists");
+        assertTrue(openHat != 0, "default role subject exists");
 
         uint256[] memory hats = new uint256[](1);
         hats[0] = openHat;
@@ -389,7 +385,9 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         zk.claimRoleByDomain(p, claimer, hats, _emptyProof());
 
         // Nothing minted, nullifier NOT consumed — the reject happened before the state write.
-        assertFalse(IHats(SEPOLIA_HATS).isWearerOfHat(claimer, openHat), "no hat minted on reject");
+        assertFalse(
+            IMembershipAuthority(result.membershipAuthority).isMember(openHat, claimer), "nothing granted on reject"
+        );
         assertFalse(zk.isNullifierUsed(p.emailNullifier), "nullifier preserved on reject");
     }
 
@@ -535,68 +533,15 @@ contract ZkEmailOrgFlowTest is DeployerTest {
         bool enableEducation,
         ModulesFactory.ZkEmailConfig memory zkCfg
     ) internal returns (OrgDeployer.DeploymentResult memory) {
-        vm.startPrank(orgOwner);
-        string[] memory names = new string[](2);
-        names[0] = "DEFAULT";
-        names[1] = "EXECUTIVE";
-        string[] memory images = new string[](2);
-        images[0] = "ipfs://default-role-image";
-        images[1] = "ipfs://executive-role-image";
-        bool[] memory voting = new bool[](2);
-        voting[0] = true;
-        voting[1] = true;
-
-        IHybridVotingInit.ClassConfig[] memory classes = _buildLegacyClasses(50, 50, false, 4 ether);
-
-        OrgDeployer.PaymasterConfig memory pmCfg;
-        if (autoWhitelist) {
-            pmCfg = OrgDeployer.PaymasterConfig({
-                operatorRoleIndex: type(uint256).max,
-                autoWhitelistContracts: true,
-                maxFeePerGas: 0,
-                maxPriorityFeePerGas: 0,
-                maxCallGas: 0,
-                maxVerificationGas: 0,
-                maxPreVerificationGas: 0,
-                defaultBudgetCapPerEpoch: 0,
-                defaultBudgetEpochLen: 0
-            });
-        } else {
-            pmCfg = _defaultPaymasterConfig();
+        OrgDeployer.DeploymentParams memory params = _defaultParams(orgId);
+        params.educationHubConfig = ModulesFactory.EducationHubConfig({enabled: enableEducation});
+        if (!autoWhitelist) {
+            params.paymasterConfig.autoWhitelistContracts = false;
+            params.paymasterConfig.operatorRoleIndex = type(uint256).max;
         }
 
-        OrgDeployer.DeploymentParams memory params = OrgDeployer.DeploymentParams({
-            orgId: orgId,
-            orgName: "ZkEmail DAO",
-            metadataHash: bytes32(0),
-            registryAddr: accountRegProxy,
-            deployerAddress: orgOwner,
-            deployerUsername: "",
-            regDeadline: 0,
-            regNonce: 0,
-            regSignature: "",
-            autoUpgrade: true,
-            hybridThresholdPct: 50,
-            ddThresholdPct: 50,
-            hybridClasses: classes,
-            ddInitialTargets: new address[](0),
-            roles: _buildSimpleRoleConfigs(names, images, voting),
-            roleAssignments: _buildDefaultRoleAssignments(),
-            metadataAdminRoleIndex: type(uint256).max,
-            passkeyEnabled: false,
-            educationHubConfig: ModulesFactory.EducationHubConfig({enabled: enableEducation}),
-            bootstrap: _emptyBootstrap(),
-            paymasterConfig: pmCfg,
-            taskManagerPerms: _emptyTaskManagerPerms(),
-            hybridQuorum: 0,
-            ddQuorum: 0,
-            tokenName: "",
-            tokenSymbol: ""
-        });
-
-        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrgWithZkEmail(params, zkCfg);
-        vm.stopPrank();
-        return result;
+        vm.prank(orgOwner);
+        return deployer.deployFullOrgWithZkEmail(params, zkCfg);
     }
 
     /// @dev Builds a `ZkEmailProof` for the domain circuit. The Groth16 points are dummy bytes (the

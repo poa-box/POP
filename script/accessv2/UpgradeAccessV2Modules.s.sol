@@ -15,7 +15,7 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
 
 /*
  * ============================================================================
- * Upgrade the Access-v2 DUAL-PATH module beacons — PER-CHAIN, LOCAL (Wave D1, §4/§6)
+ * Upgrade the Access-v2 DUAL-PATH module beacons — PER-CHAIN, LOCAL (SPEC §4/§6)
  * ============================================================================
  *
  * Registers new impls + upgrades the PoaManager global beacons for the seven dual-path modules

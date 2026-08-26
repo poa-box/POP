@@ -10,7 +10,7 @@ import {DefaultGlobalRules} from "../helpers/DefaultGlobalRules.sol";
 
 /*
  * ============================================================================
- * Sync the paymaster GLOBAL RULEBOOK with the MembershipAuthority selectors (Wave D1)
+ * Sync the paymaster GLOBAL RULEBOOK with the MembershipAuthority selectors
  * ============================================================================
  *
  * Adds the ten Access-v2 user-facing / manager-delegate selectors to the type-keyed global

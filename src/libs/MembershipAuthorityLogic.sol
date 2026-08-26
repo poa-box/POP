@@ -436,8 +436,8 @@ library MembershipAuthorityLogic {
         RuleRec storage r = l.ruleOf[subject][user];
         if (r.kind == AccessV2Types.RuleKind.Grant) {
             delete l.ruleOf[subject][user];
-            // Subgraph event law: every rule deletion emits RuleCleared (a silent delete left the
-            // fold mirror showing withdrawn offers as claimable forever — subgraph review, high).
+            // Every durable rule deletion emits RuleCleared: a silent delete would leave the
+            // subgraph's fold mirror showing withdrawn offers as claimable forever.
             emit RuleCleared(subject, user);
         }
         emit OfferWithdrawn(subject, user, msg.sender);
@@ -490,8 +490,8 @@ library MembershipAuthorityLogic {
         Layout storage l = layout();
         _onlyExecutor(l);
         RuleRec storage r = l.ruleOf[subject][user];
-        // Emit ONLY when a Ban was actually deleted: the unconditional emit made the subgraph
-        // mirror clear a LIVE Grant that unremove never touches on-chain (subgraph review, medium).
+        // Emit ONLY when a Ban was actually deleted — an unconditional emit would make the subgraph
+        // mirror clear a LIVE Grant that unremove never touches on-chain.
         if (r.kind == AccessV2Types.RuleKind.Ban) {
             delete l.ruleOf[subject][user];
             emit RuleCleared(subject, user);
@@ -601,7 +601,7 @@ library MembershipAuthorityLogic {
 
         if (action == AccessV2Types.PendingKind.Grant) {
             // Defense-in-depth mirror of the delegatedGrant guard: never overwrite a sticky
-            // (non-delegable) governance rule at finalize either (D3).
+            // (non-delegable) governance rule at finalize either.
             RuleRec storage rr = l.ruleOf[subject][user];
             if (
                 rr.kind != AccessV2Types.RuleKind.None && rr.author == AccessV2Types.RuleAuthor.Governance
@@ -655,7 +655,7 @@ library MembershipAuthorityLogic {
         // the pending alone would strand that rule live, so the target could claim IMMEDIATELY with no
         // delay and no manager re-check — worse than an uncancelled offer. Mirror withdrawOffer's dual
         // cleanup and drop the rule too. Grant/Remove pendings write no rule at creation, so nothing
-        // to clear there (D2).
+        // to clear there.
         if (p.action == AccessV2Types.PendingKind.Offer) {
             uint256 subject = p.subject;
             address user = p.user;

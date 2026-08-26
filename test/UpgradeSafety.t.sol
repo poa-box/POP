@@ -150,7 +150,7 @@ contract UpgradeSafetyTest is Test {
     function testOrgDeployerImplCannotBeInitialized() public {
         OrgDeployer impl = new OrgDeployer();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, OWNER, OWNER, OWNER, OWNER, HATS, OWNER, OWNER);
+        impl.initialize(OWNER, OWNER, OWNER, OWNER, OWNER, HATS, OWNER);
     }
 
     // ══════════════════════════════════════════════════════════════════════

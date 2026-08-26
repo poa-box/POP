@@ -33,7 +33,6 @@ import {DefaultGlobalRules} from "../helpers/DefaultGlobalRules.sol";
 import {GovernanceFactory} from "../../src/factories/GovernanceFactory.sol";
 import {AccessFactory} from "../../src/factories/AccessFactory.sol";
 import {ModulesFactory} from "../../src/factories/ModulesFactory.sol";
-import {HatsTreeSetup} from "../../src/HatsTreeSetup.sol";
 
 /**
  * @title DeployInfrastructure
@@ -79,7 +78,6 @@ contract DeployInfrastructure is Script {
     address public governanceFactory;
     address public accessFactory;
     address public modulesFactory;
-    address public hatsTreeSetup;
 
     /*═══════════════════════════ MAIN DEPLOYMENT ═══════════════════════════*/
 
@@ -153,12 +151,10 @@ contract DeployInfrastructure is Script {
         governanceFactory = address(new GovernanceFactory());
         accessFactory = address(new AccessFactory());
         modulesFactory = address(new ModulesFactory());
-        hatsTreeSetup = address(new HatsTreeSetup());
 
         console.log("GovernanceFactory:", governanceFactory);
         console.log("AccessFactory:", accessFactory);
         console.log("ModulesFactory:", modulesFactory);
-        console.log("HatsTreeSetup:", hatsTreeSetup);
 
         // Deploy PaymasterHub implementation and register
         address paymasterHubImpl = address(new PaymasterHub());
@@ -183,14 +179,13 @@ contract DeployInfrastructure is Script {
         // Deploy OrgDeployer proxy (universalPasskeyFactory set later after deployment)
         address deployerBeacon = PoaManager(poaManager).getBeaconById(keccak256("OrgDeployer"));
         bytes memory deployerInit = abi.encodeWithSignature(
-            "initialize(address,address,address,address,address,address,address,address)",
+            "initialize(address,address,address,address,address,address,address)",
             governanceFactory,
             accessFactory,
             modulesFactory,
             poaManager,
             orgRegistry,
             HATS_PROTOCOL,
-            hatsTreeSetup,
             paymasterHub
         );
         orgDeployer = address(new BeaconProxy(deployerBeacon, deployerInit));
@@ -386,9 +381,6 @@ contract DeployInfrastructure is Script {
             '",\n',
             '  "modulesFactory": "',
             vm.toString(modulesFactory),
-            '",\n',
-            '  "hatsTreeSetup": "',
-            vm.toString(hatsTreeSetup),
             '",\n',
             '  "universalPasskeyFactory": "',
             vm.toString(universalPasskeyFactory),
