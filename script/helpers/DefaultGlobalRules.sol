@@ -156,9 +156,20 @@ library DefaultGlobalRules {
 
         // ── EligibilityModule (8) — vouch + role-application + kick paths ──
         // Retained for the orgs still on the legacy access rails; new orgs deploy no EligibilityModule.
-        // `claimHat` / `claimHats` are NOT here: no chain ever had a targetTypes row mapping them, so
-        // they were never reachable through the rulebook, and Access v2 replaces them with
-        // MembershipAuthority.claim below.
+        // `claimHat` / `claimHats` are NOT here. The rationale is NOT "targetTypes never mapped them"
+        // (targetTypes rows map module ADDRESSES to typeIds, not selectors — a single EM row makes
+        // EVERY EM-typed rule resolvable, and UpgradePaymasterGlobalRules Step4 backfills exactly
+        // that). The reasons the omission is safe are:
+        //   (a) the type-keyed rulebook ships with PaymasterHub v20 and has never been broadcast —
+        //       both live hubs are still v19 (see SyncAccessV2GlobalRules.s.sol), so NO EM-typed row
+        //       is live anywhere today;
+        //   (b) the legacy per-org targetTypes backfill was likewise never broadcast (Wave-F review
+        //       finding P5), so an EM-typed row would not resolve for live orgs even after (a); and
+        //   (c) `claimHat` / `claimHats` exist only on the unshipped EligibilityModule v8 impl, so no
+        //       LIVE EligibilityModule carries the selector at all.
+        // Access v2 replaces the flow with MembershipAuthority.claim below, and every EM row here
+        // retires with the Wave-G strip — so do NOT "restore" these two, and do NOT delete the 8
+        // retained rows on this reasoning either: those cover selectors that DO exist on live impls.
         t = ModuleTypes.ELIGIBILITY_MODULE_ID;
         e[i++] = Entry(t, bytes4(keccak256("claimVouchedHat(uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("vouchFor(address,uint256)")), 0);

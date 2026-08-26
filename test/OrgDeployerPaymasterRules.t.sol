@@ -149,8 +149,10 @@ contract OrgDeployerPaymasterRulesTest is Test {
         assertEq(_hintOf(entries, ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector), 1_200_000);
 
         // The legacy-rails delegated-kick lifecycle entries carry hints (user-facing since the
-        // manager-hat wave). `claimHat` / `claimHats` are deliberately absent: no targetTypes row
-        // ever mapped them, so they were never reachable through the rulebook.
+        // manager-hat wave). `claimHat` / `claimHats` are deliberately absent — see the rationale in
+        // DefaultGlobalRules.sol: the v20 rulebook has never been broadcast, the legacy targetTypes
+        // backfill was never broadcast either, and the selectors exist only on the unshipped
+        // EligibilityModule v8 impl.
         assertEq(
             _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.kickWearer.selector), 400_000
         );
