@@ -15,7 +15,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 
 import {PoaManager} from "../src/PoaManager.sol";
 import {ImplementationRegistry} from "../src/ImplementationRegistry.sol";
-import {OrgRegistry} from "../src/OrgRegistry.sol";
+import {OrgRegistry, NotOrgMetadataAdmin, NotRegistryAdmin, InvalidParam} from "../src/OrgRegistry.sol";
 import {OrgDeployer, ITaskManagerBootstrap} from "../src/OrgDeployer.sol";
 import {GovernanceFactory} from "../src/factories/GovernanceFactory.sol";
 import {AccessFactory} from "../src/factories/AccessFactory.sol";
@@ -535,6 +535,50 @@ contract DeployerTest is Test {
         vm.prank(address(0xDEAD));
         vm.expectRevert(PaymasterHubErrors.NotAdmin.selector);
         paymasterHub.setPause(ORG_ID, false);
+    }
+
+    /// @notice The same router makes OrgRegistry's direct metadata-admin edit path resolve for a
+    ///         new-style org — `updateOrgMetaAsAdmin` reads the seeded metadata-admin SUBJECT, which
+    ///         real Hats can never resolve.
+    function testOrgRegistry_metadataAdminResolvesThroughTheRouter() public {
+        _deployDefaultOrg(ORG_ID);
+
+        // The deployer seeds the metadata-admin hat from `metadataAdminRoleIndex` (EXECUTIVE here).
+        assertEq(orgRegistry.getOrgMetadataAdminHat(ORG_ID), _roleSubject(ROLE_EXECUTIVE), "metadata admin subject");
+
+        vm.prank(orgOwner);
+        vm.expectRevert(NotOrgMetadataAdmin.selector);
+        orgRegistry.updateOrgMetaAsAdmin(ORG_ID, "Renamed DAO", bytes32(uint256(1)));
+
+        AuthorityRouter router = _deployAuthorityRouter();
+        vm.prank(address(poaManager));
+        orgRegistry.setHats(address(router));
+        assertEq(orgRegistry.getHats(), address(router), "registry repointed by the PoaManager");
+
+        vm.prank(orgOwner);
+        orgRegistry.updateOrgMetaAsAdmin(ORG_ID, "Renamed DAO", bytes32(uint256(1)));
+
+        vm.prank(address(0xDEAD));
+        vm.expectRevert(NotOrgMetadataAdmin.selector);
+        orgRegistry.updateOrgMetaAsAdmin(ORG_ID, "Hijacked", bytes32(uint256(2)));
+    }
+
+    /// @notice OrgRegistry's repoint setter is gated: neither a stranger nor a zero address gets in.
+    ///         The PoaManager arm is resolved from this proxy's beacon owner, which is how the
+    ///         live-chain ceremony reaches it (Hub/Satellite adminCall -> PoaManager -> registry).
+    function testOrgRegistry_setHatsIsGated() public {
+        vm.prank(address(0xDEAD));
+        vm.expectRevert(NotRegistryAdmin.selector);
+        orgRegistry.setHats(address(mockHats));
+
+        vm.prank(address(poaManager));
+        vm.expectRevert(InvalidParam.selector);
+        orgRegistry.setHats(address(0));
+
+        // The registry owner (the OrgDeployer, post-genesis) is the other arm.
+        vm.prank(address(deployer));
+        orgRegistry.setHats(address(mockHats));
+        assertEq(orgRegistry.getHats(), address(mockHats), "owner can repoint too");
     }
 
     /*══════════════════════════════════════ HELPERS ══════════════════════════════════════*/

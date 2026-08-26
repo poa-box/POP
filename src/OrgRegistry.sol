@@ -16,6 +16,12 @@ error NotOrgExecutor();
 error NotOrgMetadataAdmin();
 error OwnerOnlyDuringBootstrap(); // deployer tried after bootstrap
 error AutoUpgradeRequired(); // deployer must set autoUpgrade=true
+error NotRegistryAdmin(); // neither the registry owner nor the PoaManager
+
+/// @notice Minimal `owner()` view used to resolve the PoaManager from this proxy's beacon.
+interface IBeaconOwner {
+    function owner() external view returns (address);
+}
 
 /* ────────────────── Org Registry ────────────────── */
 contract OrgRegistry is Initializable, OwnableUpgradeable {
@@ -90,6 +96,7 @@ contract OrgRegistry is Initializable, OwnableUpgradeable {
     );
     event HatsTreeRegistered(bytes32 indexed orgId, uint256 topHatId, uint256[] roleHatIds);
     event OrgMetadataAdminHatSet(bytes32 indexed orgId, uint256 hatId);
+    event HatsSet(address indexed hats);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -105,6 +112,7 @@ contract OrgRegistry is Initializable, OwnableUpgradeable {
         if (initialOwner == address(0) || _hats == address(0)) revert InvalidParam();
         __Ownable_init(initialOwner);
         _layout().hats = IHats(_hats);
+        emit HatsSet(_hats); // mirror {setHats} so indexers see the deploy-time pointer
     }
 
     /**
@@ -112,6 +120,46 @@ contract OrgRegistry is Initializable, OwnableUpgradeable {
      */
     function getHats() external view returns (address) {
         return address(_layout().hats);
+    }
+
+    /**
+     * @notice Repoint the registry's membership-read surface (Access v2 §5 / §6 step 0.5).
+     * @dev The `hats` slot was previously written only at {initialize}. Access-v2 orgs carry a
+     *      NEW-STYLE metadata-admin subject id (`uint160(authority) << 64 | seq`, always < 2^224),
+     *      which real Hats Protocol resolves to balance 0 — so {updateOrgMetaAsAdmin} is dead for
+     *      those orgs until this points at the chain's AuthorityRouter. The router passes legacy
+     *      Hats ids straight through, so the repoint is behaviour-neutral for unmigrated orgs.
+     *      Gated on the registry owner (the OrgDeployer, or the deployer EOA during genesis) OR the
+     *      PoaManager, resolved as the owner of this proxy's beacon — that is the protocol upgrade
+     *      authority reachable from `PoaManagerHub`/`PoaManagerSatellite.adminCall`. Mirrors
+     *      `PaymasterHub.setHats`: zero-check + event.
+     * @param newHats The new membership-read surface (the AuthorityRouter, or a Hats address for rollback).
+     */
+    function setHats(address newHats) external {
+        if (newHats == address(0)) revert InvalidParam();
+        if (msg.sender != owner() && msg.sender != _poaManager()) revert NotRegistryAdmin();
+        _layout().hats = IHats(newHats);
+        emit HatsSet(newHats);
+    }
+
+    /**
+     * @dev The PoaManager for this deployment = the owner of this proxy's beacon. Returns
+     *      address(0) when this instance is not behind a BeaconProxy, or when the beacon does not
+     *      expose `owner()` — in which case only the registry owner can repoint.
+     */
+    function _poaManager() private view returns (address) {
+        // ERC-1967 beacon slot: bytes32(uint256(keccak256("eip1967.proxy.beacon")) - 1)
+        bytes32 beaconSlot = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
+        address beacon;
+        assembly {
+            beacon := sload(beaconSlot)
+        }
+        if (beacon == address(0)) return address(0);
+        try IBeaconOwner(beacon).owner() returns (address beaconOwner) {
+            return beaconOwner;
+        } catch {
+            return address(0);
+        }
     }
 
     /* ═════════════════ ORG  LOGIC ═════════════════ */

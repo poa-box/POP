@@ -16,11 +16,11 @@ scripts (`script/rolemanager/`, never broadcast) were deleted in the 2026-08 scr
 Scripts in `script/accessv2/`; all admin calls are Satellite-local (Gnosis) / Hub-local (Arbitrum)
 as Hudson (`0xA6F4…b2c9`). Versions were dual-surface probed (registry + CREATE2, both chains)
 2026-08-22 — **re-probe before broadcast** (CLAUDE.md loop): MembershipAuthority v1, AuthorityRouter
-v1, PaymasterHub v20, DD/HV v13, TM/PT/QJ v8, EducationHub v4, Executor v5.
+v1, PaymasterHub v20, OrgRegistry v2, DD/HV v13, TM/PT/QJ v8, EducationHub v4, Executor v5.
 
 | # | Step | Script | Sim (must PASS first) |
 |---|------|--------|----------------------|
-| 1 | Register MembershipAuthority + AuthorityRouter (impl + beacon), deploy router singleton (CREATE3 — same address both chains), PaymasterHub → v20 (adds `setHats`), **hub `setHats(router)` repoint while router is EMPTY** (§6 step 0.5) | `RegisterAccessV2Protocol.s.sol` (Step1/Step2 per chain) | `SimGnosis` / `SimArbitrum` — includes router-passthrough neutrality proof for a live wearer |
+| 1 | Register MembershipAuthority + AuthorityRouter (impl + beacon), deploy router singleton (CREATE3 — same address both chains), PaymasterHub → v20 (adds `setHats`), **hub `setHats(router)` repoint while router is EMPTY** (§6 step 0.5), then OrgRegistry → v2 (adds `setHats`) + **registry `setHats(router)`** — the second chain-wide reader, without which `updateOrgMetaAsAdmin` stays dead for every new-style org | `RegisterAccessV2Protocol.s.sol` (Step1/Step2 per chain) | `SimGnosis` / `SimArbitrum` — router-passthrough neutrality proof for a live wearer **plus** a live `updateOrgMetaAsAdmin` by a real metadata-admin wearer before *and* after the registry repoint |
 | 2 | Register + bump the 7 dual-path module beacons (DD, HV, TM, PT, EDU, QJ, Executor) | `UpgradeAccessV2Modules.s.sol` | `SimGnosis` / `SimArbitrum` — byte-identical legacy read snapshot pre/post on a live org; `membershipAuthority()==0` |
 | 3 | Global rulebook: +10 MembershipAuthority user-facing selectors (`DefaultGlobalRules.sol` is the source of truth) | `SyncAccessV2GlobalRules.s.sol` | `SimGnosis` / `SimArbitrum` — getRule before/after with correct `{maxCallGasHint, allowed}` field order |
 

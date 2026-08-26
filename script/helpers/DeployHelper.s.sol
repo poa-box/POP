@@ -172,7 +172,8 @@ abstract contract DeployHelper is Script {
             )
         );
         pm.adminCall(paymasterHub_, abi.encodeWithSignature("setHats(address)", router));
+        OrgRegistry(orgRegistry_).setHats(router);
         console.log("AuthorityRouter:", router);
-        console.log("  PaymasterHub repointed to the router");
+        console.log("  PaymasterHub + OrgRegistry repointed to the router");
     }
 }

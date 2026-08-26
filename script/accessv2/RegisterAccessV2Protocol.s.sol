@@ -10,6 +10,7 @@ import {AuthorityRouter} from "../../src/AuthorityRouter.sol";
 import {IAuthorityRouter} from "../../src/interfaces/IAuthorityRouter.sol";
 import {CutoverVerifier} from "../../src/CutoverVerifier.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
+import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.sol";
 
 /*
@@ -44,12 +45,21 @@ import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.
  *      through Satellite/Hub adminCall). The router's UNBOUND legacy-id passthrough goes straight to
  *      real Hats, so this is BEHAVIOR-NEUTRAL for every unmigrated org — hard-asserted in the sim
  *      (a live hats read THROUGH the router equals the direct Hats read for a real org wearer).
+ *   6. upgradeBeacon("OrgRegistry", orgRegV2Impl, "v2") + OrgRegistry.setHats(router) — the SECOND
+ *      chain-wide reader. `updateOrgMetaAsAdmin` authorizes against `l.hats`, which was writable only
+ *      at initialize; new-style orgs seed a metadata-admin SUBJECT id (< 2^224) that real Hats always
+ *      resolves to balance 0, so that path is dead for them until the registry reads through the
+ *      router too. v2 adds the poaManager/owner-gated `setHats`. Behaviour-neutral for legacy orgs —
+ *      hard-asserted in the sims with a live `updateOrgMetaAsAdmin` by a REAL metadata-admin wearer.
  *
  * Version selection (dual-surface probed FREE on BOTH chains by the orchestrator, waveD-recon.md;
  * re-asserted cheaply in the sims rather than re-probed):
  *   MembershipAuthority "v1" — fresh type (registry count 0 both chains)
  *   AuthorityRouter     "v1" — fresh type
  *   PaymasterHub        "v20" — registry FREE + CREATE3 FREE (live is v19)
+ *   OrgRegistry         "v2"  — registry FREE + CREATE3 FREE on BOTH chains (live is v1; probed
+ *                               2026-08 — getVersionCount == 1, CREATE3 slot
+ *                               0x72b453a3a8Bc71Dc1Ebc558014c08B6485824267 empty on both)
  *
  * Usage:
  *   # Sims (BOTH under production profile — broadcast uses production bytecode):
@@ -129,6 +139,7 @@ abstract contract AccessV2RegisterBase is Script {
     string internal constant MA_VERSION = "v1";
     string internal constant ROUTER_VERSION = "v1";
     string internal constant PM_VERSION = "v20";
+    string internal constant ORG_REGISTRY_VERSION = "v2";
     // Router singleton (ERC1967Proxy) CREATE3 salt — its own (typeName,version) namespace, distinct
     // from the router IMPL type. CREATE3 ignores initcode, so the same address lands on both chains
     // even though each chain's init data differs (orgRegistry / paymasterHub).
@@ -144,6 +155,7 @@ abstract contract AccessV2RegisterBase is Script {
     bytes32 internal constant AUTHORITY_ROUTER_ID = keccak256("AuthorityRouter");
     bytes32 internal constant CUTOVER_VERIFIER_ID = keccak256("CutoverVerifier");
     bytes32 internal constant PAYMASTER_HUB_ID = keccak256("PaymasterHub");
+    bytes32 internal constant ORG_REGISTRY_ID = keccak256("OrgRegistry");
 
     /// @dev CREATE3-deploy `code` at the deterministic (typeName,version) address; idempotent.
     function _ddDeploy(string memory typeName, string memory version, bytes memory code)
@@ -191,12 +203,15 @@ abstract contract AccessV2RegisterBase is Script {
         proxy = _ddDeploy(ROUTER_SINGLETON_TYPE, ROUTER_SINGLETON_VERSION, code);
     }
 
-    /// @dev CREATE3-deploy the three impls (MembershipAuthority + AuthorityRouter + PaymasterHub v20).
-    function _deployImpls() internal returns (address maImpl, address routerImpl, address pmImpl) {
+    /// @dev CREATE3-deploy the four impls (MembershipAuthority + AuthorityRouter + PaymasterHub v20
+    ///      + OrgRegistry v2).
+    function _deployImpls() internal returns (address maImpl, address routerImpl, address pmImpl, address orgRegImpl) {
         maImpl = _ddDeploy("MembershipAuthority", MA_VERSION, type(MembershipAuthority).creationCode);
         routerImpl = _ddDeploy("AuthorityRouter", ROUTER_VERSION, type(AuthorityRouter).creationCode);
         pmImpl = _ddDeploy("PaymasterHub", PM_VERSION, type(PaymasterHub).creationCode);
+        orgRegImpl = _ddDeploy("OrgRegistry", ORG_REGISTRY_VERSION, type(OrgRegistry).creationCode);
         require(pmImpl.code.length <= 24576, "PaymasterHub v20 impl exceeds EIP-170");
+        require(orgRegImpl.code.length <= 24576, "OrgRegistry v2 impl exceeds EIP-170");
     }
 
     /// @dev getBeaconById REVERTS TypeUnknown() for an unregistered type; treat that as "not registered".
@@ -226,7 +241,8 @@ abstract contract AccessV2RegisterBase is Script {
     }
 
     /// @dev The full Gnosis register+wire batch (Satellite-local). Caller must be the Satellite owner.
-    function _registerAndWireGnosis(address maImpl, address routerImpl, address pmImpl)
+    ///      The OrgRegistry beacon upgrade MUST precede its repoint — `setHats` ships in v2.
+    function _registerAndWireGnosis(address maImpl, address routerImpl, address pmImpl, address orgRegImpl)
         internal
         returns (address routerProxy)
     {
@@ -237,10 +253,12 @@ abstract contract AccessV2RegisterBase is Script {
         routerProxy = _deployRouterSingleton(routerImpl, GNOSIS_ORG_REGISTRY, GNOSIS_PAYMASTER);
         sat.upgradeBeaconDirect("PaymasterHub", pmImpl, PM_VERSION);
         sat.adminCall(GNOSIS_PAYMASTER, _setHatsCalldata(routerProxy));
+        sat.upgradeBeaconDirect("OrgRegistry", orgRegImpl, ORG_REGISTRY_VERSION);
+        sat.adminCall(GNOSIS_ORG_REGISTRY, _setHatsCalldata(routerProxy));
     }
 
     /// @dev The full Arbitrum register+wire batch (Hub-local). Caller must be the Hub owner.
-    function _registerAndWireArbitrum(address maImpl, address routerImpl, address pmImpl)
+    function _registerAndWireArbitrum(address maImpl, address routerImpl, address pmImpl, address orgRegImpl)
         internal
         returns (address routerProxy)
     {
@@ -251,6 +269,8 @@ abstract contract AccessV2RegisterBase is Script {
         routerProxy = _deployRouterSingleton(routerImpl, ARB_ORG_REGISTRY, ARB_PAYMASTER);
         hub.upgradeBeaconLocal("PaymasterHub", pmImpl, PM_VERSION);
         hub.adminCall(ARB_PAYMASTER, _setHatsCalldata(routerProxy));
+        hub.upgradeBeaconLocal("OrgRegistry", orgRegImpl, ORG_REGISTRY_VERSION);
+        hub.adminCall(ARB_ORG_REGISTRY, _setHatsCalldata(routerProxy));
     }
 
     function _assertEffects(
@@ -300,6 +320,32 @@ abstract contract AccessV2RegisterBase is Script {
         require(IPaymasterView(paymaster).HATS() == routerProxy, "PaymasterHub.setHats(router) did not land");
     }
 
+    /// @dev The OrgRegistry arm of §6 step 0.5: beacon on v2 (the impl that CARRIES setHats) and the
+    ///      registry's own hats pointer moved to the router.
+    function _assertOrgRegistryRepoint(address poaManager, address orgRegistry, address orgRegImpl, address routerProxy)
+        internal
+        view
+    {
+        require(
+            IPoaManagerView(poaManager).getCurrentImplementationById(ORG_REGISTRY_ID) == orgRegImpl,
+            "OrgRegistry beacon not upgraded to v2"
+        );
+        require(OrgRegistry(orgRegistry).getHats() == routerProxy, "OrgRegistry.setHats(router) did not land");
+    }
+
+    /// @dev BEHAVIOR-NEUTRAL proof for the OrgRegistry arm: a REAL metadata-admin wearer can still
+    ///      drive `updateOrgMetaAsAdmin` once the registry reads through the router (legacy hat ids
+    ///      pass straight through), and a stranger still cannot. Emits only — no state is mutated.
+    function _assertOrgMetaResolves(address orgRegistry, bytes32 orgId, address realAdmin, bytes memory name) internal {
+        vm.prank(realAdmin);
+        OrgRegistry(orgRegistry).updateOrgMetaAsAdmin(orgId, name, bytes32(0));
+
+        vm.prank(address(0xDEADBEEF));
+        (bool ok,) =
+            orgRegistry.call(abi.encodeWithSelector(OrgRegistry.updateOrgMetaAsAdmin.selector, orgId, name, bytes32(0)));
+        require(!ok, "stranger unexpectedly passed the metadata-admin gate through the router");
+    }
+
     /// @dev BEHAVIOR-NEUTRAL proof for unmigrated orgs (§6 step 0.5): the router's UNBOUND legacy-id
     ///      passthrough MUST equal a direct Hats read. Uses a REAL (wearer, hatId) pair on the fork
     ///      (both true) plus a non-wearer (both false) so the check is not trivially both-false.
@@ -334,16 +380,18 @@ abstract contract AccessV2RegisterBase is Script {
 contract Step1_DeployImplsGnosis is AccessV2RegisterBase {
     function run() public {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
-        console.log(
-            "\n=== Step 1 (Gnosis): DD-deploy MembershipAuthority + AuthorityRouter + PaymasterHub v20 impls ==="
-        );
+        console.log("\n=== Step 1 (Gnosis): DD-deploy MA + AuthorityRouter + PaymasterHub v20 + OrgRegistry v2 ===");
         vm.startBroadcast(key);
-        (address ma, address router, address pm) = _deployImpls();
+        (address ma, address router, address pm, address orgReg) = _deployImpls();
         vm.stopBroadcast();
-        require(ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0, "an impl has no code");
+        require(
+            ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0 && orgReg.code.length > 0,
+            "an impl has no code"
+        );
         console.log("  MembershipAuthority impl:", ma);
         console.log("  AuthorityRouter impl:    ", router);
         console.log("  PaymasterHub v20 impl:   ", pm);
+        console.log("  OrgRegistry v2 impl:     ", orgReg);
     }
 }
 
@@ -352,15 +400,19 @@ contract Step2_RegisterAndWireGnosis is AccessV2RegisterBase {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(ISatelliteAdmin(GNOSIS_SATELLITE).owner() == vm.addr(key), "signer must own the Satellite");
         require(_beacon(GNOSIS_POA_MANAGER, MEMBERSHIP_AUTHORITY_ID) == address(0), "MA already registered on Gnosis");
-        (address ma, address router, address pm) = _deployImpls();
-        require(ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0, "run Step1 first (impl missing)");
+        (address ma, address router, address pm, address orgReg) = _deployImpls();
+        require(
+            ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0 && orgReg.code.length > 0,
+            "run Step1 first (impl missing)"
+        );
 
         vm.startBroadcast(key);
-        address routerProxy = _registerAndWireGnosis(ma, router, pm);
+        address routerProxy = _registerAndWireGnosis(ma, router, pm, orgReg);
         vm.stopBroadcast();
 
         _assertEffects(GNOSIS_POA_MANAGER, GNOSIS_PAYMASTER, GNOSIS_ORG_REGISTRY, ma, router, pm, routerProxy);
-        console.log("Gnosis: Access-v2 protocol registered + hub repointed to router:", routerProxy);
+        _assertOrgRegistryRepoint(GNOSIS_POA_MANAGER, GNOSIS_ORG_REGISTRY, orgReg, routerProxy);
+        console.log("Gnosis: Access-v2 protocol registered + hub/registry repointed to router:", routerProxy);
     }
 }
 
@@ -369,16 +421,18 @@ contract Step2_RegisterAndWireGnosis is AccessV2RegisterBase {
 contract Step1b_DeployImplsArbitrum is AccessV2RegisterBase {
     function run() public {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
-        console.log(
-            "\n=== Step 1b (Arbitrum): DD-deploy MembershipAuthority + AuthorityRouter + PaymasterHub v20 impls ==="
-        );
+        console.log("\n=== Step 1b (Arbitrum): DD-deploy MA + AuthorityRouter + PaymasterHub v20 + OrgRegistry v2 ===");
         vm.startBroadcast(key);
-        (address ma, address router, address pm) = _deployImpls();
+        (address ma, address router, address pm, address orgReg) = _deployImpls();
         vm.stopBroadcast();
-        require(ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0, "an impl has no code");
+        require(
+            ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0 && orgReg.code.length > 0,
+            "an impl has no code"
+        );
         console.log("  MembershipAuthority impl:", ma);
         console.log("  AuthorityRouter impl:    ", router);
         console.log("  PaymasterHub v20 impl:   ", pm);
+        console.log("  OrgRegistry v2 impl:     ", orgReg);
     }
 }
 
@@ -387,15 +441,19 @@ contract Step2b_RegisterAndWireArbitrum is AccessV2RegisterBase {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(IHubAdmin(ARB_HUB).owner() == vm.addr(key), "signer must own the Hub");
         require(_beacon(ARB_POA_MANAGER, MEMBERSHIP_AUTHORITY_ID) == address(0), "MA already registered on Arbitrum");
-        (address ma, address router, address pm) = _deployImpls();
-        require(ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0, "run Step1b first (impl missing)");
+        (address ma, address router, address pm, address orgReg) = _deployImpls();
+        require(
+            ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0 && orgReg.code.length > 0,
+            "run Step1b first (impl missing)"
+        );
 
         vm.startBroadcast(key);
-        address routerProxy = _registerAndWireArbitrum(ma, router, pm);
+        address routerProxy = _registerAndWireArbitrum(ma, router, pm, orgReg);
         vm.stopBroadcast();
 
         _assertEffects(ARB_POA_MANAGER, ARB_PAYMASTER, ARB_ORG_REGISTRY, ma, router, pm, routerProxy);
-        console.log("Arbitrum: Access-v2 protocol registered + hub repointed to router:", routerProxy);
+        _assertOrgRegistryRepoint(ARB_POA_MANAGER, ARB_ORG_REGISTRY, orgReg, routerProxy);
+        console.log("Arbitrum: Access-v2 protocol registered + hub/registry repointed to router:", routerProxy);
     }
 }
 
@@ -409,6 +467,9 @@ contract SimGnosis is AccessV2RegisterBase {
     // Test6 (Gnosis): its Executor wears the org topHat (domain 1077) — a real (wearer, hatId) pair.
     address constant TEST6_EXECUTOR = 0xA09F1035Ff97d17ccA40048F027c654b66B83183;
     uint256 constant TEST6_TOPHAT = uint256(1077) << 224;
+    // Test6's OrgRegistry entry + a REAL wearer of its metadata-admin hat (Hudson) — the live probe
+    // for the OrgRegistry arm of the repoint.
+    bytes32 constant TEST6_ORG_ID = 0x263b2b29f392647f0fb8ddbb26f099e812ab4ba2777e5e07b906277164181f6b;
 
     function run() public {
         console.log("\n=== SIM: Access-v2 protocol registration (Gnosis fork, Satellite-local) ===");
@@ -416,25 +477,39 @@ contract SimGnosis is AccessV2RegisterBase {
         require(
             _versionFree(GNOSIS_REGISTRY, "PaymasterHub", PM_VERSION), "sim: PaymasterHub v20 already taken (Gnosis)"
         );
+        require(
+            _versionFree(GNOSIS_REGISTRY, "OrgRegistry", ORG_REGISTRY_VERSION),
+            "sim: OrgRegistry v2 already taken (Gnosis)"
+        );
         address hatsBefore = IPaymasterView(GNOSIS_PAYMASTER).HATS();
+        address regHatsBefore = OrgRegistry(GNOSIS_ORG_REGISTRY).getHats();
         console.log("  PaymasterHub.HATS before:", hatsBefore);
+        console.log("  OrgRegistry.getHats before:", regHatsBefore);
+        // Baseline: the live metadata-admin path works TODAY against real Hats.
+        _assertOrgMetaResolves(GNOSIS_ORG_REGISTRY, TEST6_ORG_ID, HUDSON, "Test6");
 
         vm.startPrank(HUDSON);
-        (address ma, address router, address pm) = _deployImpls();
-        address routerProxy = _registerAndWireGnosis(ma, router, pm);
+        (address ma, address router, address pm, address orgReg) = _deployImpls();
+        address routerProxy = _registerAndWireGnosis(ma, router, pm, orgReg);
         vm.stopPrank();
 
         _assertEffects(GNOSIS_POA_MANAGER, GNOSIS_PAYMASTER, GNOSIS_ORG_REGISTRY, ma, router, pm, routerProxy);
+        _assertOrgRegistryRepoint(GNOSIS_POA_MANAGER, GNOSIS_ORG_REGISTRY, orgReg, routerProxy);
         require(hatsBefore == HATS, "sim: expected live hub pointing at real Hats pre-repoint");
+        require(regHatsBefore == HATS, "sim: expected live registry pointing at real Hats pre-repoint");
         require(routerProxy != hatsBefore, "sim: router must differ from prior hats");
         _assertRouterNeutral(routerProxy, TEST6_EXECUTOR, TEST6_TOPHAT);
+        // The same live metadata-admin call STILL resolves, now routed through the AuthorityRouter.
+        _assertOrgMetaResolves(GNOSIS_ORG_REGISTRY, TEST6_ORG_ID, HUDSON, "Test6");
 
         console.log("  MembershipAuthority impl:", ma);
         console.log("  AuthorityRouter impl:    ", router);
         console.log("  AuthorityRouter singleton:", routerProxy);
         console.log("  PaymasterHub v20 impl:   ", pm);
+        console.log("  OrgRegistry v2 impl:     ", orgReg);
         console.log("  PaymasterHub.HATS after: ", IPaymasterView(GNOSIS_PAYMASTER).HATS());
-        console.log("PASS: SimGnosis - Access-v2 protocol registered; hub->router repoint neutral for Test6.");
+        console.log("  OrgRegistry.getHats after:", OrgRegistry(GNOSIS_ORG_REGISTRY).getHats());
+        console.log("PASS: SimGnosis - Access-v2 protocol registered; hub+registry->router repoint neutral for Test6.");
     }
 }
 
@@ -442,6 +517,7 @@ contract SimGnosis is AccessV2RegisterBase {
 contract SimArbitrum is AccessV2RegisterBase {
     address constant POA_EXECUTOR = 0xB1ff2Bd0231770ccc91801aa1fae4b3226E1fE41;
     uint256 constant POA_TOPHAT = uint256(93) << 224;
+    bytes32 constant POA_ORG_ID = 0xa71879ef0e38b15fe7080196c0102f859e0ca8e7b8c0703ec8df03c66befd069;
 
     function run() public {
         console.log("\n=== SIM: Access-v2 protocol registration (Arbitrum fork, Hub-local) ===");
@@ -449,24 +525,36 @@ contract SimArbitrum is AccessV2RegisterBase {
         require(
             _versionFree(ARB_REGISTRY, "PaymasterHub", PM_VERSION), "sim: PaymasterHub v20 already taken (Arbitrum)"
         );
+        require(
+            _versionFree(ARB_REGISTRY, "OrgRegistry", ORG_REGISTRY_VERSION),
+            "sim: OrgRegistry v2 already taken (Arbitrum)"
+        );
         address hatsBefore = IPaymasterView(ARB_PAYMASTER).HATS();
+        address regHatsBefore = OrgRegistry(ARB_ORG_REGISTRY).getHats();
         console.log("  PaymasterHub.HATS before:", hatsBefore);
+        console.log("  OrgRegistry.getHats before:", regHatsBefore);
+        _assertOrgMetaResolves(ARB_ORG_REGISTRY, POA_ORG_ID, HUDSON, "Poa");
 
         vm.startPrank(HUDSON);
-        (address ma, address router, address pm) = _deployImpls();
-        address routerProxy = _registerAndWireArbitrum(ma, router, pm);
+        (address ma, address router, address pm, address orgReg) = _deployImpls();
+        address routerProxy = _registerAndWireArbitrum(ma, router, pm, orgReg);
         vm.stopPrank();
 
         _assertEffects(ARB_POA_MANAGER, ARB_PAYMASTER, ARB_ORG_REGISTRY, ma, router, pm, routerProxy);
+        _assertOrgRegistryRepoint(ARB_POA_MANAGER, ARB_ORG_REGISTRY, orgReg, routerProxy);
         require(hatsBefore == HATS, "sim: expected live hub pointing at real Hats pre-repoint");
+        require(regHatsBefore == HATS, "sim: expected live registry pointing at real Hats pre-repoint");
         require(routerProxy != hatsBefore, "sim: router must differ from prior hats");
         _assertRouterNeutral(routerProxy, POA_EXECUTOR, POA_TOPHAT);
+        _assertOrgMetaResolves(ARB_ORG_REGISTRY, POA_ORG_ID, HUDSON, "Poa");
 
         console.log("  MembershipAuthority impl:", ma);
         console.log("  AuthorityRouter impl:    ", router);
         console.log("  AuthorityRouter singleton:", routerProxy);
         console.log("  PaymasterHub v20 impl:   ", pm);
+        console.log("  OrgRegistry v2 impl:     ", orgReg);
         console.log("  PaymasterHub.HATS after: ", IPaymasterView(ARB_PAYMASTER).HATS());
-        console.log("PASS: SimArbitrum - Access-v2 protocol registered; hub->router repoint neutral for Poa.");
+        console.log("  OrgRegistry.getHats after:", OrgRegistry(ARB_ORG_REGISTRY).getHats());
+        console.log("PASS: SimArbitrum - Access-v2 protocol registered; hub+registry->router repoint neutral for Poa.");
     }
 }

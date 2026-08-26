@@ -199,8 +199,9 @@ contract DeployInfrastructure is Script {
                 )
             );
             PoaManager(poaManager).adminCall(paymasterHub, abi.encodeWithSignature("setHats(address)", authorityRouter));
+            OrgRegistry(orgRegistry).setHats(authorityRouter);
             console.log("AuthorityRouter:", authorityRouter);
-            console.log("PaymasterHub repointed to the router");
+            console.log("PaymasterHub + OrgRegistry repointed to the router");
         }
 
         // Deploy OrgDeployer proxy (universalPasskeyFactory set later after deployment)
