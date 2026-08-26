@@ -501,6 +501,49 @@ contract DeployerTest is Test {
         deployer.deployFullOrg(params);
     }
 
+    /// @notice Duplicate group members used to surface as an opaque SubjectExists from inside the
+    ///         authority's constructor.
+    function testDeploy_rejectsDuplicateGroupMemberRole() public {
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        uint256[] memory members = new uint256[](2);
+        members[0] = ROLE_EXECUTIVE;
+        members[1] = ROLE_EXECUTIVE;
+        params.groups[0].memberRoleIndices = members;
+        vm.prank(orgOwner);
+        vm.expectRevert(abi.encodeWithSelector(OrgDeployer.DuplicateGroupMemberRole.selector, 0, ROLE_EXECUTIVE));
+        deployer.deployFullOrg(params);
+    }
+
+    /// @notice A cap below the genesis wearer count used to surface as SubjectFull from inside the
+    ///         authority's constructor.
+    function testDeploy_rejectsRoleCapBelowItsGenesisSeed() public {
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        address[] memory extra = new address[](2);
+        extra[0] = voter1;
+        extra[1] = voter2;
+        params.roles[ROLE_EXECUTIVE].distribution.additionalWearers = extra; // + mintToDeployer = 3
+        params.roles[ROLE_EXECUTIVE].maxMembers = 2;
+        vm.prank(orgOwner);
+        vm.expectRevert(abi.encodeWithSelector(OrgDeployer.RoleCapacityBelowGenesisSeed.selector, ROLE_EXECUTIVE, 2, 3));
+        deployer.deployFullOrg(params);
+    }
+
+    /// @notice A cap exactly equal to the seed is fine — the check must not be off by one.
+    function testDeploy_allowsRoleCapExactlyMatchingItsGenesisSeed() public {
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        address[] memory extra = new address[](2);
+        extra[0] = voter1;
+        extra[1] = voter2;
+        params.roles[ROLE_EXECUTIVE].distribution.additionalWearers = extra;
+        params.roles[ROLE_EXECUTIVE].maxMembers = 3;
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory r = deployer.deployFullOrg(params);
+        assertTrue(
+            IMembershipAuthority(r.membershipAuthority).isMember(_roleSubject(ROLE_EXECUTIVE), voter2),
+            "the last seeded wearer still lands"
+        );
+    }
+
     function testDeploy_rejectsDuplicateOrgId() public {
         _deployDefaultOrg(ORG_ID);
         OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);

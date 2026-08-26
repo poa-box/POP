@@ -98,6 +98,10 @@ contract OrgDeployer is Initializable {
     /// @notice `quickJoinRolesBitmap` addresses a role that is not default-ALLOW, which would make
     ///         every QuickJoin call revert at runtime.
     error QuickJoinRoleNotOpen(uint256 roleIndex);
+    /// @notice A group lists the same role twice — the authority rejects the second add.
+    error DuplicateGroupMemberRole(uint256 groupIndex, uint256 roleIndex);
+    /// @notice A role's `maxMembers` cap is smaller than the wearers its genesis seed would mint.
+    error RoleCapacityBelowGenesisSeed(uint256 roleIndex, uint256 maxMembers, uint256 seededWearers);
     /// @notice A factory tried to register after the org left bootstrap mode.
     error DeploymentComplete();
 
@@ -370,6 +374,12 @@ contract OrgDeployer is Initializable {
             // subjects carrying the perm without any eligibility filter, and the authority rejects a
             // non-eligible stranger — so a closed role in the bitmap bricks EVERY join at runtime.
             if (!role.open && quickJoinBitmap & (1 << i) != 0) revert QuickJoinRoleNotOpen(i);
+            // The genesis seed flips each wearer on one by one; over-cap would revert deep inside the
+            // authority's constructor (SubjectFull) as an opaque deploy failure.
+            uint256 seeded = role.distribution.additionalWearers.length + (role.distribution.mintToDeployer ? 1 : 0);
+            if (role.maxMembers != 0 && seeded > role.maxMembers) {
+                revert RoleCapacityBelowGenesisSeed(i, role.maxMembers, seeded);
+            }
         }
 
         uint256 groupCount = params.groups.length;
@@ -379,8 +389,14 @@ contract OrgDeployer is Initializable {
             if (bytes(group.name).length == 0) revert InvalidRoleConfiguration();
             uint256 m = group.memberRoleIndices.length;
             if (m == 0 || m > MAX_GROUP_MEMBERS) revert InvalidRoleConfiguration();
+            // `len <= MAX_ROLES (16)`, so a uint256 bitmap covers every valid member index.
+            uint256 seenRoles;
             for (uint256 x = 0; x < m; x++) {
-                if (group.memberRoleIndices[x] >= len) revert InvalidRoleConfiguration();
+                uint256 roleIndex = group.memberRoleIndices[x];
+                if (roleIndex >= len) revert InvalidRoleConfiguration();
+                // A repeat would revert SubjectExists inside the authority's constructor.
+                if (seenRoles & (1 << roleIndex) != 0) revert DuplicateGroupMemberRole(j, roleIndex);
+                seenRoles |= 1 << roleIndex;
             }
         }
 
