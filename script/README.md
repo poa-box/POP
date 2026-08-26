@@ -57,10 +57,11 @@ forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
 - OrgDeployer (orchestrates org creation)
 - Factory contracts (GovernanceFactory, AccessFactory, ModulesFactory)
 - Global UniversalAccountRegistry
-- HatsTreeSetup helper
+- PaymasterHub (gas sponsorship) + the seeded global rulebook
+- AuthorityRouter singleton, with PaymasterHub and OrgRegistry repointed at it (Access v2 read path)
 
 **Output:**
-The script automatically saves deployment addresses to `script/infrastructure.json`. This file is committed to the repo and automatically loaded by org deployments - no manual copying needed!
+The script automatically saves deployment addresses to `script/config/infrastructure.json`. This file is committed to the repo and automatically loaded by org deployments - no manual copying needed!
 
 ### Step 2: Configure Your Organization
 

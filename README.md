@@ -76,7 +76,6 @@ The canonical, current set of protocol-layer addresses for each chain lives in [
 | GovernanceFactory | `0x2e3BCa0b6902285b7e8D747A14f118EbB8DB997D` |
 | AccessFactory | `0x05Db5Cf1540683A888E7aC656d7373aa03864a8c` |
 | ModulesFactory | `0x0b5b1410E6e8FeE4eCd07C69CdDCf860eCc44981` |
-| HatsTreeSetup | `0xdc7C14AB68fcCf9bcD255f5be684EbDc892Da13a` |
 | Hats Protocol (external) | `0x3bc1A0Ad72417f2d411118085256fC53CBdDd137` |
 
 Always treat `script/config/infrastructure.json` as the source of truth. This table can drift between releases.
@@ -162,10 +161,9 @@ flowchart TD
 | Contract | Path | Purpose |
 |----------|------|---------|
 | `OrgDeployer` | [`src/OrgDeployer.sol`](src/OrgDeployer.sol) | Atomic full-org deployment in one transaction (~22.5M gas). Also seeds the org's paymaster rules and budgets and bootstraps deploy-time TaskManager permissions. |
-| `GovernanceFactory` | [`src/factories/GovernanceFactory.sol`](src/factories/GovernanceFactory.sol) | Deploys `Executor`, `HybridVoting`, `DirectDemocracyVoting`, and coordinates the org's Hats tree via `HatsTreeSetup`. |
-| `AccessFactory` | [`src/factories/AccessFactory.sol`](src/factories/AccessFactory.sol) | Deploys `QuickJoin` and `ParticipationToken`. |
+| `GovernanceFactory` | [`src/factories/GovernanceFactory.sol`](src/factories/GovernanceFactory.sol) | Deploys `Executor`, `HybridVoting` and `DirectDemocracyVoting`. |
+| `AccessFactory` | [`src/factories/AccessFactory.sol`](src/factories/AccessFactory.sol) | Deploys the org's `MembershipAuthority` (born initialized from the deploy params), `QuickJoin` and `ParticipationToken`. |
 | `ModulesFactory` | [`src/factories/ModulesFactory.sol`](src/factories/ModulesFactory.sol) | Deploys `TaskManager`, `PaymentManager`, and optionally `EducationHub` and `ZkEmailInvites`. |
-| `HatsTreeSetup` | [`src/HatsTreeSetup.sol`](src/HatsTreeSetup.sol) | Helper called by `GovernanceFactory` to mint the top hat and role hats, then hand `EligibilityModule`/`ToggleModule` admin rights to the org's `Executor`. |
 
 **Organization Layer** (per-org instances behind `BeaconProxy` + `SwitchableBeacon`):
 
@@ -180,8 +178,9 @@ flowchart TD
 | `QuickJoin` | [`src/QuickJoin.sol`](src/QuickJoin.sol) | Username registration + member-hat minting in a single call; also the self-service `claimHats` path. |
 | `ZkEmailInvites` | [`src/ZkEmailInvites.sol`](src/ZkEmailInvites.sol) | Claim role hats by proving control of an allowlisted email address or domain in zero knowledge. See [Role Invitations](#role-invitations-via-zk-email). |
 | `PaymentManager` | [`src/PaymentManager.sol`](src/PaymentManager.sol) | Merkle-distribution treasury claims proportional to participation. |
-| `EligibilityModule` | [`src/EligibilityModule.sol`](src/EligibilityModule.sol) | Hats eligibility module: hierarchy rules, peer vouching, and email-verified eligibility. All writes are `superAdmin`-only (the org `Executor`). |
-| `ToggleModule` | [`src/ToggleModule.sol`](src/ToggleModule.sol) | Hats toggle module; lets governance enable or disable a hat without revoking it. |
+| `MembershipAuthority` | [`src/MembershipAuthority.sol`](src/MembershipAuthority.sol) | **Access v2** — the org's single source of truth for membership, eligibility and permissions. Subjects (ADMIN / roles / groups) replace the Hats tree; deployed for every new org. |
+| `EligibilityModule` | [`src/EligibilityModule.sol`](src/EligibilityModule.sol) | *Legacy orgs only* — Hats eligibility module: hierarchy rules, peer vouching, and email-verified eligibility. All writes are `superAdmin`-only (the org `Executor`). New orgs do not deploy it. |
+| `ToggleModule` | [`src/ToggleModule.sol`](src/ToggleModule.sol) | *Legacy orgs only* — Hats toggle module; lets governance enable or disable a hat without revoking it. New orgs do not deploy it. |
 
 ---
 
@@ -409,9 +408,22 @@ The CI workflow runs [`script/upgrades/ValidateUpgrade.s.sol`](script/upgrades/V
 
 ---
 
-## Access Control (Hats Protocol)
+## Access Control
 
-POP does not use OpenZeppelin's `AccessControl`. All role-based access is mediated by [Hats Protocol](https://docs.hatsprotocol.xyz). Each org owns its own hat tree:
+POP does not use OpenZeppelin's `AccessControl`.
+
+**New orgs (Access v2)** own a [`MembershipAuthority`](src/MembershipAuthority.sol): membership,
+eligibility and permissions live in one per-org contract as *subjects* — an `ADMIN` subject held by
+the `Executor`, one subject per role, one per group — with no Hats tree at all. Subject ids are
+derived from the authority's address (`uint160(authority) << 64 | seq`), so they are always below
+the Hats id floor of 2^224. Chain-wide readers (`PaymasterHub`, `OrgRegistry`) resolve any id
+through the protocol-owned [`AuthorityRouter`](src/AuthorityRouter.sol), which self-routes v2 ids to
+their authority and passes legacy Hats ids straight through. See
+[`docs/ORG_DEPLOYER.md`](docs/ORG_DEPLOYER.md).
+
+**Legacy orgs** still run on [Hats Protocol](https://docs.hatsprotocol.xyz) until they migrate
+([`script/accessv2/MIGRATION-RUNBOOK.md`](script/accessv2/MIGRATION-RUNBOOK.md)). The rest of this section describes that path. Each such
+org owns its own hat tree:
 
 ```mermaid
 flowchart TD
@@ -429,7 +441,7 @@ Permission checks should go through [`src/libs/HatManager.sol`](src/libs/HatMana
 2. **Peer vouching** — members vouch for a candidate, subject to per-hat thresholds, daily vouch caps, and an optional `combineWithHierarchy` flag.
 3. **Email verification** — set by `ZkEmailInvites` after a successful ZK Email claim; only takes effect when no explicit per-wearer rule exists, so a governance kick always wins.
 
-Every state-mutating function on `EligibilityModule` is `onlySuperAdmin`, and the superAdmin is the org's `Executor` — `HatsTreeSetup` transfers it there at deploy. The older `onlyHatAdmin` path, which let any Hats-hierarchical parent mutate eligibility directly, has been removed: a parent-hat holder could otherwise bypass the vouch gate or force-revoke a wearer. The one exception is `setEmailVerified`, callable by any contract the `Executor` has authorized as a hat minter. Self-service member functions (`vouchFor`, `revokeVouch`, `claimVouchedHat`, `applyForRole`, `withdrawApplication`) remain open to any caller.
+Every state-mutating function on `EligibilityModule` is `onlySuperAdmin`, and the superAdmin is the org's `Executor`. The older `onlyHatAdmin` path, which let any Hats-hierarchical parent mutate eligibility directly, has been removed: a parent-hat holder could otherwise bypass the vouch gate or force-revoke a wearer. The one exception is `setEmailVerified`, callable by any contract the `Executor` has authorized as a hat minter. Self-service member functions (`vouchFor`, `revokeVouch`, `claimVouchedHat`, `applyForRole`, `withdrawApplication`) remain open to any caller.
 
 **Default-open hats cannot be self-claimed.** Both `QuickJoin.claimHatsWithUser` and `ZkEmailInvites` probe each requested hat and revert `HatOpenlyClaimable(hatId)` if anyone would be eligible for it. Privileged roles ship vouch-gated (`defaults.eligible = false`) in every config template.
 
