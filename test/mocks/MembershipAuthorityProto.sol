@@ -4,8 +4,9 @@ pragma solidity ^0.8.20;
 /**
  * @title MembershipAuthorityProto
  * @notice PRODUCTION-WEIGHT prototype of the POP Access v2 "MembershipAuthority" (SPEC v1.3,
- *         .context/rolemanager/ACCESS-V2-SPEC.md). It is the round-2 successor to
- *         {NativeLedgerPrototype}: the round-1 prototype measured the collapsed-authority FLOOR;
+ *         .context/rolemanager/ACCESS-V2-SPEC.md). It is the round-2 successor to the round-1
+ *         native-ledger prototype (deleted after the benchmark landed), which measured the
+ *         collapsed-authority FLOOR;
  *         this one adds back every spec shape that moves gas or size, so the benchmark deltas are a
  *         realistic (not upper-bound) estimate of the win at production weight.
  *

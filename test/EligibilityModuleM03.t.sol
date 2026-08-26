@@ -164,7 +164,7 @@ contract EligibilityModuleM03Test is Test {
     /*═══════════════════════════════════════════════════════════════════════════════════════════════
      * M-03 COMPLETENESS: the guard must fire in EVERY superAdmin writer of defaultRules / vouchConfigs,
      * not just setDefaultEligibility / configureVouching. The production org-deploy path uses ONLY the
-     * batch functions (HatsTreeSetup.batchSetDefaultEligibility -> OrgDeployer.batchConfigureVouching),
+     * batch functions the v1 deployer used (batchSetDefaultEligibility -> batchConfigureVouching),
      * so a misconfigured JSON (defaults.eligible=true + vouching.enabled + combine=true) MUST fail
      * loudly at deploy rather than silently shipping the vouch-quorum bypass.
      *═══════════════════════════════════════════════════════════════════════════════════════════════*/

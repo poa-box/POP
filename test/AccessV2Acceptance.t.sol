@@ -26,7 +26,8 @@ import {MockRegistry} from "./QuickJoin.t.sol";
 
 /**
  * @title AccessV2AcceptanceTest — the v2 org-level acceptance suite (Wave C / C1).
- * @notice Ports the v1 "KUBI story" (test/RoleManagerIntegration.t.sol) onto v2 rails: a FULL v2 org
+ * @notice Ports the v1 "KUBI story" (the RoleManager integration suite, deleted with the v1 access
+ *         rails in Wave F) onto v2 rails: a FULL v2 org
  *         wired dual-path — real MembershipAuthority (+ its delegatecall libs), a real Executor
  *         repointed via setMembershipAuthority, real DirectDemocracyVoting + HybridVoting + TaskManager
  *         + ParticipationToken + QuickJoin, plus the protocol AuthorityRouter over a real OrgRegistry.
