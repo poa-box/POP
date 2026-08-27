@@ -13,6 +13,10 @@
 # ============================================================================
 set -euo pipefail
 
+# Key resolution matches the forge scripts: PRIVATE_KEY first, then DEPLOYER_PRIVATE_KEY.
+KEY="${PRIVATE_KEY:-${DEPLOYER_PRIVATE_KEY:-}}"
+[ -n "$KEY" ] || { echo "❌ set PRIVATE_KEY or DEPLOYER_PRIVATE_KEY (source .env) BEFORE running"; exit 1; }
+
 ORG="${1:?ORG required: TEST6|DP|KUBI|POA}"
 KIND="${2:?KIND required: seed|cutover}"
 INDEX="${3:?INDEX required}"
@@ -57,7 +61,7 @@ sleep $WAIT
 
 # 4. ANNOUNCE with the explicit gas limit (try/catch defeats estimation).
 TX=$(cast send $HV 'announceWinner(uint256)' $ID --gas-limit $GAS --rpc-url $CHAIN \
-  --private-key "$DEPLOYER_PRIVATE_KEY" --json | python3 -c "import json,sys; print(json.load(sys.stdin)['transactionHash'])")
+  --private-key "$KEY" --json | python3 -c "import json,sys; print(json.load(sys.stdin)['transactionHash'])")
 echo "   announced: $TX"
 
 # 5. VERIFY: tx succeeded AND no ProposalExecutionFailed (a swallowed batch = burned proposal).
