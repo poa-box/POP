@@ -619,3 +619,88 @@ contract SimMigratePoa is MigrateOrgBase {
         _governedMigrate(_poaSpec());
     }
 }
+
+/* ════════════════════════════ 4. CLI proposal helpers (broadcast) ════════════════════════════ */
+
+/// @notice BROADCAST: create ONE migration proposal from a generated JSON, as a creator-hat wearer.
+///         Env: ORG=TEST6|DP|KUBI|POA, KIND=seed|cutover, INDEX=N, MINUTES (vote window, default 15).
+///         Prints the proposal id plus the exact vote/announce commands for it.
+contract CreateMigrationProposal is MigrateOrgBase {
+    function run() public {
+        OrgSpec memory s = _specByKey(vm.envString("ORG"));
+        string memory kind = vm.envString("KIND");
+        uint256 idx = vm.envUint("INDEX");
+        uint32 mins = uint32(vm.envOr("MINUTES", uint256(15)));
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
+
+        string memory path = string.concat(
+            vm.projectRoot(), "/script/accessv2/out/", _lower(s.name), ".", kind, ".", vm.toString(idx), ".json"
+        );
+        string memory json = vm.readFile(path);
+
+        // Count calls, then load each {target, data} pair.
+        uint256 n;
+        while (vm.keyExistsJson(json, string.concat(".calls[", vm.toString(n), "].target"))) {
+            n++;
+        }
+        require(n > 0, "JSON has no calls (regenerate via GenerateBatches)");
+        IExecutor.Call[] memory batch = new IExecutor.Call[](n);
+        for (uint256 i; i < n; ++i) {
+            string memory k = string.concat(".calls[", vm.toString(i), "]");
+            batch[i] = IExecutor.Call({
+                target: vm.parseJsonAddress(json, string.concat(k, ".target")),
+                value: 0,
+                data: vm.parseJsonBytes(json, string.concat(k, ".data"))
+            });
+        }
+        IExecutor.Call[][] memory batches = new IExecutor.Call[][](1);
+        batches[0] = batch;
+
+        uint256 id = IHVGov(s.hv).proposalsCount();
+        string memory title = string.concat("Access v2 migration - ", s.name, " ", kind, " ", vm.toString(idx));
+        vm.startBroadcast(key);
+        IHVGov(s.hv).createProposal(bytes(title), bytes32(0), mins, 1, batches, new uint256[](0));
+        vm.stopBroadcast();
+
+        uint256 gasLimit = vm.parseJsonUint(json, ".announceWinnerGasLimit");
+        console.log(
+            string.concat("CREATED proposal #", vm.toString(id), " on ", s.name, " (", vm.toString(n), " calls)")
+        );
+        console.log(
+            string.concat(
+                "  vote:     ORG=",
+                vm.envString("ORG"),
+                " ID=",
+                vm.toString(id),
+                " forge script ...:VoteMigrationProposal --rpc-url <chain> --broadcast --slow --sender <you>"
+            )
+        );
+        console.log(
+            string.concat(
+                "  announce (after the window): cast send ",
+                vm.toString(s.hv),
+                " 'announceWinner(uint256)' ",
+                vm.toString(id),
+                " --gas-limit ",
+                vm.toString(gasLimit),
+                " --rpc-url <chain> --private-key $DEPLOYER_PRIVATE_KEY"
+            )
+        );
+    }
+}
+
+/// @notice BROADCAST: vote option 0 / weight 100 on a proposal. Env: ORG, ID.
+contract VoteMigrationProposal is MigrateOrgBase {
+    function run() public {
+        OrgSpec memory s = _specByKey(vm.envString("ORG"));
+        uint256 id = vm.envUint("ID");
+        uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
+        uint8[] memory idxs = new uint8[](1);
+        uint8[] memory wts = new uint8[](1);
+        wts[0] = 100;
+        vm.startBroadcast(key);
+        IHVGov(s.hv).vote(id, idxs, wts);
+        vm.stopBroadcast();
+        console.log(string.concat("VOTED on #", vm.toString(id), " (option 0, weight 100)"));
+    }
+}
