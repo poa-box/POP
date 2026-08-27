@@ -13,9 +13,11 @@
 # ============================================================================
 set -euo pipefail
 
+# Self-contained: load .env from the repo root ourselves (forge does this too; plain shells do not).
+if [ -f .env ]; then set -a; . ./.env; set +a; fi
 # Key resolution matches the forge scripts: PRIVATE_KEY first, then DEPLOYER_PRIVATE_KEY.
 KEY="${PRIVATE_KEY:-${DEPLOYER_PRIVATE_KEY:-}}"
-[ -n "$KEY" ] || { echo "❌ set PRIVATE_KEY or DEPLOYER_PRIVATE_KEY (source .env) BEFORE running"; exit 1; }
+[ -n "$KEY" ] || { echo "❌ no PRIVATE_KEY / DEPLOYER_PRIVATE_KEY in .env or the environment"; exit 1; }
 
 ORG="${1:?ORG required: TEST6|DP|KUBI|POA}"
 KIND="${2:?KIND required: seed|cutover}"
