@@ -189,6 +189,31 @@ abstract contract AccessV2ModuleBase is Script {
         }
     }
 
+    /// @dev PREDICT all module impl addresses and REQUIRE code (Step2 pre-broadcast) — never the
+    ///      deploying path; see RegisterAccessV2Protocol._requireImpls for the foot-gun this closes.
+    function _requireImpls() internal view returns (Impls memory im) {
+        DeterministicDeployer dd = DeterministicDeployer(DD);
+        im.dd = dd.computeAddress(dd.computeSalt(T_DD, V_DD));
+        im.hv = dd.computeAddress(dd.computeSalt(T_HV, V_HV));
+        im.tm = dd.computeAddress(dd.computeSalt(T_TM, V_TM));
+        im.pt = dd.computeAddress(dd.computeSalt(T_PT, V_PT));
+        im.edu = dd.computeAddress(dd.computeSalt(T_EDU, V_EDU));
+        im.qj = dd.computeAddress(dd.computeSalt(T_QJ, V_QJ));
+        im.exec = dd.computeAddress(dd.computeSalt(T_EXEC, V_EXEC));
+        require(im.dd.code.length <= 24576, "DD impl exceeds EIP-170");
+        require(im.hv.code.length <= 24576, "HV impl exceeds EIP-170");
+        require(im.tm.code.length <= 24576, "TM impl exceeds EIP-170");
+        require(im.pt.code.length <= 24576, "PT impl exceeds EIP-170");
+        require(im.edu.code.length <= 24576, "EDU impl exceeds EIP-170");
+        require(im.qj.code.length <= 24576, "QJ impl exceeds EIP-170");
+        require(im.exec.code.length <= 24576, "Executor impl exceeds EIP-170");
+        require(
+            im.dd.code.length > 0 && im.hv.code.length > 0 && im.tm.code.length > 0 && im.pt.code.length > 0
+                && im.edu.code.length > 0 && im.qj.code.length > 0 && im.exec.code.length > 0,
+            "impls missing on-chain: run Step1 WITH --broadcast first (a dry-run deploys nothing)"
+        );
+    }
+
     function _deployImpls() internal returns (Impls memory im) {
         im.dd = _ddDeploy(T_DD, V_DD, type(DirectDemocracyVoting).creationCode);
         im.hv = _ddDeploy(T_HV, V_HV, type(HybridVoting).creationCode);
@@ -381,7 +406,7 @@ contract Step2_UpgradeBeaconsGnosis is AccessV2ModuleBase {
     function run() public {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(ISatelliteAdmin(GNOSIS_SATELLITE).owner() == vm.addr(key), "signer must own the Satellite");
-        Impls memory im = _deployImpls();
+        Impls memory im = _requireImpls();
         vm.startBroadcast(key);
         _upgradeGnosis(im);
         vm.stopBroadcast();
@@ -409,7 +434,7 @@ contract Step2b_UpgradeBeaconsArbitrum is AccessV2ModuleBase {
     function run() public {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(IHubAdmin(ARB_HUB).owner() == vm.addr(key), "signer must own the Hub");
-        Impls memory im = _deployImpls();
+        Impls memory im = _requireImpls();
         vm.startBroadcast(key);
         _upgradeArbitrum(im);
         vm.stopBroadcast();

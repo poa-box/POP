@@ -205,6 +205,27 @@ abstract contract AccessV2RegisterBase is Script {
 
     /// @dev CREATE3-deploy the four impls (MembershipAuthority + AuthorityRouter + PaymasterHub v20
     ///      + OrgRegistry v2).
+    /// @dev PREDICT the four impl addresses and REQUIRE code — the Step2 pre-broadcast check. Never
+    ///      calls the deploying path: a missing artifact must fail with THIS message, not with the
+    ///      DD owner-gate revert from an unpranked deploy in forge's simulation (the exact foot-gun
+    ///      hit when Step1 is run without --broadcast: a dry-run prints success and deploys nothing).
+    function _requireImpls()
+        internal
+        view
+        returns (address maImpl, address routerImpl, address pmImpl, address orgRegImpl)
+    {
+        DeterministicDeployer dd = DeterministicDeployer(DD);
+        maImpl = dd.computeAddress(dd.computeSalt("MembershipAuthority", MA_VERSION));
+        routerImpl = dd.computeAddress(dd.computeSalt("AuthorityRouter", ROUTER_VERSION));
+        pmImpl = dd.computeAddress(dd.computeSalt("PaymasterHub", PM_VERSION));
+        orgRegImpl = dd.computeAddress(dd.computeSalt("OrgRegistry", ORG_REGISTRY_VERSION));
+        require(
+            maImpl.code.length > 0 && routerImpl.code.length > 0 && pmImpl.code.length > 0
+                && orgRegImpl.code.length > 0,
+            "impls missing on-chain: run Step1 WITH --broadcast first (a dry-run deploys nothing)"
+        );
+    }
+
     function _deployImpls() internal returns (address maImpl, address routerImpl, address pmImpl, address orgRegImpl) {
         maImpl = _ddDeploy("MembershipAuthority", MA_VERSION, type(MembershipAuthority).creationCode);
         routerImpl = _ddDeploy("AuthorityRouter", ROUTER_VERSION, type(AuthorityRouter).creationCode);
@@ -400,12 +421,7 @@ contract Step2_RegisterAndWireGnosis is AccessV2RegisterBase {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(ISatelliteAdmin(GNOSIS_SATELLITE).owner() == vm.addr(key), "signer must own the Satellite");
         require(_beacon(GNOSIS_POA_MANAGER, MEMBERSHIP_AUTHORITY_ID) == address(0), "MA already registered on Gnosis");
-        (address ma, address router, address pm, address orgReg) = _deployImpls();
-        require(
-            ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0 && orgReg.code.length > 0,
-            "run Step1 first (impl missing)"
-        );
-
+        (address ma, address router, address pm, address orgReg) = _requireImpls();
         vm.startBroadcast(key);
         address routerProxy = _registerAndWireGnosis(ma, router, pm, orgReg);
         vm.stopBroadcast();
@@ -441,7 +457,7 @@ contract Step2b_RegisterAndWireArbitrum is AccessV2RegisterBase {
         uint256 key = vm.envOr("PRIVATE_KEY", vm.envUint("DEPLOYER_PRIVATE_KEY"));
         require(IHubAdmin(ARB_HUB).owner() == vm.addr(key), "signer must own the Hub");
         require(_beacon(ARB_POA_MANAGER, MEMBERSHIP_AUTHORITY_ID) == address(0), "MA already registered on Arbitrum");
-        (address ma, address router, address pm, address orgReg) = _deployImpls();
+        (address ma, address router, address pm, address orgReg) = _requireImpls();
         require(
             ma.code.length > 0 && router.code.length > 0 && pm.code.length > 0 && orgReg.code.length > 0,
             "run Step1b first (impl missing)"
