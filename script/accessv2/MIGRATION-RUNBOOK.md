@@ -28,9 +28,19 @@ v1, PaymasterHub v20, OrgRegistry v2, DD/HV v13, TM/PT/QJ v8, EducationHub v4, E
 FOUNDRY_PROFILE=production forge script script/accessv2/<script>:<SimX> --fork-url <gnosis-gateway|arbitrum> -vvv
 ```
 
-**Env pre-flight (every broadcast step):** `source .env` providing `PRIVATE_KEY` (or
-`DEPLOYER_PRIVATE_KEY`) for Hudson `0xA6F4…b2c9` — the DeterministicDeployer owner AND the
-Satellite (Gnosis) / Hub (Arbitrum) owner — funded on both chains.
+**Env pre-flight (every broadcast step):** `source .env` providing `DEPLOYER_PRIVATE_KEY`
+(the canonical var; the scripts read `PRIVATE_KEY` FIRST if set — make sure no stale/placeholder
+`PRIVATE_KEY` shadows the real key: `unset PRIVATE_KEY` if in doubt) for Hudson `0xA6F4…b2c9` —
+the DeterministicDeployer owner AND the Satellite (Gnosis) / Hub (Arbitrum) owner — funded on
+both chains. **Every broadcast command MUST carry an explicit sender** (newer foundry refuses the
+default-sender otherwise, and the flag doubles as a signer-mismatch assertion):
+
+```sh
+--sender 0xA6F4D9f44Dd980b7168D829d5f74c2b00a46b2c9
+```
+
+Verify the signer resolves correctly (prints an ADDRESS, never a key):
+`cast wallet address --private-key "$DEPLOYER_PRIVATE_KEY"` → must print `0xA6F4…b2c9`.
 
 **Exact broadcast entrypoints** (sim first, then broadcast, per script per chain):
 - `RegisterAccessV2Protocol.s.sol`: `Step1_DeployImplsGnosis` → `Step2_RegisterAndWireGnosis`;
