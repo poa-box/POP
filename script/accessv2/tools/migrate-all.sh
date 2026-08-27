@@ -126,14 +126,20 @@ kubi_settle() {
   done
 }
 
-do_org DP  "DecentralPark" 15
-do_org POA "Poa"           15
-echo ""
-echo "🔔 KUBI IS NEXT: 6 proposals, 30-minute windows each. If their quorum is now 2,"
-echo "   the second voter must vote on EVERY proposal — watch for the 🔔 lines."
-echo ""
-kubi_settle
-do_org KUBI "KUBI" 30
+ORGS="${ORGS:-DP POA}"   # default: DP + POA. For KUBI later: ORGS=KUBI bash script/accessv2/tools/migrate-all.sh
+for O in $ORGS; do
+  case "$O" in
+    DP)   do_org DP  "DecentralPark" 15 ;;
+    POA)  do_org POA "Poa"           15 ;;
+    KUBI)
+      echo ""
+      echo "🔔 KUBI: 6 proposals, 30-minute windows each. If their quorum is now 2,"
+      echo "   the second voter must vote on EVERY proposal — watch for the 🔔 lines."
+      echo ""
+      kubi_settle
+      do_org KUBI "KUBI" 30 ;;
+  esac
+done
 
 echo ""
-echo "🎉 ALL ORGS MIGRATED. Verify each org's page in the app."
+echo "🎉 DONE: $ORGS migrated. Verify each org's page in the app."
