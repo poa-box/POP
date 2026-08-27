@@ -100,10 +100,11 @@ command below (examples show Gnosis).
    cast send <HV> 'announceWinner(uint256)' <id> --gas-limit <figure below>
    ```
 
-4. **Frontend go/no-go for real orgs (KUBI):** the activation-gate UI copy (why a mid-vote
-   joiner can't vote yet) and the Executor.CallFailed selector→message map exist in the frontend
-   branch but are NOT yet rendered (WAVE-E-FRONTEND.md open items). Fine for Test6/DP; render
-   them before cutting over an org with active non-technical members.
+4. **Frontend go/no-go: CLEARED (2026-08-27, PR #485 commit 667501c).** The activation-gate
+   copy renders on the ballot (a gated voter sees WHY instead of a reverting button) and
+   Executor.CallFailed decodes to human copy on BOTH tx paths — including the finalize toast,
+   which now reads ProposalExecutionFailed off the receipt instead of reporting success on a
+   silently-swallowed batch. Deploy the frontend from PR #485 before cutting over KUBI.
 5. **Verify**: re-run the org's governed sim (below) BEFORE step 3. The §6 verification reads are
    realized by `CutoverVerifier.verify` (C4) appended as the LAST call of the cutover batch — it
    `require()`s per-subject memberCount == the generation-time count, memberCount <= canonical Hats
