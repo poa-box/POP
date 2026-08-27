@@ -43,7 +43,7 @@ run_one() { # $1 org  $2 kind  $3 index  $4 minutes
   local OUT ID
   OUT=$(ORG=$1 KIND=$2 INDEX=$3 MINUTES=$4 FOUNDRY_PROFILE=production forge script \
         script/accessv2/MigrateOrgToAuthority.s.sol:CreateMigrationProposal \
-        --rpc-url $CHAIN --broadcast --slow --sender $SENDER 2>&1)
+        --rpc-url $CHAIN --broadcast --slow --sender $SENDER 2>&1) || true
   ID=$(echo "$OUT" | grep -oE "CREATED proposal #[0-9]+" | grep -oE "[0-9]+$" || true)
   [ -n "$ID" ] || { echo "$OUT" | tail -12; echo "STOP: create failed"; exit 1; }
   echo "   proposal #$ID created"
