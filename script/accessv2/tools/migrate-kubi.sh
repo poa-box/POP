@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# migrate-kubi.sh — KUBI (Kansas Blockchain) migration with 12-hour vote windows (quorum 2).
+# migrate-kubi.sh — KUBI (Kansas Blockchain) migration with 6-hour vote windows (quorum 2).
 #
 # Differs from migrate-all.sh: seed proposals are created+voted UP FRONT (they are
 # independent until announced; announcing in index order preserves chunk ordering),
 # so the second voter is asked to vote only TWICE:
-#   round 1: all 5 seed proposals            (one 12h window)
-#   round 2: cutover + board-roles proposal  (one 12h window, after seeds execute + regen;
+#   round 1: all 5 seed proposals            (one 6h window)
+#   round 2: cutover + board-roles proposal  (one 6h window, after seeds execute + regen;
 #            announced cutover-FIRST — the roles batch must execute on the unpaused authority)
-# Total wall time ≈ 24h. Resume-safe: created proposal ids persist in out/kubi.state/;
+# Total wall time ≈ 13h. Resume-safe: created proposal ids persist in out/kubi.state/;
 # rerunning after ANY interruption picks up exactly where it left off.
 #
 #   caffeinate -i bash script/accessv2/tools/migrate-kubi.sh 2>&1 | tee kubi-migration.log
@@ -26,7 +26,7 @@ FORK2=gnosis-drpc   # fallback: gateway.fm storage fetches flake under fork load
 HV=0x13CBd5eD47bF177968B24D84516a75879c23971E
 HV_LC=$(echo "$HV" | tr 'A-F' 'a-f')
 GAS=5000000
-MINUTES="${KUBI_MINUTES:-720}"   # 12h windows (override: KUBI_MINUTES=30 for a drill)
+MINUTES="${KUBI_MINUTES:-360}"   # 6h windows (override: KUBI_MINUTES=30 for a drill)
 STATE=script/accessv2/out/kubi.state
 SUBGRAPH='https://api.studio.thegraph.com/query/73367/poa-gnosis-v-1/version/latest'
 mkdir -p "$STATE"
@@ -130,7 +130,7 @@ for l in r['logs']:
         if not valid:
             print('   STOP: proposal #$id INVALID — the second voter did not vote in time (quorum 2).')
             print('   The proposal is burned. Fix: delete its id file under $STATE/ and rerun this')
-            print('   script — it will re-create ONLY that proposal (fresh 12h window).'); sys.exit(1)
+            print('   script — it will re-create ONLY that proposal (fresh 6h window).'); sys.exit(1)
         print('   STOP: #$id batch swallowed (executed=false). Do not proceed — send this output to Claude.'); sys.exit(1)
 print('   STOP: no Winner event on #$id — send this output to Claude.'); sys.exit(1)"
 }
@@ -157,7 +157,7 @@ regen() {
 if migrated && [ -f "$STATE/roles.done" ]; then echo "✅ KUBI already migrated + board roles set up — nothing to do"; exit 0; fi
 if migrated; then
   # Cutover already live (e.g. state dir lost after migration): board-roles setup only.
-  echo "✅ KUBI already migrated — running board-roles setup only (one 12h proposal)"
+  echo "✅ KUBI already migrated — running board-roles setup only (one 6h proposal)"
   if [ ! -f script/accessv2/out/kubi.roles.1.json ]; then
     ORG=KUBI FOUNDRY_PROFILE=production forge script script/accessv2/KubiRoles.s.sol:GenerateKubiRoles \
       --fork-url $CHAIN >/dev/null 2>&1 || { echo "STOP: GenerateKubiRoles failed"; exit 1; }
@@ -212,7 +212,7 @@ if [ ! -f "$STATE/seeds.done" ]; then
 fi
 
 # Phase 4: regenerate the cutover AFTER seeds landed (CutoverVerifier counts bake at generation)
-# and generate the board-roles batch, then run both through ONE shared 12h window.
+# and generate the board-roles batch, then run both through ONE shared 6h window.
 # Announce order is load-bearing: cutover FIRST (the roles batch is pause-exempt — executed early
 # it would backdate seats AND drift the verifier counts, burning the cutover proposal).
 if [ ! -f "$STATE/cutover.1.id" ]; then
