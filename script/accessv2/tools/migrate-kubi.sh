@@ -211,6 +211,16 @@ if [ ! -f "$STATE/seeds.done" ]; then
   echo "── [KUBI] all $N seed proposals executed ✓"
 fi
 
+# Optional gate: STOP_AFTER_ROUND1=1 ends the run here so YOU choose when round 2 (and its
+# join-freeze) begins. Re-running resumes exactly at round 2 — nothing round-1 is redone.
+if [ -n "${STOP_AFTER_ROUND1:-}" ] && [ ! -f "$STATE/cutover.1.id" ]; then
+  echo ""
+  echo "⏸  Round 1 complete (all seeds executed). Round 2 NOT started (STOP_AFTER_ROUND1 set)."
+  echo "   When your second voter is ready for the final ${MINUTES}-minute window, re-run:"
+  echo "   caffeinate -i bash script/accessv2/tools/migrate-kubi.sh 2>&1 | tee -a kubi-migration.log"
+  exit 0
+fi
+
 # Phase 4: regenerate the cutover AFTER seeds landed (CutoverVerifier counts bake at generation)
 # and generate the board-roles batch, then run both through ONE shared 6h window.
 # Announce order is load-bearing: cutover FIRST (the roles batch is pause-exempt — executed early
