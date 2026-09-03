@@ -4,8 +4,9 @@
 # Differs from migrate-all.sh: seed proposals are created+voted UP FRONT (they are
 # independent until announced; announcing in index order preserves chunk ordering),
 # so the second voter is asked to vote only TWICE:
-#   round 1: all 5 seed proposals   (one 12h window)
-#   round 2: the cutover proposal   (one 12h window, after seeds execute + regen)
+#   round 1: all 5 seed proposals            (one 12h window)
+#   round 2: cutover + board-roles proposal  (one 12h window, after seeds execute + regen;
+#            announced cutover-FIRST — the roles batch must execute on the unpaused authority)
 # Total wall time ≈ 24h. Resume-safe: created proposal ids persist in out/kubi.state/;
 # rerunning after ANY interruption picks up exactly where it left off.
 #
@@ -21,6 +22,7 @@ WINNER_TOPIC=$(cast keccak "Winner(uint256,uint256,bool,bool,uint64)")
 
 CHAIN=gnosis
 FORK=gnosis-gateway
+FORK2=gnosis-drpc   # fallback: gateway.fm storage fetches flake under fork load (seen 2026-09-02)
 HV=0x13CBd5eD47bF177968B24D84516a75879c23971E
 HV_LC=$(echo "$HV" | tr 'A-F' 'a-f')
 GAS=5000000
@@ -133,27 +135,57 @@ for l in r['logs']:
 print('   STOP: no Winner event on #$id — send this output to Claude.'); sys.exit(1)"
 }
 
+forge_fork() { # $1 contract-target  $2.. extra env assignments handled by caller — retries on the fallback RPC
+  local TARGET=$1 F
+  for F in $FORK $FORK2; do
+    if ORG=KUBI FOUNDRY_PROFILE=production forge script "script/accessv2/$TARGET" --fork-url $F >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "   ($TARGET on $F failed — trying fallback RPC)"
+  done
+  return 1
+}
+
 regen() {
   bash script/accessv2/tools/enumerate-wearers.sh >/dev/null 2>&1
   bash script/accessv2/tools/enumerate-tm-perms.sh >/dev/null 2>&1
-  ORG=KUBI FOUNDRY_PROFILE=production forge script \
-    script/accessv2/MigrateOrgToAuthority.s.sol:GenerateBatches --fork-url $FORK >/dev/null 2>&1 \
-    || { echo "STOP: GenerateBatches failed"; exit 1; }
+  forge_fork "MigrateOrgToAuthority.s.sol:GenerateBatches" || { echo "STOP: GenerateBatches failed"; exit 1; }
   echo "── [KUBI] batches regenerated"
 }
 
 # ════════════════════════════════════════════════════════════════════════════
-if migrated; then echo "✅ KUBI already migrated — nothing to do"; exit 0; fi
+if migrated && [ -f "$STATE/roles.done" ]; then echo "✅ KUBI already migrated + board roles set up — nothing to do"; exit 0; fi
+if migrated; then
+  # Cutover already live (e.g. state dir lost after migration): board-roles setup only.
+  echo "✅ KUBI already migrated — running board-roles setup only (one 12h proposal)"
+  if [ ! -f script/accessv2/out/kubi.roles.1.json ]; then
+    ORG=KUBI FOUNDRY_PROFILE=production forge script script/accessv2/KubiRoles.s.sol:GenerateKubiRoles \
+      --fork-url $CHAIN >/dev/null 2>&1 || { echo "STOP: GenerateKubiRoles failed"; exit 1; }
+  fi
+  create_and_vote roles 1
+  echo ""
+  echo "   🔔🔔 SECOND VOTER: vote (option 1) on KUBI proposal #$CV_ID — deadline ≈ $(date -v+${MINUTES}M '+%a %H:%M') 🔔🔔"
+  echo ""
+  wait_out_window "$CV_ID"
+  announce_and_verify "$CV_ID"
+  touch "$STATE/roles.done"
+  echo "════════════ 🎉 KUBI board roles live — verify the org page in the app ════════════"
+  exit 0
+fi
 echo "════════════ MIGRATING KUBI (windows: ${MINUTES}m, quorum 2) ════════════"
 
 # Phase 1: rehearsal + predeploy + regen — skipped entirely once seeds exist (resume).
 if [ ! -f "$STATE/seed.1.id" ]; then
   bash script/accessv2/tools/enumerate-wearers.sh >/dev/null 2>&1
   bash script/accessv2/tools/enumerate-tm-perms.sh >/dev/null 2>&1
-  echo "── [KUBI] final rehearsal (a few minutes)..."
-  FOUNDRY_PROFILE=production forge script script/accessv2/MigrateOrgToAuthority.s.sol:SimMigrateKubi \
-    --fork-url $FORK 2>&1 | grep -q "governed migration sim complete" \
-    || { echo "STOP: rehearsal did not PASS — do not proceed; send this to Claude"; exit 1; }
+  echo "── [KUBI] final rehearsal incl. board-roles batch (a few minutes)..."
+  REH_OK=""
+  for F in $FORK $FORK2; do
+    if FOUNDRY_PROFILE=production forge script script/accessv2/KubiRoles.s.sol:SimKubiRoles \
+       --fork-url $F 2>&1 | grep -q "KUBI board roles sim complete"; then REH_OK=1; break; fi
+    echo "   (rehearsal on $F did not complete — trying fallback RPC)"
+  done
+  [ -n "$REH_OK" ] || { echo "STOP: rehearsal did not PASS on either RPC — do not proceed; send this to Claude"; exit 1; }
   echo "   rehearsal PASS ✓"
   ORG=KUBI FOUNDRY_PROFILE=production forge script script/accessv2/MigrateOrgToAuthority.s.sol:PredeployAuthority \
     --rpc-url $CHAIN --broadcast --slow --sender $SENDER >/dev/null 2>&1 || { echo "STOP: predeploy failed"; exit 1; }
@@ -179,25 +211,38 @@ if [ ! -f "$STATE/seeds.done" ]; then
   echo "── [KUBI] all $N seed proposals executed ✓"
 fi
 
-# Phase 4: regenerate the cutover AFTER seeds landed (CutoverVerifier counts bake at generation),
-# then run it through its own 12h window. Regen is skipped when resuming mid-cutover.
-if [ ! -f "$STATE/cutover.1.id" ]; then regen; fi
+# Phase 4: regenerate the cutover AFTER seeds landed (CutoverVerifier counts bake at generation)
+# and generate the board-roles batch, then run both through ONE shared 12h window.
+# Announce order is load-bearing: cutover FIRST (the roles batch is pause-exempt — executed early
+# it would backdate seats AND drift the verifier counts, burning the cutover proposal).
+if [ ! -f "$STATE/cutover.1.id" ]; then
+  regen
+  ORG=KUBI FOUNDRY_PROFILE=production forge script script/accessv2/KubiRoles.s.sol:GenerateKubiRoles \
+    --fork-url $CHAIN >/dev/null 2>&1 || { echo "STOP: GenerateKubiRoles failed"; exit 1; }
+  echo "── [KUBI] board-roles batch generated (kubi.roles.1.json)"
+fi
 create_and_vote cutover 1
 CUT_ID=$CV_ID
-if [ ! -f "$STATE/cutover.done" ]; then
+create_and_vote roles 1
+ROLES_ID=$CV_ID
+if [ ! -f "$STATE/roles.done" ]; then
   echo ""
-  echo "   🔔🔔 ROUND 2 (FINAL) — SECOND VOTER: vote (option 1) on KUBI proposal #$CUT_ID 🔔🔔"
+  echo "   🔔🔔 ROUND 2 (FINAL) — SECOND VOTER: vote (option 1) on BOTH KUBI proposals: #$CUT_ID and #$ROLES_ID 🔔🔔"
   echo "   🔔🔔    deadline ≈ $(date -v+${MINUTES}M '+%a %H:%M') 🔔🔔"
   echo ""
-  wait_out_window "$CUT_ID"
-  announce_and_verify "$CUT_ID"
-  touch "$STATE/cutover.done"
+  wait_out_window "$CUT_ID" "$ROLES_ID"
+  if [ ! -f "$STATE/cutover.done" ]; then
+    announce_and_verify "$CUT_ID"
+    touch "$STATE/cutover.done"
+  fi
+  announce_and_verify "$ROLES_ID"
+  touch "$STATE/roles.done"
 fi
 
 # Phase 5: the arbiter — the authority must be live (unpaused) on-chain.
 if migrated; then
   echo ""
-  echo "════════════ 🎉 KUBI MIGRATED — verify the org page in the app ════════════"
+  echo "════════════ 🎉 KUBI MIGRATED + BOARD ROLES LIVE — verify the org page in the app ════════════"
 else
   echo "STOP: cutover announced but the authority is still paused — send this output to Claude"
   exit 1

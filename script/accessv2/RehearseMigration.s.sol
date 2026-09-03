@@ -591,9 +591,14 @@ abstract contract RehearseMigrationBase is AccessV2MigrationBase {
                 "T5: fixture-derived TM expectation diverges from the LIVE TM storage oracle (stale fixture)"
             );
             if (_tmOracleShadow[i]) {
+                // A multi-hat wearer can legitimately fold to the SAME word with and without the
+                // override (live on KUBI 2026-09: Member proj-mask 2 is a subset of the Executive
+                // global 175, so dual-wearers collide on every Member-only override project). The
+                // shadow is only provably materialized where the words differ; parity for colliding
+                // rows is still enforced by the got==want require above, and the aggregate
+                // shadowChecked>0 require below keeps the per-project path genuinely exercised.
                 uint256 globalOnly = a.hasPerm(user, AccessV2PermKeys.TM_PERMS, bytes32(0));
-                require(want != globalOnly, "TM shadow: per-project mask did not shadow global (no effect)");
-                shadowChecked++;
+                if (want != globalOnly) shadowChecked++;
             } else {
                 require(got != 0, "TM global-only: resolved empty for a global-mask holder");
                 globalChecked++;
