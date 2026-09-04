@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.24;
 
-import "forge-std/Script.sol";
-import "forge-std/console.sol";
+import {Script} from "forge-std/Script.sol";
+import {console} from "forge-std/console.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 import {IMembershipAuthority} from "../../src/interfaces/IMembershipAuthority.sol";
@@ -39,9 +39,11 @@ import {ZkEmailProof} from "../../src/zkemail/IVerifier.sol";
  *
  * SEED DATA SOURCING (§6 "enumerate wearers via event logs + fork reads"): the CANDIDATE
  * address set comes from tools/enumerate-wearers.sh (Executor.HatsMinted + QuickJoin
- * events, the real POP join path); this engine reads the FORK for each candidate's
- * authoritative current wearership / vouch / email state. ON-CHAIN fork state is the
- * source of truth — script/config/infrastructure.json is stale and never read.
+ * events, the real POP join path); canonical names/CIDs that cannot both fit in legacy
+ * Hats.details come from tools/enumerate-subject-metadata.sh (HatMetadataUpdated fold).
+ * This engine reads the FORK for each candidate's authoritative current wearership /
+ * vouch / email state and for each hat's cap/usable image URI. script/config/infrastructure.json
+ * is stale and never read.
  * ============================================================================
  */
 
@@ -52,8 +54,9 @@ interface IHatsMin {
     function balanceOf(address user, uint256 hatId) external view returns (uint256);
     function isEligible(address wearer, uint256 hatId) external view returns (bool);
     function isInGoodStanding(address wearer, uint256 hatId) external view returns (bool);
-    // viewHat returns the full 9-field hat record — we adopt maxSupply (the honest live cap, R1)
-    // and details (the live role name) verbatim.
+    // viewHat returns the full 9-field hat record. maxSupply and imageURI are canonical live fields;
+    // details is EITHER the role name OR a hex-encoded metadata CID (EligibilityModule convention),
+    // so migration must resolve CID-shaped details through the event-derived metadata fixture.
     function viewHat(uint256 hatId)
         external
         view
@@ -242,6 +245,12 @@ interface IHatsSupplyMig {
 }
 
 abstract contract AccessV2MigrationBase is Script {
+    error InvalidSubjectMetadataFixture();
+    error SubjectMetadataFixtureAlreadyLoaded();
+    error SubjectMetadataRequired(uint256 subjectId, bytes32 metadataCID);
+    error SubjectMetadataDrift(uint256 subjectId, bytes32 liveMetadataCID, bytes32 fixtureMetadataCID);
+    error SubjectNameDrift(uint256 subjectId);
+
     /*──────────────────────── Protocol constants ────────────────────────*/
     address internal constant HUDSON = 0xA6F4D9f44Dd980b7168D829d5f74c2b00a46b2c9;
     address internal constant HATS = 0x3bc1A0Ad72417f2d411118085256fC53CBdDd137;
@@ -319,6 +328,18 @@ abstract contract AccessV2MigrationBase is Script {
     uint256[] internal _tmProjHats;
     uint256[] internal _tmProjMasks;
     bool internal _tmPermsLoaded;
+
+    // Canonical role names for hats whose live `details` field cannot carry one because legacy
+    // EligibilityModule serializes a nonzero metadataCID there as `0x` + 64 hex chars. These fixtures
+    // are replayed from HatMetadataUpdated events (last-write-wins) by
+    // tools/enumerate-subject-metadata.sh. The live Hats record remains canonical for maxSupply and
+    // URI-shaped images (legacy image sentinels normalize empty); the fixture's CID is reconciled
+    // against live `details` before any calldata is built.
+    uint256[] internal _subjectMetadataHatIds;
+    string[] internal _subjectMetadataNames;
+    bytes32[] internal _subjectMetadataCIDs;
+    bytes32 internal _subjectMetadataOrg;
+    bool internal _subjectMetadataLoaded;
 
     // T3: the (subject, user) pair the SYNTHETIC-BAN drill kicked on the live
     // EligibilityModule before seeding. Zero when the drill did not run for this org.
@@ -429,19 +450,123 @@ abstract contract AccessV2MigrationBase is Script {
 
     /*═══════════════════════════════ Live hat record adoption (R1) ═══════════════════════════════*/
 
-    /// @dev maxMembers adopts the legacy hat's maxSupply VERBATIM (R1) — the honest live cap, neither
-    ///      tightened to the current count nor guessed-unlimited. Hats guarantees supply ≤ maxSupply, so
-    ///      the seeded memberCount is always ≤ maxMembers (SEED INVARIANT holds).
-    function _hatMaxSupply(uint256 id) internal view returns (uint32) {
-        (, uint32 maxSupply,,,,,,,) = IHatsMin(HATS).viewHat(id);
-        return maxSupply;
+    /// @dev Resolve a legacy hat into the v2 subject fields. Legacy EligibilityModule intentionally
+    ///      stores a nonzero metadata CID in Hats.details as a 66-byte hex string, so details is not
+    ///      always a semantic name. HatMetadataUpdated is the canonical name/CID event; its folded
+    ///      result lives in fixtures/<org>.subjectmeta.json. A CID-shaped live value MUST have a
+    ///      matching fixture row or generation fails closed instead of persisting the digest as a name.
+    ///      maxSupply remains a direct live Hats read; real image URIs are preserved while legacy
+    ///      non-URI inheritance sentinels normalize to empty.
+    function _hatSubjectData(uint256 id, string memory fallbackName)
+        internal
+        view
+        returns (string memory name, bytes32 metadataCID, string memory imageURI, uint32 maxSupply)
+    {
+        string memory details;
+        string memory legacyImageURI;
+        (details, maxSupply,,,, legacyImageURI,,,) = IHatsMin(HATS).viewHat(id);
+        imageURI = _normalizedImageURI(legacyImageURI);
+
+        (bool fixtureFound, string memory fixtureName, bytes32 fixtureCID) = _subjectMetadata(id);
+        (bool cidEncoded, bytes32 liveCID) = _parseBytes32Hex(details);
+
+        if (fixtureFound) {
+            if (cidEncoded) {
+                if (liveCID != fixtureCID) revert SubjectMetadataDrift(id, liveCID, fixtureCID);
+            } else {
+                if (fixtureCID != bytes32(0)) revert SubjectMetadataDrift(id, bytes32(0), fixtureCID);
+                if (keccak256(bytes(details)) != keccak256(bytes(fixtureName))) revert SubjectNameDrift(id);
+            }
+            return (fixtureName, fixtureCID, imageURI, maxSupply);
+        }
+
+        if (cidEncoded) revert SubjectMetadataRequired(id, liveCID);
+        name = bytes(details).length == 0 || _isMetadataPointer(details) ? fallbackName : details;
     }
 
-    /// @dev Role name adopts the live hat details; falls back to "Role#N" when the
-    ///      legacy hat carries an empty details string.
-    function _hatName(uint256 id, string memory fallbackName) internal view returns (string memory) {
-        (string memory details,,,,,,,,) = IHatsMin(HATS).viewHat(id);
-        return bytes(details).length == 0 ? fallbackName : details;
+    function _subjectMetadata(uint256 id) internal view returns (bool found, string memory name, bytes32 metadataCID) {
+        for (uint256 i; i < _subjectMetadataHatIds.length; ++i) {
+            if (_subjectMetadataHatIds[i] == id) {
+                return (true, _subjectMetadataNames[i], _subjectMetadataCIDs[i]);
+            }
+        }
+    }
+
+    function _parseBytes32Hex(string memory value) internal pure returns (bool encoded, bytes32 parsed) {
+        bytes memory b = bytes(value);
+        if (b.length != 66 || b[0] != "0" || (b[1] != "x" && b[1] != "X")) return (false, bytes32(0));
+
+        uint256 n;
+        for (uint256 i = 2; i < 66; ++i) {
+            uint8 c = uint8(b[i]);
+            uint8 nibble;
+            if (c >= 48 && c <= 57) {
+                nibble = c - 48;
+            } else if (c >= 65 && c <= 70) {
+                nibble = c - 55;
+            } else if (c >= 97 && c <= 102) {
+                nibble = c - 87;
+            } else {
+                return (false, bytes32(0));
+            }
+            n = (n << 4) | nibble;
+        }
+        return (true, bytes32(n));
+    }
+
+    function _isOpaqueSubjectName(string memory value) internal pure returns (bool) {
+        (bool cidEncoded,) = _parseBytes32Hex(value);
+        return cidEncoded || _isMetadataPointer(value);
+    }
+
+    /// @dev Top hats in the live catalog use values such as `ipfs://KUBI` in details. Those are
+    ///      metadata locators, not display names, and SubjectInfo has no arbitrary-URI metadata field.
+    ///      Use the call-site's explicit semantic fallback rather than exposing the locator as a name.
+    ///      Also recognize the two common bare IPFS CID encodings.
+    function _isMetadataPointer(string memory value) internal pure returns (bool) {
+        bytes memory b = bytes(value);
+        if (_isSupportedImageURI(b)) return true;
+        if (b.length == 46 && b[0] == "Q" && b[1] == "m") {
+            for (uint256 i = 2; i < b.length; ++i) {
+                uint8 c = uint8(b[i]);
+                bool base58 = (c >= 49 && c <= 57) || (c >= 65 && c <= 72) || (c >= 74 && c <= 78)
+                    || (c >= 80 && c <= 90) || (c >= 97 && c <= 107) || (c >= 109 && c <= 122);
+                if (!base58) return false;
+            }
+            return true;
+        }
+        if (b.length >= 50 && (b[0] == "b" || b[0] == "B")) {
+            for (uint256 i = 1; i < b.length; ++i) {
+                uint8 c = uint8(b[i]);
+                bool base32 = (c >= 50 && c <= 55) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+                if (!base32) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /// @dev HatsTreeSetup used non-URI sentinels such as `ELIGIBILITY_ADMIN` for inherited/system
+    ///      images. Those are not displayable v2 metadata. Preserve only explicit URI schemes used by
+    ///      role images; normalize every bare sentinel (and bare CID) to empty.
+    function _normalizedImageURI(string memory value) internal pure returns (string memory) {
+        return _isSupportedImageURI(bytes(value)) ? value : "";
+    }
+
+    function _isSupportedImageURI(bytes memory value) internal pure returns (bool) {
+        return _startsWithIgnoreCase(value, bytes("ipfs://")) || _startsWithIgnoreCase(value, bytes("ipns://"))
+            || _startsWithIgnoreCase(value, bytes("https://")) || _startsWithIgnoreCase(value, bytes("http://"))
+            || _startsWithIgnoreCase(value, bytes("data:")) || _startsWithIgnoreCase(value, bytes("ar://"));
+    }
+
+    function _startsWithIgnoreCase(bytes memory value, bytes memory prefix) internal pure returns (bool) {
+        if (value.length < prefix.length) return false;
+        for (uint256 i; i < prefix.length; ++i) {
+            uint8 actual = uint8(value[i]);
+            if (actual >= 65 && actual <= 90) actual += 32;
+            if (actual != uint8(prefix[i])) return false;
+        }
+        return true;
     }
 
     /*═══════════════════════════════ Wearer resolution (fork read) ═══════════════════════════════*/
@@ -549,6 +674,7 @@ abstract contract AccessV2MigrationBase is Script {
         returns (IExecutor.Call[][] memory)
     {
         delete _batches;
+        _loadSubjectMetadata(s.name);
         address beacon = IPoaManagerMig(_poaManager(s)).getBeaconById(MEMBERSHIP_AUTHORITY_TYPEID);
         uint256 topHat = _topHatId(s);
 
@@ -890,11 +1016,13 @@ abstract contract AccessV2MigrationBase is Script {
         AccessV2Types.SubjectKind[] memory kinds = new AccessV2Types.SubjectKind[](1);
         string[] memory names = new string[](1);
         uint32[] memory maxm = new uint32[](1);
+        bytes32 metadataCID;
+        string memory imageURI;
         ids[0] = topHat;
         kinds[0] = AccessV2Types.SubjectKind.Role;
-        names[0] = _hatName(topHat, "Admin"); // live details, fallback "Admin"
-        maxm[0] = _hatMaxSupply(topHat); // legacy maxSupply verbatim (R1) — topHat is 1
+        (names[0], metadataCID, imageURI, maxm[0]) = _hatSubjectData(topHat, "Admin");
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
+        _pushSubjectMetadata(authority, topHat, names[0], metadataCID, imageURI);
     }
 
     function _pushRoleSubjects(address authority) internal {
@@ -905,13 +1033,33 @@ abstract contract AccessV2MigrationBase is Script {
         AccessV2Types.SubjectKind[] memory kinds = new AccessV2Types.SubjectKind[](count);
         string[] memory names = new string[](count);
         uint32[] memory maxm = new uint32[](count);
+        bytes32[] memory metadataCIDs = new bytes32[](count);
+        string[] memory imageURIs = new string[](count);
         for (uint256 i = 1; i < _subjects.length; ++i) {
             ids[i - 1] = _subjects[i];
             kinds[i - 1] = AccessV2Types.SubjectKind.Role;
-            names[i - 1] = _hatName(_subjects[i], string.concat("Role#", vm.toString(i))); // live details
-            maxm[i - 1] = _hatMaxSupply(_subjects[i]); // legacy maxSupply verbatim (R1)
+            (names[i - 1], metadataCIDs[i - 1], imageURIs[i - 1], maxm[i - 1]) =
+                _hatSubjectData(_subjects[i], string.concat("Role#", vm.toString(i)));
         }
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
+        for (uint256 i; i < count; ++i) {
+            _pushSubjectMetadata(authority, ids[i], names[i], metadataCIDs[i], imageURIs[i]);
+        }
+    }
+
+    /// @dev seedSubjects is already deployed and intentionally kept ABI-compatible. It creates the
+    ///      subject with a zero CID/empty image, so preserve optional legacy metadata through the
+    ///      existing executor-authorized renameSubject surface immediately afterward. SubjectRenamed
+    ///      gives the subgraph a complete, explicit event without adding a new migration-only ABI.
+    function _pushSubjectMetadata(
+        address authority,
+        uint256 subjectId,
+        string memory name,
+        bytes32 metadataCID,
+        string memory imageURI
+    ) internal {
+        if (metadataCID == bytes32(0) && bytes(imageURI).length == 0) return;
+        _push(authority, abi.encodeCall(IMembershipAuthority.renameSubject, (subjectId, name, metadataCID, imageURI)));
     }
 
     /// @dev Perm rows: for each role subject a module gates on, attach the module's perm key.
@@ -988,6 +1136,45 @@ abstract contract AccessV2MigrationBase is Script {
         _tmProjHats = vm.parseJsonUintArray(json, ".projHats");
         _tmProjMasks = vm.parseJsonUintArray(json, ".projMasks");
         _tmPermsLoaded = true;
+    }
+
+    /// @dev Load the canonical HatMetadataUpdated fold used when Hats.details contains a CID rather
+    ///      than a name. The fixture is mandatory even when empty: an explicit reviewed empty file is
+    ///      safer than treating a missing event-source snapshot as permission to guess.
+    function _loadSubjectMetadata(string memory org) internal {
+        bytes32 orgHash = keccak256(bytes(org));
+        if (_subjectMetadataLoaded) {
+            if (_subjectMetadataOrg != orgHash) revert SubjectMetadataFixtureAlreadyLoaded();
+            return;
+        }
+
+        string memory path =
+            string.concat(vm.projectRoot(), "/script/accessv2/fixtures/", _lowerName(org), ".subjectmeta.json");
+        string memory json = vm.readFile(path);
+        _subjectMetadataHatIds = vm.parseJsonUintArray(json, ".hatIds");
+        _subjectMetadataNames = vm.parseJsonStringArray(json, ".names");
+        _subjectMetadataCIDs = vm.parseJsonBytes32Array(json, ".metadataCIDs");
+
+        uint256 n = _subjectMetadataHatIds.length;
+        if (_subjectMetadataNames.length != n || _subjectMetadataCIDs.length != n) {
+            revert InvalidSubjectMetadataFixture();
+        }
+        for (uint256 i; i < n; ++i) {
+            if (
+                _subjectMetadataHatIds[i] == 0 || bytes(_subjectMetadataNames[i]).length == 0
+                    || _isOpaqueSubjectName(_subjectMetadataNames[i])
+            ) {
+                revert InvalidSubjectMetadataFixture();
+            }
+            for (uint256 j; j < i; ++j) {
+                if (_subjectMetadataHatIds[i] == _subjectMetadataHatIds[j]) {
+                    revert InvalidSubjectMetadataFixture();
+                }
+            }
+        }
+
+        _subjectMetadataOrg = orgHash;
+        _subjectMetadataLoaded = true;
     }
 
     /*═══════════════ T5: INDEPENDENT legacy TaskManager oracle ═══════════════*/
@@ -1345,11 +1532,13 @@ abstract contract AccessV2MigrationBase is Script {
         AccessV2Types.SubjectKind[] memory kinds = new AccessV2Types.SubjectKind[](1);
         string[] memory names = new string[](1);
         uint32[] memory maxm = new uint32[](1);
+        bytes32 metadataCID;
+        string memory imageURI;
         ids[0] = id;
         kinds[0] = AccessV2Types.SubjectKind.Role;
-        names[0] = _hatName(id, "VoucherRole"); // live details, fallback "VoucherRole"
-        maxm[0] = _hatMaxSupply(id); // legacy maxSupply verbatim (R1)
+        (names[0], metadataCID, imageURI, maxm[0]) = _hatSubjectData(id, "VoucherRole");
         _push(authority, abi.encodeCall(IMembershipAuthority.seedSubjects, (ids, kinds, names, maxm)));
+        _pushSubjectMetadata(authority, id, names[0], metadataCID, imageURI);
     }
 
     function _buildEmail(OrgSpec memory s, address authority, address[] memory candidates) internal {
@@ -1416,43 +1605,54 @@ abstract contract AccessV2MigrationBase is Script {
     /*═══════════════════════════════ CUTOVER BATCH (§6 step 3) ═══════════════════════════════*/
 
     /// @notice Build the exact atomic cutover Executor.Call[] in §6 order. `router` is the singleton.
-    ///         Ordering: DELTA-SEED (A5, §6 first element) → router BIND (before toggle-off) →
-    ///         setMembershipAuthority ×8 (incl. Executor self-target) → unpause → legacy toggle-off →
-    ///         in-batch CutoverVerifier.verify (LAST). announceWinner needs the per-org runbook
-    ///         --gas-limit (KUBI 5M, others 4M). Returns the batch and the index of the router-bind call
-    ///         (bindIndex == number of delta calls; 0 when there is no drift).
+    ///         Ordering: idempotent SUBJECT-METADATA REPAIR → DELTA-SEED (A5) → router BIND (before
+    ///         toggle-off) → setMembershipAuthority ×8 (incl. Executor self-target) → unpause → legacy
+    ///         toggle-off → in-batch CutoverVerifier.verify (LAST). announceWinner needs the per-org
+    ///         runbook --gas-limit (KUBI 5M, others 4M). Returns the batch and router-bind index.
     function _buildCutoverBatch(OrgSpec memory s, address authority, address router, address[] memory candidates)
         internal
-        view
         returns (IExecutor.Call[] memory batch, uint256 bindIndex)
     {
+        _loadSubjectMetadata(s.name);
         uint256 domain = _topHatDomain(s);
         uint256[] memory roleHats = _subjects; // toggle-off targets (adopted legacy ids)
         bool[] memory offs = new bool[](roleHats.length);
         // offs default false → setHatStatus(false)
 
-        // A5 (§6 step-3): DELTA-SEED first — legacy wearers who joined
+        // Reconcile an already-seeded, still-paused authority before activation. This is required for
+        // resume safety: seed proposal calldata is immutable once voted, but a regenerated cutover can
+        // repair old seeders that wrote Hats.details (`ipfs://KUBI` or a CID) as SubjectInfo.name. Only
+        // mismatches produce calls, so fresh fixed seeds and repeated generation are idempotent.
+        IExecutor.Call[] memory metadataRepairs = _buildSubjectMetadataRepairs(authority);
+
+        // A5 (§6 step-3): DELTA-SEED before bind — legacy wearers who joined
         // since the authority was seeded (isWearerOfHat but NOT yet an authority member) are granted +
         // accepted here, INSIDE the atomic cutover, so they are not silently toggled off unported. When
-        // there is no drift the delta is EMPTY (bindIndex == 0, the pre-A5 shape). This is executable —
-        // seedRules/seedMemberships are executor-gated and pause-exempt, and run before the unpause.
+        // there is no wearer drift the delta is EMPTY. The bind index may still be nonzero when the
+        // idempotent metadata-repair prefix is needed. This is executable — seedRules/seedMemberships
+        // are executor-gated and pause-exempt, and run before the unpause.
         (IExecutor.Call[] memory delta,) = _buildDeltaSeed(s, authority, candidates);
 
-        // The batch is `delta` + 11 core calls + 1 trailing CutoverVerifier.verify. The verifier is
-        // MANDATORY: an unverified cutover batch must be UNBUILDABLE —
+        // The batch is `metadataRepairs` + `delta` + 11 core calls + 1 trailing
+        // CutoverVerifier.verify. The verifier is MANDATORY: an unverified cutover batch is UNBUILDABLE —
         // the silent `withVerify` omission previously let GenerateBatches emit production JSON with
         // NO in-batch verification at all. Every caller must wire _verifier first.
         require(_verifier != address(0), "CutoverVerifier not wired (_verifier unset) - refusing to build cutover");
-        batch = new IExecutor.Call[](delta.length + 12);
+        batch = new IExecutor.Call[](metadataRepairs.length + delta.length + 12);
         require(batch.length <= MAX_CALLS, "cutover batch exceeds Executor MAX_CALLS (freeze legacy joins)");
         uint256 k;
 
-        // 0. DELTA-SEED slices (the §6 first cutover element).
+        // 0. Idempotent metadata repair while the authority is still paused.
+        for (uint256 i; i < metadataRepairs.length; ++i) {
+            batch[k++] = metadataRepairs[i];
+        }
+
+        // 1. DELTA-SEED slices.
         for (uint256 i; i < delta.length; ++i) {
             batch[k++] = delta[i];
         }
 
-        // 1. Router legacy-id BIND — BEFORE toggle-off (adopted ids flip passthrough→authority-native).
+        // 2. Router legacy-id BIND — BEFORE toggle-off (adopted ids flip passthrough→authority-native).
         bindIndex = k;
         batch[k++] = IExecutor.Call({
             target: router, value: 0, data: abi.encodeCall(IAuthorityRouter.bindAuthority, (s.orgId, domain, authority))
@@ -1516,10 +1716,50 @@ abstract contract AccessV2MigrationBase is Script {
         require(k == batch.length, "batch length mismatch");
     }
 
+    /// @dev Build only the renameSubject calls needed to reconcile a previously executed seed. Desired
+    ///      values come from the same fail-closed legacy resolver as fresh seeds. For non-admin hats
+    ///      with empty/locator details, retain an existing non-opaque fallback name when one exists;
+    ///      the top hat always has the explicit semantic fallback "Admin".
+    function _buildSubjectMetadataRepairs(address authority) internal view returns (IExecutor.Call[] memory repairs) {
+        IMembershipAuthority a = IMembershipAuthority(authority);
+        IExecutor.Call[] memory pending = new IExecutor.Call[](_subjects.length);
+        uint256 count;
+
+        for (uint256 i; i < _subjects.length; ++i) {
+            uint256 subjectId = _subjects[i];
+            IMembershipAuthority.SubjectInfo memory current = a.getSubject(subjectId);
+            if (!current.exists) continue;
+
+            string memory fallbackName = i == 0 ? "Admin" : string.concat("Role#", vm.toString(i));
+            if (i != 0 && bytes(current.name).length != 0 && !_isOpaqueSubjectName(current.name)) {
+                fallbackName = current.name;
+            }
+
+            (string memory name, bytes32 metadataCID, string memory imageURI,) =
+                _hatSubjectData(subjectId, fallbackName);
+            bool differs = keccak256(bytes(current.name)) != keccak256(bytes(name))
+                || current.metadataCID != metadataCID
+                || keccak256(bytes(current.imageURI)) != keccak256(bytes(imageURI));
+            if (!differs) continue;
+
+            pending[count++] = IExecutor.Call({
+                target: authority,
+                value: 0,
+                data: abi.encodeCall(IMembershipAuthority.renameSubject, (subjectId, name, metadataCID, imageURI))
+            });
+        }
+
+        repairs = new IExecutor.Call[](count);
+        for (uint256 i; i < count; ++i) {
+            repairs[i] = pending[i];
+        }
+    }
+
     /// @dev A5: the DELTA-SEED calls — for each subject, legacy wearers (isWearerOfHat, in `candidates`)
     ///      who are NOT yet authority members get one seedRules(Grant)+seedMemberships pair (the SEED
     ///      INVARIANT unit). Returns the calls and the count of subjects carrying a delta. Empty when the
-    ///      authority already covers every live wearer (no drift → bindIndex 0, the pre-A5 batch shape).
+    ///      authority already covers every live wearer. A metadata-repair prefix can independently
+    ///      make the router bind index nonzero.
     function _buildDeltaSeed(OrgSpec memory s, address authority, address[] memory candidates)
         internal
         view

@@ -9,7 +9,7 @@ pragma solidity ^0.8.21;
 /// @dev No fork: Access v2 orgs never read Hats Protocol, so a MockHats pointer is all the Executor
 ///      and the shared registries need. Doubles as the shared infra base for ZkEmailOrgFlow.
 
-import "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
@@ -206,6 +206,10 @@ contract DeployerTest is Test {
 
     /*══════════════════════════════════════════ TESTS ══════════════════════════════════════════*/
 
+    function testVersionIdentifiesAccessV2ABI() public view {
+        assertEq(deployer.VERSION(), "2.0.0");
+    }
+
     function testFullOrgDeployment_registersEveryModule() public {
         OrgDeployer.DeploymentResult memory r = _deployDefaultOrg(ORG_ID);
 
@@ -272,6 +276,61 @@ contract DeployerTest is Test {
         uint256[] memory members = auth.groupMemberRoles(_groupSubject(0));
         assertEq(members.length, 1);
         assertEq(members[0], _roleSubject(ROLE_EXECUTIVE));
+    }
+
+    function testGenesisSeed_persistsRoleMetadataInAuthority() public {
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        bytes32 cid = keccak256("executive-role-metadata");
+        params.roles[ROLE_EXECUTIVE].metadataCID = cid;
+        params.roles[ROLE_EXECUTIVE].image = "https://example.com/executive.png";
+
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory r = deployer.deployFullOrg(params);
+        IMembershipAuthority.SubjectInfo memory role =
+            IMembershipAuthority(r.membershipAuthority).getSubject(_roleSubject(ROLE_EXECUTIVE));
+
+        assertEq(role.name, "EXECUTIVE");
+        assertEq(role.metadataCID, cid);
+        assertEq(role.imageURI, "https://example.com/executive.png");
+    }
+
+    function testDeploy_supportsMetadataOnMaximumRoleCount() public {
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        params.roles = new RoleConfigStructs.RoleConfig[](16);
+        for (uint256 i; i < 16; ++i) {
+            params.roles[i] = _role("METADATA_ROLE", false, false, 0);
+            params.roles[i].metadataCID = keccak256(abi.encode("role-metadata", i));
+            params.roles[i].image = "ipfs://role-image";
+        }
+        params.groups = new RoleConfigStructs.GroupConfig[](0);
+        params.roleAssignments = _emptyRoleAssignments();
+        params.metadataAdminRoleIndex = type(uint256).max;
+
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory r = deployer.deployFullOrg(params);
+        IMembershipAuthority auth = IMembershipAuthority(r.membershipAuthority);
+
+        assertEq(auth.subjectCount(), 17, "admin plus the maximum 16 roles");
+        IMembershipAuthority.SubjectInfo memory lastRole = auth.getSubject(_roleSubject(15));
+        assertEq(lastRole.metadataCID, keccak256(abi.encode("role-metadata", uint256(15))));
+        assertEq(lastRole.imageURI, "ipfs://role-image");
+    }
+
+    function testDeploy_supportsMaximumRoleCountWithoutMetadata() public {
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        params.roles = new RoleConfigStructs.RoleConfig[](16);
+        for (uint256 i; i < 16; ++i) {
+            params.roles[i] = _role("ROLE", false, false, 0);
+            params.roles[i].image = "";
+        }
+        params.groups = new RoleConfigStructs.GroupConfig[](0);
+        params.roleAssignments = _emptyRoleAssignments();
+        params.metadataAdminRoleIndex = type(uint256).max;
+
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory r = deployer.deployFullOrg(params);
+
+        assertEq(IMembershipAuthority(r.membershipAuthority).subjectCount(), 17, "admin plus the maximum 16 roles");
     }
 
     function testGenesisSeed_permRowsMatchRoleAssignments() public {

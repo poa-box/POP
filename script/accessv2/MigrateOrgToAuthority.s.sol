@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.24;
 
-import "forge-std/console.sol";
+import {console} from "forge-std/console.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 import {IExecMig, IPoaManagerMig, IHatsMin, IEMWriteMig} from "./AccessV2MigrationBase.sol";
@@ -537,6 +537,8 @@ contract PredeployAuthority is MigrateOrgBase {
 ///         proposal-ready JSON to script/accessv2/out/. Env: ORG=TEST6|DP|KUBI|POA.
 ///         REGENERATE right before the cutover proposal is created (delta-seed discipline, §6).
 contract GenerateBatches is MigrateOrgBase {
+    error InvalidCutoverPrefixOrder();
+
     function run() public {
         OrgSpec memory s = _specByKey(vm.envString("ORG"));
         address[] memory candidates = _loadCandidates(s.name);
@@ -567,10 +569,10 @@ contract GenerateBatches is MigrateOrgBase {
             _verifier = verifier;
         }
         // A5 delta mode: candidates should be RE-ENUMERATED (tools/enumerate-wearers.sh) immediately
-        // before this call so any legacy joiner since the seed is picked up as a delta-seed slice at the
-        // head of the cutover batch. bindIdx > 0 iff a delta is present.
+        // before this call so any legacy joiner since the seed is picked up as a delta-seed slice in the
+        // cutover prefix. The prefix can also contain idempotent repairs for already-seeded metadata.
         (IExecutor.Call[] memory cutover, uint256 bindIdx) = _buildCutoverBatch(s, authority, router, candidates);
-        require(cutover[bindIdx].target == router, "router bind not at bindIndex (delta ordering wrong)");
+        if (cutover[bindIdx].target != router) revert InvalidCutoverPrefixOrder();
         _writeBatchJson(s, "cutover", 1, cutover, authority);
 
         console.log("  DONE. Craft proposals from out/*.json IN ORDER (seed.1..n, then cutover.1).");

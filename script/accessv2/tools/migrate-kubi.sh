@@ -149,6 +149,7 @@ forge_fork() { # $1 contract-target  $2.. extra env assignments handled by calle
 regen() {
   bash script/accessv2/tools/enumerate-wearers.sh >/dev/null 2>&1
   bash script/accessv2/tools/enumerate-tm-perms.sh >/dev/null 2>&1
+  bash script/accessv2/tools/enumerate-subject-metadata.sh >/dev/null 2>&1
   forge_fork "MigrateOrgToAuthority.s.sol:GenerateBatches" || { echo "STOP: GenerateBatches failed"; exit 1; }
   echo "── [KUBI] batches regenerated"
 }
@@ -178,6 +179,7 @@ echo "════════════ MIGRATING KUBI (windows: ${MINUTES}m,
 if [ ! -f "$STATE/seed.1.id" ]; then
   bash script/accessv2/tools/enumerate-wearers.sh >/dev/null 2>&1
   bash script/accessv2/tools/enumerate-tm-perms.sh >/dev/null 2>&1
+  bash script/accessv2/tools/enumerate-subject-metadata.sh >/dev/null 2>&1
   echo "── [KUBI] final rehearsal incl. board-roles batch (a few minutes)..."
   REH_OK=""
   for F in $FORK $FORK2; do

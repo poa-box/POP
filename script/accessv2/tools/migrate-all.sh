@@ -70,6 +70,7 @@ regen() { # $1 org
   org_cfg "$1"
   bash script/accessv2/tools/enumerate-wearers.sh >/dev/null 2>&1
   bash script/accessv2/tools/enumerate-tm-perms.sh >/dev/null 2>&1
+  bash script/accessv2/tools/enumerate-subject-metadata.sh >/dev/null 2>&1
   ORG=$1 FOUNDRY_PROFILE=production forge script \
     script/accessv2/MigrateOrgToAuthority.s.sol:GenerateBatches --fork-url $FORK >/dev/null 2>&1 \
     || { echo "STOP: GenerateBatches failed for $1"; exit 1; }
@@ -92,6 +93,7 @@ do_org() { # $1 org  $2 SpecName  $3 minutes
   echo "════════════ MIGRATING $1 ════════════"
   bash script/accessv2/tools/enumerate-wearers.sh >/dev/null 2>&1
   bash script/accessv2/tools/enumerate-tm-perms.sh >/dev/null 2>&1
+  bash script/accessv2/tools/enumerate-subject-metadata.sh >/dev/null 2>&1
   echo "── [$1] final rehearsal (a few minutes)..."
   FOUNDRY_PROFILE=production forge script script/accessv2/MigrateOrgToAuthority.s.sol:$SIMNAME \
     --fork-url $FORK 2>&1 | grep -q "governed migration sim complete" \

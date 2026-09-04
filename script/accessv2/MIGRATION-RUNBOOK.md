@@ -85,9 +85,14 @@ command below (examples show Gnosis).
      --fork-url gnosis-gateway
    ```
    Writes `out/<org>.seed.N.json` + `out/<org>.cutover.1.json`. Batches are LIVE-STATE-DERIVED
-   from TWO fixtures that must be refreshed first: `bash script/accessv2/tools/enumerate-wearers.sh`
-   (candidate set) AND `bash script/accessv2/tools/enumerate-tm-perms.sh` (TaskManager masks —
-   the ONLY source for per-project rows; no on-chain getter exists).
+   from THREE fixtures that must be refreshed first:
+   `bash script/accessv2/tools/enumerate-wearers.sh` (candidate set),
+   `bash script/accessv2/tools/enumerate-tm-perms.sh` (TaskManager masks — the ONLY source for
+   per-project rows; no on-chain getter exists), and
+   `bash script/accessv2/tools/enumerate-subject-metadata.sh` (canonical role names/CIDs folded
+   last-write-wins from `HatMetadataUpdated`). The metadata fixture is load-bearing: when a role has
+   a nonzero CID, legacy `Hats.details` contains the CID hex rather than the semantic name, and batch
+   generation fails closed if the event-derived row is missing or stale.
    **Regenerate right before the cutover proposal is created** (the delta-seed discipline) — and
    note the re-run REWRITES the `seed.N.json` files too: at that point propose ONLY the fresh
    `cutover.1.json`; the already-executed seed files are dead artifacts. For KUBI-sized orgs,
@@ -187,8 +192,23 @@ from a funded EOA.
   and `_probeOpenSubjectStrangers` proves both arms on the authority after cutover: a stranger CAN
   `claim()` the one open member role (DP), and every other subject rejects a stranger with
   `NotClaimable` (Test6 5/5, KUBI 3/3, Poa 3/3, DP 3 gated + 1 open).
-- **role names (specOrder-10)**: subjects adopt the live `hats.viewHat(id).details` string; empty
-  details fall back to `Role#N` (admin → `Admin`, reconstructed voucher subjects → `VoucherRole`).
+- **role metadata (specOrder-10)**: `hats.viewHat(id)` remains authoritative for `maxSupply` and for
+  actual URI-shaped images. Legacy system/inheritance sentinels such as `ELIGIBILITY_ADMIN` are not
+  usable images and normalize to an empty v2 `imageURI`; explicit `ipfs://`, `ipns://`, HTTP(S),
+  `data:`, and `ar://` values are preserved. An ordinary text `details` value is the live role name;
+  a 66-byte hex `details` value is
+  the legacy serialization of `metadataCID`, never a name. In that case the semantic name/CID comes
+  from the refreshed `HatMetadataUpdated` fixture and generation reverts if the row is missing or
+  disagrees with live `details`. Known metadata locators (`ipfs://`, `ipns://`, and bare CIDv0/v1)
+  likewise never become display names; they use the call site's explicit fallback (so catalog top hats
+  such as `ipfs://KUBI` seed as `Admin`). The existing deployed `seedSubjects` ABI is unchanged: it
+  creates the subject, then the batch immediately calls `renameSubject` where CID/image metadata exists,
+  emitting an explicit `SubjectRenamed` event for the indexer. Empty/non-name details retain the
+  existing fallbacks (`Role#N`; admin → `Admin`; reconstructed voucher subjects → `VoucherRole`). A
+  regenerated cutover also compares every already-seeded subject against that same canonical source and
+  prepends only the needed `renameSubject` repairs while the authority is paused. This makes an interrupted
+  ceremony resume-safe: KUBI's older seed calldata wrote top-hat `ipfs://KUBI` as its Admin name, and the
+  fresh cutover deterministically repairs it to `Admin` before router binding and activation.
 - **subject discovery (A6 / seedCompleteness-6)**: discovery now covers TM creator hats (lens 5), TM
   organizer hats (lens 11), and every HybridVoting voting-class `hatId` (`getClasses()`) in ADDITION
   to the DD/HV/PT/EDU/QJ/TM-permission lists. All three resolve on the module authority arms by pure
@@ -250,12 +270,14 @@ code paths) ships only after the LAST org migrates and soaks.
   CANONICAL Hats (enumeration-independent upper bound — closes the self-referential-parity gap), and
   (d) the admin (topHat) id resolves THROUGH THE ROUTER (`isWearerOfHat(orgExecutor, subjects[0])` +
   `viewHat(...).active`). `subjects[0]` MUST be the admin (topHat) id.
-- **Delta-seed (A5, §6 step-3 first element)** — the cutover batch OPENS with a delta-seed section:
+- **Cutover prefix / delta-seed (A5, §6 step-3 first element)** — after any idempotent subject-metadata
+  repairs, the cutover prefix includes a delta-seed section:
   legacy wearers who joined since the seed proposals executed (live `isWearerOfHat` but not yet an
   authority member) get one `seedRules(Grant)`+`seedMemberships` pair each, INSIDE the atomic cutover
   (executor-gated, pause-exempt, before the unpause). `GenerateBatches` computes it automatically from
   the re-enumerated candidate set — so RE-RUN `tools/enumerate-wearers.sh` immediately before
-  regenerating the cutover. No drift → empty delta → the router bind leads the batch (pre-A5 shape).
+  regenerating the cutover. No wearer drift → an empty delta; the router bind leads only when the
+  metadata-repair prefix is also empty (the pre-A5 shape).
   The governed sim's drift drill (`SimMigrate*`) proves both arms: a stale batch reverts on `SupplyDrift`
   and a regenerated delta batch ports the newcomer with the verifier passing.
 - **DD CREATE2 occupant guard (A7)** — `_ddDeployAuthority` reuses a pre-occupied predicted slot ONLY

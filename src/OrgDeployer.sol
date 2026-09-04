@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
 
-import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
+import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 
-import "./OrgRegistry.sol";
+import {OrgRegistry} from "./OrgRegistry.sol";
 import {IHybridVotingInit} from "./libs/ModuleDeploymentLib.sol";
 import {GovernanceFactory} from "./factories/GovernanceFactory.sol";
 import {AccessFactory} from "./factories/AccessFactory.sol";
@@ -56,6 +56,8 @@ interface IPaymasterHub {
 /// @dev Executor-gated authority calls made during the deploy window, relayed through
 ///      {IExecutorAdmin.configureModule} (the OrgDeployer owns the Executor until step 14).
 interface IAuthoritySeed {
+    function renameSubject(uint256 subjectId, string calldata name, bytes32 metadataCID, string calldata imageURI)
+        external;
     function seedRules(
         uint256[] calldata subjects,
         address[] calldata users,
@@ -82,7 +84,7 @@ interface IAuthoritySeed {
  */
 contract OrgDeployer is Initializable {
     /// @notice Contract version for tracking deployments
-    string public constant VERSION = "1.0.1";
+    string public constant VERSION = "2.0.0";
 
     /// @notice Caps mirroring the authority's own limits (PermFanoutLimit = 16 subjects per
     ///         permission key, GroupsPerRoleLimit = 8, GroupSizeLimit = 16 member roles).
@@ -701,6 +703,21 @@ contract OrgDeployer is Initializable {
         // On the Executor the setter repoints `l.hats` itself, so every hats() consumer
         // (mintHatsForUser, ZkEmailInvites) follows automatically.
         exec.setMembershipAuthority(auth.authority);
+
+        // OrgAccessSeedLib deliberately keeps the deployed initialize/seedSubjects ABI stable, and
+        // that seed shape carries names/caps but not CID/image metadata. Persist the remaining role
+        // metadata through the authority's existing executor path while it is still paused. This also
+        // emits SubjectRenamed, so authority storage and the RolesCreated summary event cannot diverge.
+        for (uint256 i; i < params.roles.length; ++i) {
+            RoleConfigStructs.RoleConfig calldata role = params.roles[i];
+            if (role.metadataCID == bytes32(0) && bytes(role.image).length == 0) continue;
+            exec.configureModule(
+                auth.authority,
+                abi.encodeCall(
+                    IAuthoritySeed.renameSubject, (auth.roleSubjectIds[i], role.name, role.metadataCID, role.image)
+                )
+            );
+        }
 
         (uint256[] memory subjects, address[] memory users) = _genesisMemberships(params, result.executor, auth);
         if (subjects.length > 0) {
