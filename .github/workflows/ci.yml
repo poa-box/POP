@@ -19,13 +19,10 @@ concurrency:
 
 jobs:
   cicd:
-    # Etherform's pending action refresh, SHA-pinned. This includes
-    # foundry-toolchain v1.9.1, which supports the native foundryup binary.
-    # The prior pin's v1.8.0 invoked that binary through bash and fails before CI.
-    # The earlier pin targeted a
+    # Latest etherform (main @ 2026-07-24), SHA-pinned. The prior pin targeted a
     # since-removed input interface (run-upgrade-safety/baseline-path/deploy-on-main/
     # flatten-contracts) and failed to load at 0s repo-wide; this is the current interface.
-    uses: BreadchainCoop/etherform/.github/workflows/_foundry-cicd.yml@5e1256312be0d7964584651609acaf2c8de53d25
+    uses: BreadchainCoop/etherform/.github/workflows/_foundry-cicd.yml@180aa91926a02ce2045f9a7e3ed08be9395ecfab
     with:
       # ── CI ──
       check-formatting: true
@@ -66,7 +63,7 @@ jobs:
     name: Deploy Testnet (main)
     needs: [cicd]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    uses: BreadchainCoop/etherform/.github/workflows/_deploy-testnet.yml@5e1256312be0d7964584651609acaf2c8de53d25
+    uses: BreadchainCoop/etherform/.github/workflows/_deploy-testnet.yml@180aa91926a02ce2045f9a7e3ed08be9395ecfab
     with:
       deploy-script: 'script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure'
       network-config-path: '.github/deploy-networks.json'
