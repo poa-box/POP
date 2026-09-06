@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -76,7 +78,12 @@ contract MockPT is Test, IParticipationToken {
             creatorHats[0] = CREATOR_HAT;
             uint256[] memory memberHats = new uint256[](1);
             memberHats[0] = MEMBER_HAT;
-            hub.initialize(address(token), address(hats), executor, creatorHats, memberHats);
+            hub.initialize(address(token), executor);
+            MockModuleAuthority moduleAuthority = new MockModuleAuthority(address(hats), executor);
+            moduleAuthority.setSubjects(AccessV2PermKeys.EDU_CREATE, creatorHats);
+            moduleAuthority.setSubjects(AccessV2PermKeys.EDU_MEMBER, memberHats);
+            vm.prank(executor);
+            hub.setMembershipAuthority(address(moduleAuthority));
         }
 
         /*////////////////////////////////////////////////////////////
@@ -84,14 +91,12 @@ contract MockPT is Test, IParticipationToken {
         ////////////////////////////////////////////////////////////*/
         function testInitializeStoresArgs() public {
             assertEq(address(hub.token()), address(token));
-            assertEq(address(hub.hats()), address(hats));
+            assertEq(address(hub.hats()), address(0));
             assertEq(hub.executor(), executor);
             uint256[] memory creatorHats = hub.creatorHatIds();
-            assertEq(creatorHats.length, 1);
-            assertEq(creatorHats[0], CREATOR_HAT);
+            assertEq(creatorHats.length, 0);
             uint256[] memory memberHats = hub.memberHatIds();
-            assertEq(memberHats.length, 1);
-            assertEq(memberHats[0], MEMBER_HAT);
+            assertEq(memberHats.length, 0);
         }
 
         function testInitializeZeroAddressReverts() public {
@@ -101,7 +106,7 @@ contract MockPT is Test, IParticipationToken {
             uint256[] memory creatorHats = new uint256[](0);
             uint256[] memory memberHats = new uint256[](0);
             vm.expectRevert(EducationHub.ZeroAddress.selector);
-            tmp.initialize(address(0), address(hats), executor, creatorHats, memberHats);
+            tmp.initialize(address(0), executor);
         }
 
         /*////////////////////////////////////////////////////////////
@@ -168,80 +173,6 @@ contract MockPT is Test, IParticipationToken {
             vm.prank(learner);
             hub.completeModule(0, 2);
             assertEq(newToken.balanceOf(learner), 7);
-        }
-
-        function testSetCreatorHatAllowed() public {
-            uint256 newHat = 99;
-            address newCreator = address(0xbeef);
-
-            // Mint the new hat to the new creator
-            hats.mintHat(newHat, newCreator);
-
-            // Add the new hat as a creator hat
-            vm.prank(executor);
-            hub.setCreatorHatAllowed(newHat, true);
-
-            // Verify the hat was added
-            uint256[] memory creatorHats = hub.creatorHatIds();
-            assertEq(creatorHats.length, 2);
-            bool found = false;
-            for (uint256 i = 0; i < creatorHats.length; i++) {
-                if (creatorHats[i] == newHat) {
-                    found = true;
-                    break;
-                }
-            }
-            assertTrue(found, "New creator hat should be in the array");
-
-            // New creator should be able to create modules
-            vm.prank(newCreator);
-            hub.createModule(bytes("test"), bytes32(0), 5, 1);
-
-            // Remove the hat
-            vm.prank(executor);
-            hub.setCreatorHatAllowed(newHat, false);
-
-            // Verify the hat was removed
-            creatorHats = hub.creatorHatIds();
-            assertEq(creatorHats.length, 1);
-
-            // New creator should no longer be able to create modules
-            vm.prank(newCreator);
-            vm.expectRevert(EducationHub.NotCreator.selector);
-            hub.createModule(bytes("test2"), bytes32(0), 5, 1);
-        }
-
-        function testSetMemberHatAllowed() public {
-            uint256 newHat = 88;
-            address newMember = address(0xcafe);
-
-            // Mint the new hat to the new member
-            hats.mintHat(newHat, newMember);
-
-            // Add the new hat as a member hat
-            vm.prank(executor);
-            hub.setMemberHatAllowed(newHat, true);
-
-            // Verify the hat was added
-            uint256[] memory memberHats = hub.memberHatIds();
-            assertEq(memberHats.length, 2);
-            bool found = false;
-            for (uint256 i = 0; i < memberHats.length; i++) {
-                if (memberHats[i] == newHat) {
-                    found = true;
-                    break;
-                }
-            }
-            assertTrue(found, "New member hat should be in the array");
-
-            // First create a module for testing
-            vm.prank(creator);
-            hub.createModule(bytes("data"), bytes32(0), 5, 2);
-
-            // New member should be able to complete modules
-            vm.prank(newMember);
-            hub.completeModule(0, 2);
-            assertEq(token.balanceOf(newMember), 5);
         }
 
         /*////////////////////////////////////////////////////////////

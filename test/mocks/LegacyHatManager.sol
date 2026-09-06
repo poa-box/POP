@@ -8,7 +8,7 @@ import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
  * @notice Generic library for managing Hats Protocol permissions
  * @dev Storage-agnostic functions that work with any hat array structure
  */
-library HatManager {
+library LegacyHatManager {
     /* ─────────── Events ─────────── */
     event HatToggled(uint256 indexed hatId, bool allowed);
 

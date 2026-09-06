@@ -241,17 +241,20 @@ code paths) ships only after the LAST org migrates and soaks.
 
 - Wave E: subgraph v2 + frontend v2 releases (subgraph BEFORE first cutover, frontend
   feature-detects per module).
-- Legacy EM/QuickJoin rulebook entries stay (superset discipline) until the last legacy org
-  migrates; then a cleanup `setGlobalRulesBatch` may retire them.
+- Wave G explicitly disables the eleven retired EM/QuickJoin global rulebook selectors with
+  `setGlobalRulesBatch`; merely removing defaults would leave existing rules active.
 - **Wave G — the de-Hats strip (sequencing decision 2026-08-25):** all migrations run on the
   dual-path impls this runbook rehearsed; ONLY AFTER the last real org is bound + cut over,
   ship authority-only impls in one Mirror-beacon wave. Behavior-neutral by construction for
   migrated orgs (the legacy arm is dead code once `membershipAuthority != 0` everywhere), so
   it needs NO org votes; sim gate = per-org read-parity differential pre/post bump.
-  **CAUTION — the 6 inactive Gnosis orgs (Test, Test2, Test3, tkrjehbcuebc, Test5, Argus)
-  break at THIS bump** unless pinned Static (`SwitchableBeacon.pinToCurrent()`, executor-owned)
-  or migrated first — decide before broadcasting the strip wave. poa-cli's legacy scrap rides
-  in this wave too.
+  **Retirement decision (2026-09-06, Hudson):** the six inactive Gnosis orgs
+  (Test, Test2, Test3, tkrjehbcuebc, Test5, Argus) retire at this bump; do not pin or migrate
+  them. Kansas Blockchain/KUBI, Decentral Park, Poa and migrated Test6 remain supported.
+  Preserve every org's indexed history, including survivors' pre-cutover events; frontend/CLI
+  support requires a nonzero authority, router binding and completed cutover, without a
+  history timestamp cutoff or name allowlist. poa-cli removes legacy functionality in this wave.
+  See [Wave G release procedure](WAVE-G.md).
 
 ## Access-v2 contract-surface notes (Wave D FIX-B)
 

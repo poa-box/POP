@@ -16,12 +16,7 @@ import {AccessV2Types} from "../src/libs/AccessV2Types.sol";
 import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 /// @title QuickJoinAccessV2Test
-/// @notice Dual-path coverage for QuickJoin's Access v2 remap (freeze §4.6). Legacy path mints the
-///         `memberHatIds` list through the (unchanged) Executor.mintHatsForUser loop; the authority
-///         path enumerates the QJ_AUTOJOIN default-ALLOW subjects and mints them through the SAME
-///         Executor loop, whose repointed `l.hats.mintHat` resolves against the authority. Includes
-///         the frozen equality differential: the legacy hats list and the authority QJ_AUTOJOIN
-///         subject list produce the same mints.
+/// @notice Authority QJ_AUTOJOIN subjects mint through the real Executor; zero rollback is rejected.
 contract QuickJoinAccessV2Test is Test {
     Executor exec;
     QuickJoin qj;
@@ -47,7 +42,7 @@ contract QuickJoinAccessV2Test is Test {
         Executor execImpl = new Executor();
         UpgradeableBeacon execBeacon = new UpgradeableBeacon(address(execImpl), address(this));
         exec = Executor(payable(address(new BeaconProxy(address(execBeacon), ""))));
-        exec.initialize(address(this), address(legacyHats));
+        exec.initialize(address(this));
         exec.setCaller(address(this));
 
         // Real QuickJoin, minting through the real Executor.
@@ -56,27 +51,10 @@ contract QuickJoinAccessV2Test is Test {
         QuickJoin qjImpl = new QuickJoin();
         UpgradeableBeacon qjBeacon = new UpgradeableBeacon(address(qjImpl), address(this));
         qj = QuickJoin(address(new BeaconProxy(address(qjBeacon), "")));
-        qj.initialize(address(exec), address(legacyHats), address(registry), master, memberHats);
+        qj.initialize(address(exec), address(registry), master);
 
         exec.setHatMinterAuthorization(address(qj), true);
         registry.setUsername(user, "alice");
-    }
-
-    /*───────────────────── Legacy path (regression) ─────────────────────*/
-    function testLegacyJoinMintsMemberHats() public {
-        assertEq(qj.membershipAuthority(), address(0));
-        vm.prank(user);
-        qj.quickJoinWithUser();
-        assertTrue(legacyHats.isWearerOfHat(user, LEGACY_HAT), "legacy member hat minted");
-    }
-
-    function testLegacyJoinEmitsLegacyList() public {
-        uint256[] memory expected = new uint256[](1);
-        expected[0] = LEGACY_HAT;
-        vm.expectEmit(true, false, false, true, address(qj));
-        emit QuickJoined(user, expected);
-        vm.prank(user);
-        qj.quickJoinWithUser();
     }
 
     /*───────────────────── setMembershipAuthority auth ─────────────────────*/
@@ -92,6 +70,11 @@ contract QuickJoinAccessV2Test is Test {
         vm.prank(address(exec));
         qj.setMembershipAuthority(address(0xdead));
         assertEq(qj.membershipAuthority(), address(0xdead));
+
+        vm.prank(address(exec));
+        vm.expectRevert(QuickJoin.InvalidAddress.selector);
+        qj.setMembershipAuthority(address(0));
+        assertEq(qj.membershipAuthority(), address(0xdead), "failed rollback preserves authority");
     }
 
     /*───────────────────── Authority path ─────────────────────*/
@@ -112,50 +95,6 @@ contract QuickJoinAccessV2Test is Test {
         emit QuickJoined(user, expected);
         vm.prank(user);
         qj.quickJoinWithUser();
-    }
-
-    /*───────────────────── Rollback ─────────────────────*/
-    function testRollbackRestoresLegacyList() public {
-        _migrateToAuthority();
-
-        // Roll QuickJoin back to legacy list (executor also rolls its hats pointer back).
-        vm.prank(address(exec));
-        qj.setMembershipAuthority(address(0));
-        exec.setMembershipAuthority(address(0));
-
-        vm.prank(user);
-        qj.quickJoinWithUser();
-        assertTrue(legacyHats.isWearerOfHat(user, LEGACY_HAT), "legacy member hat minted after rollback");
-    }
-
-    /*───────────────────── Equality differential (§5.2 / §4.6) ─────────────────────*/
-    /// @notice The legacy hats list and the authority QJ_AUTOJOIN subject list produce the SAME mints:
-    ///         each world configures exactly ONE auto-join membership, and the joining user ends up
-    ///         holding exactly that one membership.
-    function testJoinEqualityDifferential() public {
-        // ── Legacy arm (fresh user, no authority) ──
-        address legacyUser = address(0x1111);
-        registry.setUsername(legacyUser, "legacy");
-        uint256[] memory legacyList = qj.memberHatIds();
-        assertEq(legacyList.length, 1, "one legacy auto-join hat");
-        vm.prank(legacyUser);
-        qj.quickJoinWithUser();
-        bool legacyMember = legacyHats.isWearerOfHat(legacyUser, legacyList[0]);
-
-        // ── Authority arm (fresh user, migrated) ──
-        uint256 baseRole = _migrateToAuthority();
-        uint256[] memory authList = auth.subjectsWithKey(AccessV2PermKeys.QJ_AUTOJOIN, bytes32(0));
-        address authUser = address(0x2222);
-        registry.setUsername(authUser, "auth");
-        vm.prank(authUser);
-        qj.quickJoinWithUser();
-        bool authMember = auth.isMember(baseRole, authUser);
-
-        // Same cardinality of auto-join memberships, same "user joined the configured base role".
-        assertEq(authList.length, legacyList.length, "same auto-join set cardinality");
-        assertEq(authList[0], baseRole, "authority list is the QJ_AUTOJOIN base role");
-        assertTrue(legacyMember, "legacy arm: user joined the sole configured membership");
-        assertTrue(authMember, "authority arm: user joined the sole configured membership");
     }
 
     /*───────────────────── Migration helper ─────────────────────*/

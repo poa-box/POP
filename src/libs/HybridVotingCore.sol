@@ -31,7 +31,7 @@ library HybridVotingCore {
     }
 
     /// @dev Effective voter-count quorum honouring any V2 override (H-2):
-    ///      - no override (0) → global quorum (legacy path, byte-identical).
+    ///      - no override (0) → global quorum.
     ///      - override + executable (any non-empty batch) → max(global, override) (raise-only).
     ///      - override + non-executable poll → override (may lower for small-group signals).
     function _effectiveQuorum(HybridVoting.Layout storage l, HybridVoting.Proposal storage p, uint256 id)
@@ -62,8 +62,9 @@ library HybridVotingCore {
         HybridVoting.Layout storage l = _layout();
         HybridVoting.Proposal storage p = l._proposals[id];
         address voter = msg.sender;
-        // DUAL-PATH: 0 ⇒ legacy Hats reads (byte-identical); set ⇒ authority reads + activation gate.
+        // Authority membership and activation gate are mandatory.
         address a = l.membershipAuthority;
+        if (a == address(0)) revert VotingErrors.ZeroAddress();
         // Authority-path anti-packing anchor: only members active AT OR BEFORE creation may vote.
         uint64 createdAt = l.proposalCreatedAt[id];
 
@@ -73,11 +74,9 @@ library HybridVotingCore {
             bool hasAllowedHat = false;
             uint256 len = p.pollHatIds.length;
             for (uint256 i = 0; i < len;) {
-                bool ok = a == address(0)
-                    ? l.hats.isWearerOfHat(voter, p.pollHatIds[i])
-                    : VotingMath.activationOk(
-                        IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], voter), createdAt
-                    );
+                bool ok = VotingMath.activationOk(
+                    IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], voter), createdAt
+                );
                 if (ok) {
                     hasAllowedHat = true;
                     break;
@@ -101,17 +100,8 @@ library HybridVotingCore {
         for (uint256 c; c < classCount;) {
             HybridVoting.ClassConfig memory cls = p.classesSnapshot[c];
             uint256 rawPower;
-            if (a == address(0)) {
-                // LEGACY: hat-gated power, byte-identical to pre-Access-v2 behaviour.
-                rawPower = _calculateClassPower(voter, cls, l);
-            } else {
-                // AUTHORITY: class COMPOSITION follows the stable subject snapshot; member ACTIVATION
-                // is gated at creation time (a mid-vote group-packer is excluded, §4). Executor keeps
-                // its power bypass. Power math (DIRECT/ERC20/quadratic/minBalance) is untouched.
-                bool member =
-                    (voter == address(l.executor)) || _classMemberAuthority(l, a, id, c, cls, voter, createdAt);
-                rawPower = member ? _classPower(voter, cls) : 0;
-            }
+            bool member = (voter == address(l.executor)) || _classMemberAuthority(l, a, id, c, cls, voter, createdAt);
+            rawPower = member ? _classPower(voter, cls) : 0;
             classRawPowers[c] = rawPower;
             p.classTotalsRaw[c] += rawPower;
             unchecked {
@@ -166,31 +156,6 @@ library HybridVotingCore {
     }
 
     /// @dev LEGACY (Hats) class power: hat-gated, byte-identical to pre-Access-v2 behaviour.
-    function _calculateClassPower(address voter, HybridVoting.ClassConfig memory cls, HybridVoting.Layout storage l)
-        internal
-        view
-        returns (uint256)
-    {
-        // Check hat gating for this class
-        bool hasClassHat = (voter == address(l.executor)) || (cls.hatIds.length == 0);
-
-        // Check if voter has any of the class hats
-        if (!hasClassHat && cls.hatIds.length > 0) {
-            for (uint256 i; i < cls.hatIds.length;) {
-                if (l.hats.isWearerOfHat(voter, cls.hatIds[i])) {
-                    hasClassHat = true;
-                    break;
-                }
-                unchecked {
-                    ++i;
-                }
-            }
-        }
-
-        if (!hasClassHat) return 0;
-
-        return _classPower(voter, cls);
-    }
 
     /// @dev Authority-path class MEMBERSHIP predicate (§4). Resolution order:
     ///      1. the IMMUTABLE per-proposal subject snapshot `proposalClassSubjects[id][classIdx]` — a

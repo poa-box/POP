@@ -2,6 +2,8 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 import {HybridVoting} from "../src/HybridVoting.sol";
 import {VotingErrors} from "../src/libs/VotingErrors.sol";
 import {HybridVotingConfig} from "../src/libs/HybridVotingConfig.sol";
@@ -113,12 +115,13 @@ contract HVV2MockERC20 is IERC20 {
             });
 
             HybridVoting impl = new HybridVoting();
-            bytes memory data = abi.encodeCall(
-                HybridVoting.initialize,
-                (address(hats), address(exec), creatorHats, new address[](0), uint8(50), uint32(0), classes)
-            );
+            bytes memory data = abi.encodeCall(HybridVoting.initialize, (address(exec), uint8(50), uint32(0), classes));
             ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
             hv = HybridVoting(payable(address(proxy)));
+            MockModuleAuthority moduleAuthority = new MockModuleAuthority(address(hats), address(exec));
+            moduleAuthority.setSubjects(AccessV2PermKeys.HV_CREATE, creatorHats);
+            vm.prank(address(exec));
+            hv.setMembershipAuthority(address(moduleAuthority));
         }
 
         /* ─────────── helpers ─────────── */
@@ -346,17 +349,6 @@ contract HVV2MockERC20 is IERC20 {
             assertEq(c[1].slicePct, 50);
         }
 
-        function testAddHatToClassByConfigAdmin() public {
-            vm.prank(address(exec));
-            hv.setConfigAdmin(configAdmin);
-
-            vm.prank(configAdmin);
-            hv.addHatToClass(1, EXTRA_HAT);
-            HybridVoting.ClassConfig[] memory c = hv.getClasses();
-            assertEq(c[1].hatIds.length, 2);
-            assertEq(c[1].hatIds[1], EXTRA_HAT);
-        }
-
         function testAddHatToClassRandoReverts() public {
             vm.prank(rando);
             vm.expectRevert(VotingErrors.Unauthorized.selector);
@@ -382,14 +374,6 @@ contract HVV2MockERC20 is IERC20 {
             assertEq(hv.getClasses()[0].hatIds[0], MEMBER_HAT, "original hat retained");
         }
 
-        function testRemoveHatFromClassByConfigAdmin() public {
-            vm.prank(address(exec));
-            hv.setConfigAdmin(configAdmin);
-            vm.prank(configAdmin);
-            hv.removeHatFromClass(0, MEMBER_HAT);
-            assertEq(hv.getClasses()[0].hatIds.length, 0);
-        }
-
         function testRemoveHatFromClassRandoReverts() public {
             vm.prank(rando);
             vm.expectRevert(VotingErrors.Unauthorized.selector);
@@ -405,54 +389,6 @@ contract HVV2MockERC20 is IERC20 {
         /* ─────────────────────────────────────────────────────────────────────────
                                 CONFIG ADMIN AUTH MATRIX
            ───────────────────────────────────────────────────────────────────────── */
-
-        function testSetConfigAdminExecutorOnly() public {
-            vm.prank(address(exec));
-            vm.expectEmit(true, true, true, true);
-            emit ConfigAdminSet(configAdmin);
-            hv.setConfigAdmin(configAdmin);
-            assertEq(hv.configAdmin(), configAdmin);
-        }
-
-        function testSetConfigAdminRandoReverts() public {
-            vm.prank(rando);
-            vm.expectRevert(VotingErrors.Unauthorized.selector);
-            hv.setConfigAdmin(configAdmin);
-        }
-
-        function testConfigAdminCanSetCreatorHat() public {
-            vm.prank(address(exec));
-            hv.setConfigAdmin(configAdmin);
-            vm.prank(configAdmin);
-            hv.setCreatorHatAllowed(EXTRA_HAT, true);
-
-            // The extra hat now grants creation rights.
-            address newCreator = address(0x9999);
-            hats.mintHat(EXTRA_HAT, newCreator);
-            vm.prank(newCreator);
-            hv.createProposal(bytes("p"), bytes32(0), 15, 2, _emptyBatches(2), new uint256[](0));
-            assertEq(hv.proposalsCount(), 1);
-        }
-
-        function testConfigAdminCanSetClasses() public {
-            vm.prank(address(exec));
-            hv.setConfigAdmin(configAdmin);
-
-            HybridVoting.ClassConfig[] memory nc = new HybridVoting.ClassConfig[](1);
-            uint256[] memory mh = new uint256[](1);
-            mh[0] = MEMBER_HAT;
-            nc[0] = HybridVoting.ClassConfig({
-                strategy: HybridVoting.ClassStrategy.DIRECT,
-                slicePct: 100,
-                quadratic: false,
-                minBalance: 0,
-                asset: address(0),
-                hatIds: mh
-            });
-            vm.prank(configAdmin);
-            hv.setClasses(nc);
-            assertEq(hv.getClasses().length, 1);
-        }
 
         function testSetClassesRandoReverts() public {
             HybridVoting.ClassConfig[] memory nc = new HybridVoting.ClassConfig[](1);

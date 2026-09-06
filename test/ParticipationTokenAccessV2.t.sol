@@ -14,9 +14,7 @@ import {AccessV2Types} from "../src/libs/AccessV2Types.sol";
 import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 /// @title ParticipationTokenAccessV2Test
-/// @notice Dual-path (Access v2) coverage for ParticipationToken: legacy Hats regression for the
-///         member/approver gates, authority-path routing through PT_MEMBER / PT_APPROVE, setter auth,
-///         and rollback-to-zero.
+/// @notice PT_MEMBER/PT_APPROVE authority gates and rejected rollback.
 contract ParticipationTokenAccessV2Test is Test {
     ParticipationToken internal pt;
     MockHats internal hats;
@@ -43,9 +41,7 @@ contract ParticipationTokenAccessV2Test is Test {
         memberHats[0] = MEMBER_HAT;
         uint256[] memory approverHats = new uint256[](1);
         approverHats[0] = APPROVER_HAT;
-        bytes memory initCall = abi.encodeCall(
-            ParticipationToken.initialize, (executor, "Participation", "PT", address(hats), memberHats, approverHats)
-        );
+        bytes memory initCall = abi.encodeCall(ParticipationToken.initialize, (executor, "Participation", "PT"));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initCall);
         pt = ParticipationToken(address(proxy));
 
@@ -116,27 +112,11 @@ contract ParticipationTokenAccessV2Test is Test {
         vm.prank(executor);
         pt.setMembershipAuthority(address(auth));
         assertEq(pt.membershipAuthority(), address(auth), "getter mismatch");
-    }
 
-    /*──────────────────── legacy path regression ────────────────────*/
-
-    function test_legacyPath_memberAndApprover() public {
-        hats.mintHat(MEMBER_HAT, alice);
-        hats.mintHat(APPROVER_HAT, bob);
-
-        // alice (member hat) can request.
-        vm.prank(alice);
-        pt.requestTokens(100, "ipfs://x");
-
-        // bob (approver hat) can approve.
-        vm.prank(bob);
-        pt.approveRequest(1);
-        assertEq(pt.balanceOf(alice), 100, "mint on approve");
-
-        // outsider is neither → both gates reject.
-        vm.prank(outsider);
-        vm.expectRevert(ParticipationToken.NotMember.selector);
-        pt.requestTokens(1, "ipfs://y");
+        vm.prank(executor);
+        vm.expectRevert(ParticipationToken.InvalidAddress.selector);
+        pt.setMembershipAuthority(address(0));
+        assertEq(pt.membershipAuthority(), address(auth), "failed rollback preserves authority");
     }
 
     /*──────────────────── authority path ────────────────────*/
@@ -176,32 +156,4 @@ contract ParticipationTokenAccessV2Test is Test {
     }
 
     /*──────────────────── rollback ────────────────────*/
-
-    function test_rollbackToZero_restoresLegacy() public {
-        uint256 sMember = _role("Members");
-        _makeMember(sMember, alice);
-        _grantPerm(sMember, AccessV2PermKeys.PT_MEMBER);
-
-        // Legacy: carol wears the member hat.
-        address carol = makeAddr("carol");
-        hats.mintHat(MEMBER_HAT, carol);
-
-        // Route to authority: alice is a member, carol is not.
-        vm.prank(executor);
-        pt.setMembershipAuthority(address(auth));
-        vm.prank(carol);
-        vm.expectRevert(ParticipationToken.NotMember.selector);
-        pt.requestTokens(1, "ipfs://a");
-        vm.prank(alice);
-        pt.requestTokens(10, "ipfs://b");
-
-        // Roll back to zero: legacy answer returns — carol is a member again, alice is not.
-        vm.prank(executor);
-        pt.setMembershipAuthority(address(0));
-        vm.prank(carol);
-        pt.requestTokens(1, "ipfs://c");
-        vm.prank(alice);
-        vm.expectRevert(ParticipationToken.NotMember.selector);
-        pt.requestTokens(1, "ipfs://d");
-    }
 }

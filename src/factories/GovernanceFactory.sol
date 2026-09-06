@@ -172,10 +172,6 @@ contract GovernanceFactory {
 
         /* 1. Deploy HybridVoting (Governance Mechanism) */
         {
-            // Proposal-creator subjects
-            uint256[] memory creatorSubjects =
-                RoleResolver.resolveRoleBitmap(roleSubjectIds, params.hybridProposalCreatorRolesBitmap);
-
             // Update voting classes with token addresses and class subject ids. Classes with an empty
             // id list are backfilled with the subjects of canVote=true roles ONLY, so RoleConfig.canVote
             // decides hybrid-voting membership at deploy time (bots/agents with canVote=false are
@@ -199,24 +195,12 @@ contract GovernanceFactory {
             });
 
             hybridVoting = ModuleDeploymentLib.deployHybridVoting(
-                config,
-                executor,
-                creatorSubjects,
-                params.hybridThresholdPct,
-                params.hybridQuorum,
-                finalClasses,
-                hybridBeacon
+                config, executor, params.hybridThresholdPct, params.hybridQuorum, finalClasses, hybridBeacon
             );
         }
 
         /* 2. Deploy DirectDemocracyVoting (Polling Mechanism) */
         {
-            // Poll voter / creator subjects
-            uint256[] memory votingSubjects = RoleResolver.resolveRoleBitmap(roleSubjectIds, params.ddVotingRolesBitmap);
-
-            uint256[] memory creatorSubjects =
-                RoleResolver.resolveRoleBitmap(roleSubjectIds, params.ddCreatorRolesBitmap);
-
             ddBeacon = BeaconDeploymentLib.createBeacon(
                 ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, params.poaManager, executor, params.autoUpgrade, address(0)
             );
@@ -232,14 +216,7 @@ contract GovernanceFactory {
             });
 
             directDemocracyVoting = ModuleDeploymentLib.deployDirectDemocracyVoting(
-                config,
-                executor,
-                votingSubjects,
-                creatorSubjects,
-                params.ddInitialTargets,
-                params.ddThresholdPct,
-                params.ddQuorum,
-                ddBeacon
+                config, executor, params.ddInitialTargets, params.ddThresholdPct, params.ddQuorum, ddBeacon
             );
         }
 

@@ -3,7 +3,7 @@ pragma solidity ^0.8.30;
 
 import "../HybridVoting.sol";
 import "./VotingErrors.sol";
-import {HatManager} from "./HatManager.sol";
+import {SubjectSet} from "./SubjectSet.sol";
 
 library HybridVotingConfig {
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.hybridvoting.v2.storage");
@@ -61,28 +61,28 @@ library HybridVotingConfig {
     }
 
     /// @notice Add a single hat to class `classIdx`'s voter set (idempotent — no-op if present).
-    /// @dev Auth is enforced by the facade (executor || configAdmin). Reverts InvalidClassCount if
+    /// @dev Auth is enforced by the facade (executor only). Reverts InvalidClassCount if
     ///      `classIdx` is out of bounds. Slice percentages are untouched, so no sum re-validation.
     function addHatToClass(uint8 classIdx, uint256 hatId) external {
         HybridVoting.Layout storage l = _layout();
         if (classIdx >= l.classes.length) revert VotingErrors.InvalidClassCount();
-        HatManager.setHatInArray(l.classes[classIdx].hatIds, hatId, true);
+        SubjectSet.set(l.classes[classIdx].hatIds, hatId, true);
         emit ClassHatSet(classIdx, hatId, true);
     }
 
     /// @notice Remove a single hat from class `classIdx`'s voter set (idempotent — no-op if absent).
-    /// @dev Auth is enforced by the facade (executor || configAdmin). Reverts InvalidClassCount if
+    /// @dev Auth is enforced by the facade (executor only). Reverts InvalidClassCount if
     ///      `classIdx` is out of bounds. Slice percentages are untouched.
     function removeHatFromClass(uint8 classIdx, uint256 hatId) external {
         HybridVoting.Layout storage l = _layout();
         if (classIdx >= l.classes.length) revert VotingErrors.InvalidClassCount();
-        HatManager.setHatInArray(l.classes[classIdx].hatIds, hatId, false);
+        SubjectSet.set(l.classes[classIdx].hatIds, hatId, false);
         emit ClassHatSet(classIdx, hatId, false);
     }
 
     /// @notice Bind positional class index `classIdx` to authority subject `subjectId` (§4). Allocates
     ///         the stable classId for `classIdx` on first use and records the idx→classId linkage.
-    /// @dev Auth is enforced by the facade (executor || configAdmin). ALLOCATION IS FROZEN HERE: the
+    /// @dev Auth is enforced by the facade (executor only). ALLOCATION IS FROZEN HERE: the
     ///      first setClassSubject for an idx assigns `classId = ++classSubjectSeq` and writes
     ///      `classIdOfIdx[classIdx] = classId`; subsequent calls reuse the allocated id (so the stable
     ///      subject binding survives positional class churn). `subjectId == 0` clears the binding — the

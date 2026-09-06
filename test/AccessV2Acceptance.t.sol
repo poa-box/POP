@@ -108,11 +108,7 @@ contract AccessV2AcceptanceTest is Test {
 
         // 1. Real Executor — this test contract is BOTH owner (configureModule relay) and the sole
         //    governor (allowedCaller, for Executor.execute batches).
-        exec = Executor(
-            payable(_proxy(
-                    address(new Executor()), abi.encodeCall(Executor.initialize, (address(this), address(legacyHats)))
-                ))
-        );
+        exec = Executor(payable(_proxy(address(new Executor()), abi.encodeCall(Executor.initialize, (address(this))))));
         exec.setCaller(address(this));
 
         // 2. Protocol singletons: a real OrgRegistry + the AuthorityRouter, with THIS org registered so
@@ -148,27 +144,19 @@ contract AccessV2AcceptanceTest is Test {
         pt = ParticipationToken(
             _proxy(
                 address(new ParticipationToken()),
-                abi.encodeCall(
-                    ParticipationToken.initialize,
-                    (address(exec), "Participation", "PT", address(legacyHats), _u(), _u())
-                )
+                abi.encodeCall(ParticipationToken.initialize, (address(exec), "Participation", "PT"))
             )
         );
         tm = TaskManager(
             _proxy(
                 address(new TaskManager()),
-                abi.encodeCall(
-                    TaskManager.initialize, (address(pt), address(legacyHats), _u(), address(exec), address(0))
-                )
+                abi.encodeCall(TaskManager.initialize, (address(pt), _u(), address(exec), address(0)))
             )
         );
         dd = DirectDemocracyVoting(
             _proxy(
                 address(new DirectDemocracyVoting()),
-                abi.encodeCall(
-                    DirectDemocracyVoting.initialize,
-                    (address(legacyHats), address(exec), _u(), _u(), _a(), THRESHOLD, DD_QUORUM)
-                )
+                abi.encodeCall(DirectDemocracyVoting.initialize, (address(exec), _a(), THRESHOLD, DD_QUORUM))
             )
         );
         HybridVoting.ClassConfig[] memory classes = new HybridVoting.ClassConfig[](1);
@@ -183,17 +171,13 @@ contract AccessV2AcceptanceTest is Test {
         hv = HybridVoting(
             _proxy(
                 address(new HybridVoting()),
-                abi.encodeCall(
-                    HybridVoting.initialize, (address(legacyHats), address(exec), _u(), _a(), THRESHOLD, 0, classes)
-                )
+                abi.encodeCall(HybridVoting.initialize, (address(exec), THRESHOLD, 0, classes))
             )
         );
         qj = QuickJoin(
             _proxy(
                 address(new QuickJoin()),
-                abi.encodeCall(
-                    QuickJoin.initialize, (address(exec), address(legacyHats), address(accountReg), address(this), _u())
-                )
+                abi.encodeCall(QuickJoin.initialize, (address(exec), address(accountReg), address(this)))
             )
         );
 

@@ -50,10 +50,7 @@ contract MockPTV2 is IParticipationToken {
 }
 
     /// @title EducationHubAccessV2Test
-    /// @notice Dual-path coverage for EducationHub's Access v2 remap (freeze §4.5): legacy Hats path
-    ///         unchanged when the authority is unset, EDU_CREATE / EDU_MEMBER perm folds when set,
-    ///         setMembershipAuthority auth + rollback-to-zero, and a legacy-vs-authority equality
-    ///         differential (same conceptual membership, identical create/complete outcomes).
+    /// @notice EDU_CREATE/EDU_MEMBER authority gates, completed-module continuity and rejected rollback.
     contract EducationHubAccessV2Test is Test {
         EducationHub hub;
         MockPTV2 token;
@@ -92,7 +89,7 @@ contract MockPTV2 is IParticipationToken {
             creatorHats[0] = CREATOR_HAT;
             uint256[] memory memberHats = new uint256[](1);
             memberHats[0] = MEMBER_HAT;
-            hub.initialize(address(token), address(hats), executor, creatorHats, memberHats);
+            hub.initialize(address(token), executor);
 
             // Real authority (executor = this test contract so config calls are direct).
             auth = _deployAuthority();
@@ -143,16 +140,6 @@ contract MockPTV2 is IParticipationToken {
             hub.setMembershipAuthority(a);
         }
 
-        /*───────────────────── Legacy path (regression) ─────────────────────*/
-        function testLegacyPathUnchangedByDefault() public {
-            assertEq(hub.membershipAuthority(), address(0));
-            vm.prank(creator);
-            hub.createModule(bytes("data"), bytes32(0), 5, 2);
-            vm.prank(learner);
-            hub.completeModule(0, 2);
-            assertEq(token.balanceOf(learner), 5);
-        }
-
         /*───────────────────── setMembershipAuthority auth ─────────────────────*/
         function testSetMembershipAuthorityOnlyExecutor() public {
             vm.prank(stranger);
@@ -165,6 +152,11 @@ contract MockPTV2 is IParticipationToken {
             emit MembershipAuthoritySet(address(auth));
             _setAuthority(address(auth));
             assertEq(hub.membershipAuthority(), address(auth));
+
+            vm.prank(executor);
+            vm.expectRevert(EducationHub.ZeroAddress.selector);
+            hub.setMembershipAuthority(address(0));
+            assertEq(hub.membershipAuthority(), address(auth), "failed rollback preserves authority");
         }
 
         /*───────────────────── Authority path (frozen key shapes) ─────────────────────*/
@@ -212,62 +204,7 @@ contract MockPTV2 is IParticipationToken {
             hub.completeModule(0, 2);
         }
 
-        /*───────────────────── Rollback to zero ─────────────────────*/
-        function testRollbackRestoresLegacyPath() public {
-            _setAuthority(address(auth));
-            // Under the authority, the legacy learner (MEMBER_HAT only) cannot complete.
-            _joinAuthority(creator, creatorRole);
-            vm.prank(creator);
-            hub.createModule(bytes("data"), bytes32(0), 5, 2);
-            vm.prank(learner);
-            vm.expectRevert(EducationHub.NotMember.selector);
-            hub.completeModule(0, 2);
-
-            // Roll back.
-            _setAuthority(address(0));
-            assertEq(hub.membershipAuthority(), address(0));
-
-            // Legacy MEMBER_HAT wearer completes again (byte-identical legacy path). Need a creator too:
-            // the module already exists (created by the authority-side creator), so the legacy learner
-            // just completes it.
-            vm.prank(learner);
-            hub.completeModule(0, 2);
-            assertEq(token.balanceOf(learner), 5);
-        }
-
-        /*───────────────────── Equality differential (§5.2) ─────────────────────*/
         /// @notice Same org state expressed both ways gives identical create/complete outcomes: a legacy
         ///         MEMBER_HAT wearer and an authority EDU_MEMBER subject member both complete a module for
         ///         the same payout.
-        function testEqualityDifferentialLegacyVsAuthority() public {
-            // Legacy arm: learner wears MEMBER_HAT, creator wears CREATOR_HAT.
-            vm.prank(creator);
-            hub.createModule(bytes("data"), bytes32(0), 7, 2);
-            vm.prank(learner);
-            hub.completeModule(0, 2);
-            uint256 legacyPayout = token.balanceOf(learner);
-
-            // Authority arm: express the same membership via subjects. Fresh users, fresh hub.
-            EducationHub impl = new EducationHub();
-            UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
-            EducationHub hub2 = EducationHub(address(new BeaconProxy(address(beacon), "")));
-            MockPTV2 token2 = new MockPTV2();
-            uint256[] memory empty = new uint256[](0);
-            hub2.initialize(address(token2), address(hats), executor, empty, empty);
-            vm.prank(executor);
-            hub2.setMembershipAuthority(address(auth));
-
-            address creator2 = address(0xC2);
-            address learner2 = address(0x12);
-            _joinAuthority(creator2, creatorRole);
-            _joinAuthority(learner2, memberRole);
-
-            vm.prank(creator2);
-            hub2.createModule(bytes("data"), bytes32(0), 7, 2);
-            vm.prank(learner2);
-            hub2.completeModule(0, 2);
-            uint256 authorityPayout = token2.balanceOf(learner2);
-
-            assertEq(authorityPayout, legacyPayout, "legacy and authority arms mint identically");
-        }
     }

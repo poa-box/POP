@@ -153,15 +153,6 @@ contract OrgDeployerPaymasterRulesTest is Test {
         // DefaultGlobalRules.sol: the v20 rulebook has never been broadcast, the legacy targetTypes
         // backfill was never broadcast either, and the selectors exist only on the unshipped
         // EligibilityModule v8 impl.
-        assertEq(
-            _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.kickWearer.selector), 400_000
-        );
-        assertEq(
-            _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.finalizeKick.selector), 400_000
-        );
-        assertEq(
-            _hintOfType(entries, ModuleTypes.ELIGIBILITY_MODULE_ID, EligibilityModule.unkickWearer.selector), 200_000
-        );
 
         // Access-v2 MembershipAuthority user-facing entries (Wave D1) carry the calibrated hints;
         // vouch mirrors EM vouchFor's hint-free entry, finalize is the heavy verb.

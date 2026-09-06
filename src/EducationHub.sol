@@ -2,15 +2,16 @@
 pragma solidity ^0.8.20;
 
 /*──────── OpenZeppelin v5.3 Upgradeables ────────*/
-import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/ContextUpgradeable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/PausableUpgradeable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {ContextUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/utils/ContextUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/utils/PausableUpgradeable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /*──────── External interfaces ────────*/
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
-import {HatManager} from "./libs/HatManager.sol";
 import {ValidationLib} from "./libs/ValidationLib.sol";
 import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
 import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
@@ -59,13 +60,9 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         uint256[] creatorHatIds; // enumeration array for creator hats
         uint256[] memberHatIds; // enumeration array for member hats
         // ─── Role customization (configAdmin) ───
-        // Optional secondary admin (e.g. RoleManager) permitted to set creator/member hat
-        // allowlists alongside the executor. address(0) = none.
+        // Reserved historical config-admin slot; no longer grants any permission.
         address configAdmin;
-        // ─── Access v2 dual-path (append-only tail) ───
-        // When address(0) the module reads its LEGACY Hats path byte-identically (unmigrated org).
-        // When set, creator/member checks route through the org's MembershipAuthority per the frozen
-        // EDU_CREATE / EDU_MEMBER perm keys. Setting back to address(0) IS the rollback path.
+        // Required MembershipAuthority; zero means an inactive, unmigrated module.
         address membershipAuthority;
     }
 
@@ -91,7 +88,7 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     event HatsSet(address indexed newHats);
     /// @notice The secondary config admin (may set creator/member hat allowlists) changed.
     event ConfigAdminSet(address indexed admin);
-    /// @notice The org's MembershipAuthority pointer changed (address(0) = legacy Hats path).
+    /// @notice The org's nonzero MembershipAuthority pointer changed.
     event MembershipAuthoritySet(address indexed authority);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -100,63 +97,21 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     }
 
     /*────────── Initialiser ────────*/
-    function initialize(
-        address tokenAddr,
-        address hatsAddr,
-        address executorAddr,
-        uint256[] calldata creatorHatIds,
-        uint256[] calldata memberHatIds
-    ) external initializer {
-        if (tokenAddr == address(0) || hatsAddr == address(0) || executorAddr == address(0)) revert ZeroAddress();
 
+    /// @notice Initialize the education module. Authority wiring is atomic in OrgDeployer.
+    function initialize(address tokenAddr, address executorAddr) external initializer {
+        if (tokenAddr == address(0) || executorAddr == address(0)) revert ZeroAddress();
         __Context_init();
         __ReentrancyGuard_init();
         __Pausable_init();
-
         Layout storage l = _layout();
         l.token = IParticipationToken(tokenAddr);
-        l.hats = IHats(hatsAddr);
         l.executor = executorAddr;
-
         emit TokenSet(tokenAddr);
-        emit HatsSet(hatsAddr);
         emit ExecutorSet(executorAddr);
-
-        // Initialize creator hats using HatManager
-        for (uint256 i; i < creatorHatIds.length;) {
-            HatManager.setHatInArray(l.creatorHatIds, creatorHatIds[i], true);
-            emit CreatorHatSet(creatorHatIds[i], true);
-            unchecked {
-                ++i;
-            }
-        }
-
-        // Initialize member hats using HatManager
-        for (uint256 i; i < memberHatIds.length;) {
-            HatManager.setHatInArray(l.memberHatIds, memberHatIds[i], true);
-            emit MemberHatSet(memberHatIds[i], true);
-            unchecked {
-                ++i;
-            }
-        }
     }
 
     /*────────── Hat Management ─────*/
-    /// @notice Add or remove a creator hat. Executor or configAdmin.
-    function setCreatorHatAllowed(uint256 h, bool ok) external {
-        _requireExecutorOrConfigAdmin();
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.creatorHatIds, h, ok);
-        emit CreatorHatSet(h, ok);
-    }
-
-    /// @notice Add or remove a member hat. Executor or configAdmin.
-    function setMemberHatAllowed(uint256 h, bool ok) external {
-        _requireExecutorOrConfigAdmin();
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.memberHatIds, h, ok);
-        emit MemberHatSet(h, ok);
-    }
 
     /*────────── Modifiers ─────────*/
     modifier onlyMember() {
@@ -174,16 +129,6 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     modifier onlyExecutor() {
         if (_msgSender() != _layout().executor) revert NotExecutor();
         _;
-    }
-
-    /// @dev Caller must be the executor or the configured configAdmin; reverts NotExecutor otherwise.
-    ///      Used only by the creator/member hat setters so a RoleManager can fan out role wiring.
-    function _requireExecutorOrConfigAdmin() private view {
-        Layout storage l = _layout();
-        address s = _msgSender();
-        if (s == l.executor) return;
-        if (s != address(0) && s == l.configAdmin) return;
-        revert NotExecutor();
     }
 
     /*────────── DAO / Admin Setters ───────*/
@@ -214,17 +159,9 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         emit HatsSet(newHats);
     }
 
-    /// @notice Set the secondary config admin permitted to set creator/member hat allowlists.
-    /// @dev Executor-only. `admin` may be address(0) to clear.
-    function setConfigAdmin(address admin) external onlyExecutor {
-        _layout().configAdmin = admin;
-        emit ConfigAdminSet(admin);
-    }
-
-    /// @notice Repoint this module to the org's MembershipAuthority. `address(0)` restores the legacy
-    ///         Hats path (rollback). Executor-only. Emits MembershipAuthoritySet.
-    /// @dev When set, creator/member checks fold through EDU_CREATE / EDU_MEMBER perm keys.
+    /// @notice Set the org's nonzero MembershipAuthority. Governance-only; no legacy rollback.
     function setMembershipAuthority(address authority) external onlyExecutor {
+        if (authority == address(0)) revert ZeroAddress();
         _layout().membershipAuthority = authority;
         emit MembershipAuthoritySet(authority);
     }
@@ -328,21 +265,17 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     }
 
     /*────────── Internal Helper Functions ─────────── */
-    /// @dev Returns true if `user` may CREATE. DUAL-PATH: legacy Hats allowlist when the authority is
-    ///      unset (byte-identical), else the EDU_CREATE perm fold on the MembershipAuthority.
+    /// @dev Check EDU_CREATE on the org authority.
     function _hasCreatorHat(address user) internal view returns (bool) {
         Layout storage l = _layout();
         address a = l.membershipAuthority;
-        if (a == address(0)) return HatManager.hasAnyHat(l.hats, l.creatorHatIds, user);
         return IMembershipAuthority(a).hasPerm(user, AccessV2PermKeys.EDU_CREATE, bytes32(0)) != 0;
     }
 
-    /// @dev Returns true if `user` is a MEMBER. DUAL-PATH: legacy Hats allowlist when the authority is
-    ///      unset (byte-identical), else the EDU_MEMBER perm fold on the MembershipAuthority.
+    /// @dev Check EDU_MEMBER on the org authority.
     function _hasMemberHat(address user) internal view returns (bool) {
         Layout storage l = _layout();
         address a = l.membershipAuthority;
-        if (a == address(0)) return HatManager.hasAnyHat(l.hats, l.memberHatIds, user);
         return IMembershipAuthority(a).hasPerm(user, AccessV2PermKeys.EDU_MEMBER, bytes32(0)) != 0;
     }
 
@@ -352,11 +285,11 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
     }
 
     function creatorHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().creatorHatIds);
+        return _layout().creatorHatIds;
     }
 
     function memberHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().memberHatIds);
+        return _layout().memberHatIds;
     }
 
     function token() external view returns (IParticipationToken) {
@@ -371,25 +304,17 @@ contract EducationHub is Initializable, ContextUpgradeable, ReentrancyGuardUpgra
         return _layout().executor;
     }
 
-    /// @notice The org's MembershipAuthority (address(0) = legacy Hats path).
+    /// @notice The org's authority, or zero for an inactive, unmigrated module.
     function membershipAuthority() external view returns (address) {
         return _layout().membershipAuthority;
     }
 
     /*────────── Hat Management View Functions ─────────── */
     function creatorHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().creatorHatIds);
+        return _layout().creatorHatIds.length;
     }
 
     function memberHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().memberHatIds);
-    }
-
-    function isCreatorHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().creatorHatIds, hatId);
-    }
-
-    function isMemberHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().memberHatIds, hatId);
+        return _layout().memberHatIds.length;
     }
 }

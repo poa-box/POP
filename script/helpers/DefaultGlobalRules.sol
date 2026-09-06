@@ -53,10 +53,10 @@ library DefaultGlobalRules {
 
     /// @notice All default rulebook entries (selector strings match the deployed module ABIs).
     function entries() internal pure returns (Entry[] memory e) {
-        e = new Entry[](67);
+        e = new Entry[](56);
         uint256 i;
 
-        // ── QuickJoin (6) ──
+        // ── QuickJoin (3) ──
         bytes32 t = ModuleTypes.QUICK_JOIN_ID;
         e[i++] = Entry(t, bytes4(keccak256("quickJoinWithUser()")), 0);
         e[i++] = Entry(t, bytes4(keccak256("registerAndQuickJoin(address,string,uint256,uint256,bytes)")), 0);
@@ -69,18 +69,6 @@ library DefaultGlobalRules {
             ),
             0
         );
-        e[i++] = Entry(t, bytes4(keccak256("claimHatsWithUser(uint256[])")), 0);
-        e[i++] = Entry(t, bytes4(keccak256("registerAndClaimHats(address,string,uint256,uint256,bytes,uint256[])")), 0);
-        e[i++] = Entry(
-            t,
-            bytes4(
-                keccak256(
-                    "registerAndClaimHatsWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),uint256[])"
-                )
-            ),
-            0
-        );
-
         // ── TaskManager (17) — v6 create/update carry deadline params; v7 adds unclaimTask ──
         t = ModuleTypes.TASK_MANAGER_ID;
         e[i++] = Entry(
@@ -153,34 +141,6 @@ library DefaultGlobalRules {
         e[i++] = Entry(t, bytes4(keccak256("optOut(bool)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("createDistribution(address,uint256,bytes32,uint256)")), 0);
         e[i++] = Entry(t, bytes4(keccak256("finalizeDistribution(uint256,uint256)")), 0);
-
-        // ── EligibilityModule (8) — vouch + role-application + kick paths ──
-        // Retained for the orgs still on the legacy access rails; new orgs deploy no EligibilityModule.
-        // `claimHat` / `claimHats` are NOT here. The rationale is NOT "targetTypes never mapped them"
-        // (targetTypes rows map module ADDRESSES to typeIds, not selectors — a single EM row makes
-        // EVERY EM-typed rule resolvable, and UpgradePaymasterGlobalRules Step4 backfills exactly
-        // that). The reasons the omission is safe are:
-        //   (a) the type-keyed rulebook ships with PaymasterHub v20 and has never been broadcast —
-        //       both live hubs are still v19 (see SyncAccessV2GlobalRules.s.sol), so NO EM-typed row
-        //       is live anywhere today;
-        //   (b) the legacy per-org targetTypes backfill was likewise never broadcast (Wave-F review
-        //       finding P5), so an EM-typed row would not resolve for live orgs even after (a); and
-        //   (c) `claimHat` / `claimHats` exist only on the unshipped EligibilityModule v8 impl, so no
-        //       LIVE EligibilityModule carries the selector at all.
-        // Access v2 replaces the flow with MembershipAuthority.claim below, and every EM row here
-        // retires with the Wave-G strip — so do NOT "restore" these two, and do NOT delete the 8
-        // retained rows on this reasoning either: those cover selectors that DO exist on live impls.
-        t = ModuleTypes.ELIGIBILITY_MODULE_ID;
-        e[i++] = Entry(t, bytes4(keccak256("claimVouchedHat(uint256)")), 0);
-        e[i++] = Entry(t, bytes4(keccak256("vouchFor(address,uint256)")), 0);
-        e[i++] = Entry(t, bytes4(keccak256("revokeVouch(address,uint256)")), 0);
-        e[i++] = Entry(t, bytes4(keccak256("applyForRole(uint256,bytes32)")), 0);
-        e[i++] = Entry(t, bytes4(keccak256("withdrawApplication(uint256)")), 0);
-        // Delegated-kick lifecycle (kicker-hat wearers). kickWearer covers rule write + provenance +
-        // burn; finalizeKick applies a delayed kick; unkickWearer is a rule restore only.
-        e[i++] = Entry(t, bytes4(keccak256("kickWearer(address,uint256)")), 400_000);
-        e[i++] = Entry(t, bytes4(keccak256("finalizeKick(address,uint256)")), 400_000);
-        e[i++] = Entry(t, bytes4(keccak256("unkickWearer(address,uint256)")), 200_000);
 
         // ── ParticipationToken (3) ──
         t = ModuleTypes.PARTICIPATION_TOKEN_ID;
@@ -272,6 +232,39 @@ library DefaultGlobalRules {
         e[i++] = Entry(t, bytes4(keccak256("delegatedUnremove(uint256,address)")), 200_000); // rule-restore only (~unkickWearer)
         e[i++] = Entry(t, bytes4(keccak256("finalize(uint256)")), 600_000); // applies delayed grant/remove (heavy verb)
         e[i++] = Entry(t, bytes4(keccak256("cancel(uint256)")), 200_000); // delete a pending action
+
+        assert(i == e.length);
+    }
+
+    /// @notice Explicit tombstones for deployed V1 rules. Removing a default does not delete an
+    ///         existing global rule; the Wave G ceremony writes allowed=false for every entry here.
+    function retiredEntries() internal pure returns (Entry[] memory e) {
+        e = new Entry[](11);
+        uint256 i;
+        bytes32 t = ModuleTypes.QUICK_JOIN_ID;
+        e[i++] = Entry(t, bytes4(keccak256("claimHatsWithUser(uint256[])")), 0);
+        e[i++] = Entry(t, bytes4(keccak256("registerAndClaimHats(address,string,uint256,uint256,bytes,uint256[])")), 0);
+        e[i++] = Entry(
+            t,
+            bytes4(
+                keccak256(
+                    "registerAndClaimHatsWithPasskey((bytes32,bytes32,bytes32,uint256),string,uint256,uint256,(bytes,bytes,uint256,uint256,bytes32,bytes32),uint256[])"
+                )
+            ),
+            0
+        );
+
+        t = ModuleTypes.ELIGIBILITY_MODULE_ID;
+        e[i++] = Entry(t, bytes4(keccak256("claimVouchedHat(uint256)")), 0);
+        e[i++] = Entry(t, bytes4(keccak256("vouchFor(address,uint256)")), 0);
+        e[i++] = Entry(t, bytes4(keccak256("revokeVouch(address,uint256)")), 0);
+        e[i++] = Entry(t, bytes4(keccak256("applyForRole(uint256,bytes32)")), 0);
+        e[i++] = Entry(t, bytes4(keccak256("withdrawApplication(uint256)")), 0);
+        // Delegated-kick lifecycle (kicker-hat wearers). kickWearer covers rule write + provenance +
+        // burn; finalizeKick applies a delayed kick; unkickWearer is a rule restore only.
+        e[i++] = Entry(t, bytes4(keccak256("kickWearer(address,uint256)")), 400_000);
+        e[i++] = Entry(t, bytes4(keccak256("finalizeKick(address,uint256)")), 400_000);
+        e[i++] = Entry(t, bytes4(keccak256("unkickWearer(address,uint256)")), 200_000);
 
         assert(i == e.length);
     }

@@ -2,11 +2,10 @@
 pragma solidity ^0.8.20;
 
 /* ──────────────────  OpenZeppelin v5.3 Upgradeables  ────────────────── */
-import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
 
 import {IExecutor} from "./Executor.sol";
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
-import {HatManager} from "./libs/HatManager.sol";
 import {VotingMath} from "./libs/VotingMath.sol";
 import {VotingErrors} from "./libs/VotingErrors.sol";
 import {ValidationLib} from "./libs/ValidationLib.sol";
@@ -75,18 +74,13 @@ contract DirectDemocracyVoting is Initializable {
         // on the Proposal struct (it lives in a storage array; widening its stride corrupts every
         // existing proposal). 0 = no override (V1 proposals + V2 proposals that pass 0).
         mapping(uint256 => uint32) proposalQuorumOverride;
-        // Scoped secondary admin (RoleManager) allowed to toggle voting/creator hats via
-        // setConfig(HAT_ALLOWED) — every other ConfigKey stays executor-only. 0 = none.
+        // Reserved historical config-admin slot; no longer grants any permission.
         address configAdmin;
-        // ─── Access v2 (MembershipAuthority) DUAL-PATH append-only tail ───
-        // When 0, every permission read uses the LEGACY Hats path byte-identically (unmigrated org /
-        // rollback target). When set, creator/voter checks route to the authority per the frozen key
-        // shapes (DD_CREATE / DD_VOTE) and the electorate ACTIVATION GATE (activeMemberSince) engages.
+        // Required MembershipAuthority; zero means an inactive, unmigrated module.
         address membershipAuthority;
         // Per-proposal creation timestamp — the anti-packing anchor for the authority-path activation
         // gate. Stored in a SIDE mapping keyed by proposalId (NEVER a field on the Proposal struct,
         // which lives in a storage array; widening its stride corrupts every existing proposal).
-        // Legacy reads never consult it, so the legacy path stays byte-identical.
         mapping(uint256 => uint64) proposalCreatedAt;
     }
 
@@ -158,7 +152,7 @@ contract DirectDemocracyVoting is Initializable {
     // the field is kept for a uniform cross-module event shape the subgraph can index.
     event ProposalConfigV2(uint256 indexed id, uint32 quorumOverride, bool equalWeight);
     event ConfigAdminSet(address indexed admin);
-    // Access v2: dual-path repoint. `address(0)` restores the legacy Hats path (rollback, §6).
+    // Authority changes cannot restore the retired Hats permission path.
     event MembershipAuthoritySet(address indexed authority);
 
     /* ─────────── Initialiser ─────────── */
@@ -167,22 +161,16 @@ contract DirectDemocracyVoting is Initializable {
         _disableInitializers();
     }
 
-    function initialize(
-        address hats_,
-        address executor_,
-        uint256[] calldata initialHats,
-        uint256[] calldata initialCreatorHats,
-        address[] calldata initialTargets,
-        uint8 thresholdPct_,
-        uint32 quorum_
-    ) external initializer {
-        if (hats_ == address(0) || executor_ == address(0)) {
+    function initialize(address executor_, address[] calldata initialTargets, uint8 thresholdPct_, uint32 quorum_)
+        external
+        initializer
+    {
+        if (executor_ == address(0)) {
             revert VotingErrors.ZeroAddress();
         }
         VotingMath.validateThreshold(thresholdPct_);
 
         Layout storage l = _layout();
-        l.hats = IHats(hats_);
         l.executor = IExecutor(executor_);
         l.thresholdPct = thresholdPct_;
         l._paused = false; // Initialize paused state
@@ -194,21 +182,7 @@ contract DirectDemocracyVoting is Initializable {
         l.quorum = quorum_;
         emit QuorumSet(quorum_);
 
-        uint256 len = initialHats.length;
-        for (uint256 i; i < len;) {
-            HatManager.setHatInArray(l.votingHatIds, initialHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
-        len = initialCreatorHats.length;
-        for (uint256 i; i < len;) {
-            HatManager.setHatInArray(l.creatorHatIds, initialCreatorHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
-        len = initialTargets.length;
+        uint256 len = initialTargets.length;
         for (uint256 i; i < len;) {
             l.allowedTarget[initialTargets[i]] = true;
             emit TargetAllowed(initialTargets[i], true);
@@ -232,34 +206,17 @@ contract DirectDemocracyVoting is Initializable {
         _unpause();
     }
 
-    /// @notice Set the scoped config admin (RoleManager) permitted to toggle voting/creator hats.
-    /// @dev Executor-only. Every ConfigKey other than HAT_ALLOWED stays executor-only regardless.
-    function setConfigAdmin(address admin) external onlyExecutor {
-        _layout().configAdmin = admin;
-        emit ConfigAdminSet(admin);
-    }
-
-    /// @notice Repoint this module to the org's MembershipAuthority (Access v2). `address(0)` restores
-    ///         the legacy Hats path (rollback, §6). AUTH: onlyExecutor. Emits MembershipAuthoritySet.
-    /// @dev DUAL-PATH INVARIANT: while `membershipAuthority == address(0)` every creator/voter check
-    ///      reads the legacy `votingHatIds`/`creatorHatIds` arrays byte-identically; once set, the
-    ///      checks route to `hasPerm(DD_CREATE)` / the `activeMemberSince(DD_VOTE)` electorate gate.
+    /// @notice Set the org's nonzero MembershipAuthority. Governance-only; no legacy rollback.
     function setMembershipAuthority(address authority) external onlyExecutor {
+        if (authority == address(0)) revert VotingErrors.ZeroAddress();
         _layout().membershipAuthority = authority;
         emit MembershipAuthoritySet(authority);
     }
 
     function setConfig(ConfigKey key, bytes calldata value) external {
         Layout storage l = _layout();
-        // HAT_ALLOWED (voting/creator hat wiring) accepts executor OR configAdmin (RoleManager);
-        // every other key is executor-only — matches the frozen auth surface (auth-surfaces §1).
-        if (key == ConfigKey.HAT_ALLOWED) {
-            if (_msgSender() != address(l.executor) && _msgSender() != l.configAdmin) {
-                revert VotingErrors.Unauthorized();
-            }
-        } else if (_msgSender() != address(l.executor)) {
-            revert VotingErrors.Unauthorized();
-        }
+        if (_msgSender() != address(l.executor)) revert VotingErrors.Unauthorized();
+        if (key == ConfigKey.HAT_ALLOWED) revert VotingErrors.InvalidConfigKey();
         if (key == ConfigKey.THRESHOLD) {
             uint8 q = abi.decode(value, (uint8));
             VotingMath.validateThreshold(q);
@@ -274,14 +231,6 @@ contract DirectDemocracyVoting is Initializable {
             (address target, bool allowed) = abi.decode(value, (address, bool));
             l.allowedTarget[target] = allowed;
             emit TargetAllowed(target, allowed);
-        } else if (key == ConfigKey.HAT_ALLOWED) {
-            (HatType hatType, uint256 hat, bool allowed) = abi.decode(value, (HatType, uint256, bool));
-            if (hatType == HatType.VOTING) {
-                HatManager.setHatInArray(l.votingHatIds, hat, allowed);
-            } else if (hatType == HatType.CREATOR) {
-                HatManager.setHatInArray(l.creatorHatIds, hat, allowed);
-            }
-            emit HatSet(hatType, hat, allowed);
         } else if (key == ConfigKey.QUORUM) {
             uint32 q = abi.decode(value, (uint32));
             l.quorum = q;
@@ -294,9 +243,8 @@ contract DirectDemocracyVoting is Initializable {
         Layout storage l = _layout();
         if (_msgSender() != address(l.executor)) {
             address a = l.membershipAuthority;
-            bool canCreate = a == address(0)
-                ? HatManager.hasAnyHat(l.hats, l.creatorHatIds, _msgSender())
-                : IMembershipAuthority(a).hasPerm(_msgSender(), AccessV2PermKeys.DD_CREATE, bytes32(0)) != 0;
+            if (a == address(0)) revert VotingErrors.ZeroAddress();
+            bool canCreate = IMembershipAuthority(a).hasPerm(_msgSender(), AccessV2PermKeys.DD_CREATE, bytes32(0)) != 0;
             if (!canCreate) revert VotingErrors.Unauthorized();
         }
         _;
@@ -374,7 +322,7 @@ contract DirectDemocracyVoting is Initializable {
 
         uint256 id = l._proposals.length - 1;
         // Anchor the authority-path activation gate to creation time (§4 anti-packing). Behaviour-
-        // neutral for the legacy path, which never reads it; the Proposal struct is left untouched.
+        // the Proposal struct is left untouched to preserve historical storage.
         l.proposalCreatedAt[id] = uint64(block.timestamp);
 
         for (uint256 i; i < numOptions;) {
@@ -436,7 +384,7 @@ contract DirectDemocracyVoting is Initializable {
     }
 
     /// @notice Create a proposal with a per-proposal quorum override (additive to createProposal).
-    /// @dev The legacy createProposal selector/behaviour is untouched. Rules (PLAN §1.5, H-2):
+    /// @dev Retains the original createProposal selector alongside per-proposal overrides:
     ///      - `quorumOverride` is only allowed on RESTRICTED polls (`hatIds.length > 0`); an
     ///        unrestricted proposal MUST pass 0 or it reverts (InvalidQuorum).
     ///      - Executable proposals (any non-empty batch) can only RAISE quorum: the effective
@@ -481,36 +429,32 @@ contract DirectDemocracyVoting is Initializable {
         if (idxs.length != weights.length) revert VotingErrors.LengthMismatch();
         Layout storage l = _layout();
         address a = l.membershipAuthority;
+        if (a == address(0)) revert VotingErrors.ZeroAddress();
         // Authority-path activation anchor: a voter is only eligible if they were an active member
         // AT OR BEFORE proposal creation (closes every instant-add / mid-proposal-packing channel at
-        // the READ side, §4 electorate gate). Unused on the legacy path.
+        // the read side).
         // createdAt == 0 is the pre-authority sentinel (legacy proposal that predates the anchor):
         // enforce membership only, not the activation gate — see VotingMath.activationOk (C5/C8/C9).
         uint64 createdAt = l.proposalCreatedAt[id];
         if (_msgSender() != address(l.executor)) {
-            bool canVote = a == address(0)
-                ? HatManager.hasAnyHat(l.hats, l.votingHatIds, _msgSender())
-                : VotingMath.activationOk(
-                    IMembershipAuthority(a).activeMemberSince(_msgSender(), AccessV2PermKeys.DD_VOTE, bytes32(0)),
-                    createdAt
-                );
+            bool canVote = VotingMath.activationOk(
+                IMembershipAuthority(a).activeMemberSince(_msgSender(), AccessV2PermKeys.DD_VOTE, bytes32(0)), createdAt
+            );
             if (!canVote) revert VotingErrors.Unauthorized();
         }
         Proposal storage p = l._proposals[id];
         if (p.restricted) {
             bool hasAllowedHat = false;
-            // Per-poll subject list: `pollHatIds` are opaque uint256 ids — Hats ids on the legacy path,
+            // Per-poll subject list: `pollHatIds` are opaque uint256 authority subject ids,
             // adopted-verbatim subject ids on the authority path. The existing pollHatIds machinery is
             // id-agnostic (stores/scans raw uint256), so the same array carries subject ids unchanged;
             // "Only Executives" is simply `[executivesGroupId]`. The authority arm additionally gates
             // each subject on the activation anchor (activeMemberSince <= createdAt).
             uint256 pollHatLen = p.pollHatIds.length;
             for (uint256 i = 0; i < pollHatLen;) {
-                bool ok = a == address(0)
-                    ? l.hats.isWearerOfHat(_msgSender(), p.pollHatIds[i])
-                    : VotingMath.activationOk(
-                        IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], _msgSender()), createdAt
-                    );
+                bool ok = VotingMath.activationOk(
+                    IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], _msgSender()), createdAt
+                );
                 if (ok) {
                     hasAllowedHat = true;
                     break;
@@ -665,19 +609,19 @@ contract DirectDemocracyVoting is Initializable {
     }
 
     function votingHats() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().votingHatIds);
+        return _layout().votingHatIds;
     }
 
     function creatorHats() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().creatorHatIds);
+        return _layout().creatorHatIds;
     }
 
     function votingHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().votingHatIds);
+        return _layout().votingHatIds.length;
     }
 
     function creatorHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().creatorHatIds);
+        return _layout().creatorHatIds.length;
     }
 
     function pollRestricted(uint256 id) external view exists(id) returns (bool) {
@@ -700,12 +644,12 @@ contract DirectDemocracyVoting is Initializable {
         return _layout().proposalQuorumOverride[id];
     }
 
-    /// @notice The scoped config admin (RoleManager) allowed to toggle voting/creator hats.
+    /// @notice Historical config-admin address, retained only for reading old state.
     function configAdmin() external view returns (address) {
         return _layout().configAdmin;
     }
 
-    /// @notice The org's MembershipAuthority (Access v2). `address(0)` = legacy Hats path active.
+    /// @notice The org's authority, or zero for an inactive, unmigrated module.
     function membershipAuthority() external view returns (address) {
         return _layout().membershipAuthority;
     }

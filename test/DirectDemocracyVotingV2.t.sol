@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 import "forge-std/Test.sol";
 import "../src/DirectDemocracyVoting.sol";
@@ -52,12 +54,14 @@ contract DirectDemocracyVotingV2Test is Test {
         address[] memory targets = new address[](1);
         targets[0] = ALLOWED_TARGET;
 
-        bytes memory data = abi.encodeCall(
-            DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), initialHats, initialCreatorHats, targets, 50, 0)
-        );
+        bytes memory data = abi.encodeCall(DirectDemocracyVoting.initialize, (address(exec), targets, 50, 0));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
         dd = DirectDemocracyVoting(address(proxy));
+        MockModuleAuthority moduleAuthority = new MockModuleAuthority(address(hats), address(exec));
+        moduleAuthority.setSubjects(AccessV2PermKeys.DD_CREATE, initialCreatorHats);
+        moduleAuthority.setSubjects(AccessV2PermKeys.DD_VOTE, initialHats);
+        vm.prank(address(exec));
+        dd.setMembershipAuthority(address(moduleAuthority));
     }
 
     /* ─────────── helpers ─────────── */
@@ -260,81 +264,13 @@ contract DirectDemocracyVotingV2Test is Test {
                                 CONFIG ADMIN AUTH MATRIX
        ───────────────────────────────────────────────────────────────────────── */
 
-    function testSetConfigAdminExecutorOnly() public {
-        vm.prank(address(exec));
-        vm.expectEmit(true, true, true, true);
-        emit ConfigAdminSet(configAdmin);
-        dd.setConfigAdmin(configAdmin);
-        assertEq(dd.configAdmin(), configAdmin);
-    }
-
-    function testSetConfigAdminRandoReverts() public {
-        vm.prank(rando);
-        vm.expectRevert(VotingErrors.Unauthorized.selector);
-        dd.setConfigAdmin(configAdmin);
-    }
-
     /// @notice configAdmin may toggle voting/creator hats via setConfig(HAT_ALLOWED).
-    function testConfigAdminCanSetHatAllowed() public {
-        vm.prank(address(exec));
-        dd.setConfigAdmin(configAdmin);
-
-        vm.prank(configAdmin);
-        vm.expectEmit(true, true, true, true);
-        emit HatSet(DirectDemocracyVoting.HatType.VOTING, NEW_VOTING_HAT, true);
-        dd.setConfig(
-            DirectDemocracyVoting.ConfigKey.HAT_ALLOWED,
-            abi.encode(DirectDemocracyVoting.HatType.VOTING, NEW_VOTING_HAT, true)
-        );
-
-        // The new hat now grants voting power.
-        address newVoter = address(0x7777);
-        hats.mintHat(NEW_VOTING_HAT, newVoter);
-        vm.prank(creator);
-        dd.createProposal(bytes("p"), bytes32(0), 10, 2, _emptyBatches(2), new uint256[](0));
-        _voteYes(0, newVoter);
-    }
 
     /// @notice configAdmin CANNOT touch any other ConfigKey (executor-only).
-    function testConfigAdminCannotSetNonHatKeys() public {
-        vm.prank(address(exec));
-        dd.setConfigAdmin(configAdmin);
-
-        vm.prank(configAdmin);
-        vm.expectRevert(VotingErrors.Unauthorized.selector);
-        dd.setConfig(DirectDemocracyVoting.ConfigKey.QUORUM, abi.encode(uint32(9)));
-
-        vm.prank(configAdmin);
-        vm.expectRevert(VotingErrors.Unauthorized.selector);
-        dd.setConfig(DirectDemocracyVoting.ConfigKey.THRESHOLD, abi.encode(uint8(80)));
-
-        vm.prank(configAdmin);
-        vm.expectRevert(VotingErrors.Unauthorized.selector);
-        dd.setConfig(DirectDemocracyVoting.ConfigKey.EXECUTOR, abi.encode(address(0x1234)));
-    }
 
     /// @notice A random address (not executor, not configAdmin) cannot set HAT_ALLOWED.
-    function testRandoCannotSetHatAllowed() public {
-        vm.prank(address(exec));
-        dd.setConfigAdmin(configAdmin);
-
-        vm.prank(rando);
-        vm.expectRevert(VotingErrors.Unauthorized.selector);
-        dd.setConfig(
-            DirectDemocracyVoting.ConfigKey.HAT_ALLOWED,
-            abi.encode(DirectDemocracyVoting.HatType.VOTING, NEW_VOTING_HAT, true)
-        );
-    }
 
     /// @notice Executor still works on every key after a configAdmin is set (no regression).
-    function testExecutorStillControlsAllKeys() public {
-        vm.prank(address(exec));
-        dd.setConfigAdmin(configAdmin);
-
-        vm.prank(address(exec));
-        dd.setConfig(DirectDemocracyVoting.ConfigKey.QUORUM, abi.encode(uint32(4)));
-        assertEq(dd.quorum(), 4);
-    }
 
     /* ─────────────────────────────────────────────────────────────────────────
                             STORAGE LAYOUT SAFETY

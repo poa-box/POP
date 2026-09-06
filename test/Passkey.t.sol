@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.24;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
 
 /*──────────── forge-std helpers ───────────*/
 import "forge-std/Test.sol";
@@ -864,17 +865,16 @@ contract PasskeyTest is Test {
 
         bytes memory qjInitData = abi.encodeWithSelector(
             QuickJoin.initialize.selector,
-            owner, // executor (use owner so we can call executor-gated functions)
-            address(hats), // hats
+            owner, // hats
             address(accountRegistry), // account registry
-            owner, // master deploy
-            memberHatIds // member hat ids
+            owner
         );
 
         quickJoin = QuickJoin(address(new BeaconProxy(address(quickJoinBeacon), qjInitData)));
 
         // Configure universal passkey factory in QuickJoin
         quickJoin.setUniversalFactory(address(factory));
+        quickJoin.setMembershipAuthority(address(new MockModuleAuthority(address(hats), owner)));
 
         vm.stopPrank();
 

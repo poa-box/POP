@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
+import {ValidationLib} from "../src/libs/ValidationLib.sol";
 import {TaskManager} from "../src/TaskManager.sol";
 import {TaskPerm} from "../src/libs/TaskPerm.sol";
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
@@ -22,8 +23,8 @@ contract MockPToken {
     function mint(address, uint256) external {}
 }
 
-/// @dev Exposes TaskManager's internal permission-fold sites so the dual-path equality obligation
-///      (§5.2 #8) can be asserted at the exact `_permMask` boundary, not only via gated externals.
+/// @dev Exposes TaskManager's internal permission-fold sites so authority permission folding
+///      can be asserted at the exact `_permMask` boundary, not only via gated externals.
 contract TaskManagerHarness is TaskManager {
     function permMask(address user, bytes32 pid) external view returns (uint8) {
         return _permMask(user, pid);
@@ -35,9 +36,7 @@ contract TaskManagerHarness is TaskManager {
 }
 
 /// @title TaskManagerAccessV2Test
-/// @notice Dual-path (Access v2) coverage for TaskManager: legacy Hats regression, authority-path
-///         mask parity, the §5.2 TM effective-mask equality obligation across global/project/inherit
-///         shapes, creator/organizer routing, setter auth, and rollback-to-zero.
+/// @notice Authority global/project/inherit masks, creator/organizer subjects and rejected rollback.
 contract TaskManagerAccessV2Test is Test {
     TaskManagerHarness internal tm;
     MockHats internal hats;
@@ -69,7 +68,7 @@ contract TaskManagerAccessV2Test is Test {
         uint256[] memory creatorHats = new uint256[](1);
         creatorHats[0] = CREATOR_HAT;
         bytes memory initCall =
-            abi.encodeCall(TaskManager.initialize, (address(token), address(hats), creatorHats, executor, address(0)));
+            abi.encodeCall(TaskManager.initialize, (address(token), creatorHats, executor, address(0)));
         tm = TaskManagerHarness(address(new BeaconProxy(address(beacon), initCall)));
 
         auth = _deployAuthority();
@@ -176,42 +175,6 @@ contract TaskManagerAccessV2Test is Test {
         assertEq(abi.decode(raw, (address)), address(auth), "lens pointer mismatch");
     }
 
-    function test_rollbackToZero_restoresLegacy() public {
-        // Legacy state: alice wears HAT_A with global CREATE.
-        hats.mintHat(HAT_A, alice);
-        vm.prank(executor);
-        tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(HAT_A, TaskPerm.CREATE));
-        assertEq(tm.permMask(alice, bytes32("p1")), TaskPerm.CREATE, "legacy baseline");
-
-        // Route to an authority where alice has NO perms.
-        vm.prank(executor);
-        tm.setMembershipAuthority(address(auth));
-        assertEq(tm.permMask(alice, bytes32("p1")), 0, "authority arm should override legacy");
-
-        // Roll back to zero — legacy answer returns byte-identically.
-        vm.prank(executor);
-        tm.setMembershipAuthority(address(0));
-        assertEq(tm.permMask(alice, bytes32("p1")), TaskPerm.CREATE, "rollback must restore legacy");
-    }
-
-    /*──────────────────── Legacy path regression ────────────────────*/
-
-    function test_legacyPath_projectOverridesGlobal() public {
-        hats.mintHat(HAT_A, alice);
-        vm.startPrank(executor);
-        tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(HAT_A, TaskPerm.CREATE | TaskPerm.CLAIM));
-        vm.stopPrank();
-        _mkProject("id0"); // burn project id 0 (== authority GLOBAL ctx sentinel)
-        bytes32 pid = _mkProject("proj");
-        // No project override → global applies.
-        assertEq(tm.permMask(alice, pid), TaskPerm.CREATE | TaskPerm.CLAIM, "global fold");
-
-        // Project override REPLACES global (v1 shadow rule).
-        vm.prank(executor);
-        tm.setProjectRolePerm(pid, HAT_A, TaskPerm.REVIEW);
-        assertEq(tm.permMask(alice, pid), TaskPerm.REVIEW, "project replaces global (legacy)");
-    }
-
     /*──────────────────── Authority path parity ────────────────────*/
 
     function test_authorityPath_globalOnly() public {
@@ -259,75 +222,6 @@ contract TaskManagerAccessV2Test is Test {
 
     /*──────────────────── §5.2 #8 effective-mask equality obligation ────────────────────*/
 
-    /// @notice Same org state expressed legacy (hats+masks) vs authority (subjects+perm rows via the
-    ///         freeze migration mapping) yields byte-identical `_permMask` for every (project, user).
-    ///         Migration mapping: global mask → global row; NONZERO project mask → inherit=false
-    ///         project row (reproduces v1 REPLACE); zero project mask → no row (falls to global).
-    function test_equalityDifferential_legacyVsAuthority() public {
-        // ── Legacy state ──
-        // alice wears HAT_A + HAT_B; bob wears HAT_B only.
-        hats.mintHat(HAT_A, alice);
-        hats.mintHat(HAT_B, alice);
-        hats.mintHat(HAT_B, bob);
-
-        uint8 gA = TaskPerm.CREATE | TaskPerm.CLAIM;
-        uint8 gB = TaskPerm.REVIEW;
-        vm.startPrank(executor);
-        tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(HAT_A, gA));
-        tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(HAT_B, gB));
-        vm.stopPrank();
-
-        _mkProject("id0"); // burn project id 0 (== authority GLOBAL ctx sentinel) so p1/p2 are nonzero
-        bytes32 p1 = _mkProject("p1");
-        bytes32 p2 = _mkProject("p2");
-        // p1: HAT_A gets a nonzero project override (ASSIGN); HAT_B no override.
-        // p2: HAT_B gets a nonzero override (BUDGET); HAT_A no override.
-        uint8 pA1 = TaskPerm.ASSIGN;
-        uint8 pB2 = TaskPerm.BUDGET;
-        vm.startPrank(executor);
-        tm.setProjectRolePerm(p1, HAT_A, pA1);
-        tm.setProjectRolePerm(p2, HAT_B, pB2);
-        vm.stopPrank();
-
-        // Capture legacy answers.
-        uint8 la_p1 = tm.permMask(alice, p1);
-        uint8 la_p2 = tm.permMask(alice, p2);
-        uint8 lb_p1 = tm.permMask(bob, p1);
-        uint8 lb_p2 = tm.permMask(bob, p2);
-
-        // ── Authority state (mapped 1:1) ──
-        uint256 sA = _role("A");
-        uint256 sB = _role("B");
-        _makeMember(sA, alice);
-        _makeMember(sB, alice);
-        _makeMember(sB, bob);
-        // Globals.
-        _setPerm(sA, bytes32(0), gA, false);
-        _setPerm(sB, bytes32(0), gB, false);
-        // Nonzero project overrides → inherit=false (REPLACE), matching v1.
-        _setPerm(sA, p1, pA1, false);
-        _setPerm(sB, p2, pB2, false);
-
-        vm.prank(executor);
-        tm.setMembershipAuthority(address(auth));
-
-        // Exhaustive (user, project) equality.
-        assertEq(tm.permMask(alice, p1), la_p1, "alice p1 parity");
-        assertEq(tm.permMask(alice, p2), la_p2, "alice p2 parity");
-        assertEq(tm.permMask(bob, p1), lb_p1, "bob p1 parity");
-        assertEq(tm.permMask(bob, p2), lb_p2, "bob p2 parity");
-
-        // Spot-check the concrete expected values so the test is not tautological.
-        // alice p1: HAT_A→ASSIGN (project replace) OR HAT_B→gB (no p1 override, uses global REVIEW).
-        assertEq(la_p1, pA1 | gB, "alice p1 = ASSIGN|REVIEW");
-        // alice p2: HAT_A→gA (no p2 override) OR HAT_B→BUDGET (project replace).
-        assertEq(la_p2, gA | pB2, "alice p2 = gA|BUDGET");
-        // bob p1: HAT_B global only.
-        assertEq(lb_p1, gB, "bob p1 = REVIEW");
-        // bob p2: HAT_B project replace.
-        assertEq(lb_p2, pB2, "bob p2 = BUDGET");
-    }
-
     /*──────────────────── creator / organizer routing ────────────────────*/
 
     function test_creator_dualPath() public {
@@ -337,18 +231,15 @@ contract TaskManagerAccessV2Test is Test {
         tm.setConfig(TaskManager.ConfigKey.CREATOR_HAT_ALLOWED, abi.encode(sCreator, true));
         _makeMember(sCreator, carol);
 
-        // Legacy: carol wears no legacy creator hat → not a creator yet.
-        assertFalse(tm.hasCreatorHat(carol), "legacy: carol not creator");
-
         vm.prank(executor);
         tm.setMembershipAuthority(address(auth));
         assertTrue(tm.hasCreatorHat(carol), "authority: carol is creator via membership");
         assertFalse(tm.hasCreatorHat(outsider), "authority: outsider not creator");
 
-        // Rollback restores legacy (carol wears the id as a hat? no) → not creator.
         vm.prank(executor);
+        vm.expectRevert(ValidationLib.ZeroAddress.selector);
         tm.setMembershipAuthority(address(0));
-        assertFalse(tm.hasCreatorHat(carol), "rollback: legacy answer");
+        assertTrue(tm.hasCreatorHat(carol), "authority remains active");
     }
 
     function test_organizer_dualPath() public {

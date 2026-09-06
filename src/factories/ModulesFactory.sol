@@ -138,14 +138,6 @@ contract ModulesFactory {
         /* 2. Deploy EducationHub if enabled (without registration) */
         if (params.educationHubConfig.enabled) {
             // Subject ids for the EducationHub creator / member lists
-            uint256[] memory creatorSubjects = RoleResolver.resolveRoleBitmap(
-                params.roleSubjectIds, params.roleAssignments.educationCreatorRolesBitmap
-            );
-
-            uint256[] memory memberSubjects = RoleResolver.resolveRoleBitmap(
-                params.roleSubjectIds, params.roleAssignments.educationMemberRolesBitmap
-            );
-
             educationHubBeacon = BeaconDeploymentLib.createBeacon(
                 ModuleTypes.EDUCATION_HUB_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)
             );
@@ -161,7 +153,7 @@ contract ModulesFactory {
             });
 
             result.educationHub = ModuleDeploymentLib.deployEducationHub(
-                config, params.executor, params.participationToken, creatorSubjects, memberSubjects, educationHubBeacon
+                config, params.executor, params.participationToken, educationHubBeacon
             );
         }
 

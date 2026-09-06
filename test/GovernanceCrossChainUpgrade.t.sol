@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -117,11 +119,7 @@ contract GovernanceCrossChainUpgradeTest is Test {
         Executor execImpl = new Executor();
         UpgradeableBeacon execBeacon = new UpgradeableBeacon(address(execImpl), address(this));
         executor = Executor(
-            payable(address(
-                    new BeaconProxy(
-                        address(execBeacon), abi.encodeCall(Executor.initialize, (address(this), address(hats)))
-                    )
-                ))
+            payable(address(new BeaconProxy(address(execBeacon), abi.encodeCall(Executor.initialize, (address(this))))))
         );
 
         // ── Governance: HybridVoting (behind beacon proxy) ──
@@ -159,13 +157,15 @@ contract GovernanceCrossChainUpgradeTest is Test {
             payable(address(
                     new BeaconProxy(
                         address(hvBeacon),
-                        abi.encodeCall(
-                            HybridVoting.initialize,
-                            (address(hats), address(executor), creatorHats, targets, uint8(50), uint32(0), classes)
-                        )
+                        abi.encodeCall(HybridVoting.initialize, (address(executor), uint8(50), uint32(0), classes))
                     )
                 ))
         );
+
+        MockModuleAuthority authority = new MockModuleAuthority(address(hats), address(executor));
+        authority.setSubjects(AccessV2PermKeys.HV_CREATE, creatorHats);
+        vm.prank(address(executor));
+        hv.setMembershipAuthority(address(authority));
 
         // Wire governance: HybridVoting is the Executor's allowed caller
         executor.setCaller(address(hv));

@@ -209,8 +209,11 @@ contract OrgDeployer is Initializable {
 
         Layout storage l = _layout();
         l.governanceFactory = GovernanceFactory(_governanceFactory);
+        emit GovernanceFactoryUpdated(_governanceFactory);
         l.accessFactory = AccessFactory(_accessFactory);
+        emit AccessFactoryUpdated(_accessFactory);
         l.modulesFactory = ModulesFactory(_modulesFactory);
+        emit ModulesFactoryUpdated(_modulesFactory);
         l.orgRegistry = OrgRegistry(_orgRegistry);
         l.poaManager = _poaManager;
         l.paymasterHub = _paymasterHub;
@@ -247,11 +250,22 @@ contract OrgDeployer is Initializable {
     /// @dev ModulesFactory is a plain (non-proxy) contract referenced by address, so a beacon
     ///      upgrade of this OrgDeployer keeps the OLD factory in storage. After deploying a new
     ///      ModulesFactory, call this to switch. Only callable by PoaManager (via Hub/Satellite adminCall).
+    event ModulesFactoryUpdated(address indexed factory);
+    event GovernanceFactoryUpdated(address indexed factory);
+    event AccessFactoryUpdated(address indexed factory);
+
+    /// @notice Current deployment factories, for upgrade verification and integrations.
+    function factories() external view returns (address governance, address access, address modules) {
+        Layout storage l = _layout();
+        return (address(l.governanceFactory), address(l.accessFactory), address(l.modulesFactory));
+    }
+
     function setModulesFactory(address _modulesFactory) external {
         Layout storage l = _layout();
         if (msg.sender != l.poaManager) revert InvalidAddress();
         if (_modulesFactory == address(0)) revert InvalidAddress();
         l.modulesFactory = ModulesFactory(_modulesFactory);
+        emit ModulesFactoryUpdated(_modulesFactory);
     }
 
     /// @notice Re-point the deployer at freshly-deployed Governance/Access factories.
@@ -261,6 +275,7 @@ contract OrgDeployer is Initializable {
         if (msg.sender != l.poaManager) revert InvalidAddress();
         if (_governanceFactory == address(0)) revert InvalidAddress();
         l.governanceFactory = GovernanceFactory(_governanceFactory);
+        emit GovernanceFactoryUpdated(_governanceFactory);
     }
 
     function setAccessFactory(address _accessFactory) external {
@@ -268,6 +283,7 @@ contract OrgDeployer is Initializable {
         if (msg.sender != l.poaManager) revert InvalidAddress();
         if (_accessFactory == address(0)) revert InvalidAddress();
         l.accessFactory = AccessFactory(_accessFactory);
+        emit AccessFactoryUpdated(_accessFactory);
     }
 
     /*════════════════  DEPLOYMENT STRUCTS  ════════════════*/

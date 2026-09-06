@@ -50,10 +50,7 @@ contract DirectDemocracyVotingAuthorityTest is Test {
         initialCreatorHats[0] = CREATOR_HAT;
         address[] memory targets = new address[](0);
 
-        bytes memory data = abi.encodeCall(
-            DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), initialHats, initialCreatorHats, targets, 50, 0)
-        );
+        bytes memory data = abi.encodeCall(DirectDemocracyVoting.initialize, (address(exec), targets, 50, 0));
         dd = DirectDemocracyVoting(address(new ERC1967Proxy(address(impl), data)));
     }
 
@@ -102,6 +99,11 @@ contract DirectDemocracyVotingAuthorityTest is Test {
         emit MembershipAuthoritySet(address(auth));
         _setAuthority(address(auth));
         assertEq(dd.membershipAuthority(), address(auth));
+
+        vm.prank(address(exec));
+        vm.expectRevert(VotingErrors.ZeroAddress.selector);
+        dd.setMembershipAuthority(address(0));
+        assertEq(dd.membershipAuthority(), address(auth), "failed rollback preserves authority");
     }
 
     /*───────────────────────── creator gating ─────────────────────────*/
@@ -173,7 +175,7 @@ contract DirectDemocracyVotingAuthorityTest is Test {
         // reads 0 — mirroring a proposal created under pre-Access-v2 bytecode (mapping absent).
         vm.warp(0);
         hats.mintHat(CREATOR_HAT, creator);
-        uint256 id = _createUnrestricted(creator);
+        uint256 id = _createUnrestricted(address(exec));
         assertEq(dd.proposalCreatedAt(id), 0, "precondition: legacy proposal has a zero anchor");
 
         // Cutover: repoint the still-open proposal onto the authority path.
@@ -201,7 +203,7 @@ contract DirectDemocracyVotingAuthorityTest is Test {
         vm.warp(0);
         hats.mintHat(CREATOR_HAT, creator);
         uint256 id = dd.proposalsCount();
-        vm.prank(creator);
+        vm.prank(address(exec));
         dd.createProposal(bytes("restricted"), bytes32(0), 10, 2, _emptyBatches(2), _one(EXEC_SUBJECT));
         assertEq(dd.proposalCreatedAt(id), 0, "precondition: legacy restricted poll has a zero anchor");
 
@@ -253,71 +255,5 @@ contract DirectDemocracyVotingAuthorityTest is Test {
         w[0] = 100;
         vm.expectRevert(VotingErrors.RoleNotAllowed.selector);
         dd.vote(id, idx, w);
-    }
-
-    /*───────────────────────── equality differential ─────────────────────────*/
-
-    /// @notice The SAME electorate expressed via legacy hats vs authority subjects yields identical
-    ///         tallies/winners on two otherwise-identical DD instances.
-    function testEqualityDifferentialLegacyVsAuthority() public {
-        // ── Legacy instance: voter wears VOTING_HAT ──
-        hats.mintHat(CREATOR_HAT, creator);
-        hats.mintHat(VOTING_HAT, voter);
-        uint256 idL = _createUnrestricted(creator); // creator wears CREATOR_HAT (legacy path)
-        _voteYes(voter, idL);
-        vm.warp(block.timestamp + 11 * 60);
-        (uint256 winL, bool validL) = dd.announceWinner(idL);
-
-        // ── Authority instance: identical electorate via subjects/keys ──
-        DirectDemocracyVoting impl = new DirectDemocracyVoting();
-        address[] memory targets = new address[](0);
-        bytes memory data = abi.encodeCall(
-            DirectDemocracyVoting.initialize,
-            (address(hats), address(exec), new uint256[](0), new uint256[](0), targets, 50, 0)
-        );
-        DirectDemocracyVoting dd2 = DirectDemocracyVoting(address(new ERC1967Proxy(address(impl), data)));
-        vm.prank(address(exec));
-        dd2.setMembershipAuthority(address(auth));
-
-        auth.setPermBool(creator, AccessV2PermKeys.DD_CREATE, true);
-        uint256 idA = dd2.proposalsCount();
-        vm.prank(creator);
-        dd2.createProposal(bytes("p"), bytes32(0), 10, 2, _emptyBatches(2), new uint256[](0));
-        // voter active since before creation.
-        auth.setKeyActive(voter, AccessV2PermKeys.DD_VOTE, dd2.proposalCreatedAt(idA));
-        {
-            uint8[] memory idx = new uint8[](1);
-            idx[0] = 0;
-            uint8[] memory w = new uint8[](1);
-            w[0] = 100;
-            vm.prank(voter);
-            dd2.vote(idA, idx, w);
-        }
-        vm.warp(block.timestamp + 11 * 60);
-        (uint256 winA, bool validA) = dd2.announceWinner(idA);
-
-        assertEq(winL, winA, "winner idx differs");
-        assertEq(validL, validA, "validity differs");
-        assertTrue(validA);
-    }
-
-    /*───────────────────────── rollback to zero ─────────────────────────*/
-
-    function testRollbackToZeroRestoresLegacy() public {
-        _setAuthority(address(auth));
-        assertEq(dd.membershipAuthority(), address(auth));
-
-        // Rollback.
-        _setAuthority(address(0));
-        assertEq(dd.membershipAuthority(), address(0));
-
-        // Legacy path is live again: hat-wearing creator + voter work without any authority perms.
-        hats.mintHat(CREATOR_HAT, creator);
-        hats.mintHat(VOTING_HAT, voter);
-        uint256 id = _createUnrestricted(creator);
-        _voteYes(voter, id);
-        vm.warp(block.timestamp + 11 * 60);
-        (, bool valid) = dd.announceWinner(id);
-        assertTrue(valid);
     }
 }

@@ -6,7 +6,7 @@ pragma solidity ^0.8.20;
 // implementation and do not cite its behavior as current.
 
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
-import {HatManager} from "../../src/libs/HatManager.sol";
+import {LegacyHatManager as HatManager} from "./LegacyHatManager.sol";
 
 /**
  * @title CurrentPathHarness

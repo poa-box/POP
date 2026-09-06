@@ -2,12 +2,16 @@
 pragma solidity ^0.8.20;
 
 /*──────────────────── OpenZeppelin v5.3 Upgradeables ─────────────*/
-import "@openzeppelin-contracts-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
+import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {
+    ERC20VotesUpgradeable
+} from "@openzeppelin-contracts-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
 
 /*────────────── External Hats interface ─────────────*/
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
-import {HatManager} from "./libs/HatManager.sol";
 import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
 import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 
@@ -69,12 +73,9 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         uint256[] memberHatIds; // enumeration array for member hats
         uint256[] approverHatIds; // enumeration array for approver hats
         // ─── Role customization (configAdmin) ───
-        // Optional secondary admin (e.g. RoleManager) permitted to set member/approver hat
-        // allowlists alongside the executor. address(0) = none.
+        // Reserved historical config-admin slot; no longer grants any permission.
         address configAdmin;
-        // ─── Access v2 dual-path (append-only tail) ───
-        // When non-zero, member/approver reads route through the org's MembershipAuthority instead
-        // of the legacy Hats path. address(0) = legacy path (byte-identical; also the rollback state).
+        // Required MembershipAuthority; zero means an inactive, unmigrated module.
         address membershipAuthority;
     }
 
@@ -99,8 +100,7 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     event SymbolSet(string newSymbol);
     /// @notice The secondary config admin (may set member/approver hat allowlists) changed.
     event ConfigAdminSet(address indexed admin);
-    /// @notice The org's MembershipAuthority pointer changed. `authority == address(0)` restores the
-    ///         legacy Hats member/approver path (rollback).
+    /// @notice The org's nonzero MembershipAuthority pointer changed.
     event MembershipAuthoritySet(address indexed authority);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -109,43 +109,14 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     }
 
     /*─────────── Initialiser ──────*/
-    function initialize(
-        address executor_,
-        string calldata name_,
-        string calldata symbol_,
-        address hatsAddr,
-        uint256[] calldata initialMemberHats,
-        uint256[] calldata initialApproverHats
-    ) external initializer {
-        if (hatsAddr == address(0) || executor_ == address(0)) {
-            revert InvalidAddress();
-        }
 
+    /// @notice Initialize token metadata and its governing Executor. Authority wiring is atomic in OrgDeployer.
+    function initialize(address executor_, string calldata name_, string calldata symbol_) external initializer {
+        if (executor_ == address(0)) revert InvalidAddress();
         __ERC20_init(name_, symbol_);
         __ERC20Votes_init();
         __ReentrancyGuard_init();
-
-        Layout storage l = _layout();
-        l.hats = IHats(hatsAddr);
-        l.executor = executor_;
-
-        // Set initial member hats using HatManager
-        for (uint256 i; i < initialMemberHats.length;) {
-            HatManager.setHatInArray(l.memberHatIds, initialMemberHats[i], true);
-            emit MemberHatSet(initialMemberHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
-
-        // Set initial approver hats using HatManager
-        for (uint256 i; i < initialApproverHats.length;) {
-            HatManager.setHatInArray(l.approverHatIds, initialApproverHats[i], true);
-            emit ApproverHatSet(initialApproverHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
+        _layout().executor = executor_;
     }
 
     /*────────── Modifiers ─────────*/
@@ -196,16 +167,6 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         }
     }
 
-    /// @dev Caller must be the executor or the configured configAdmin; reverts Unauthorized otherwise.
-    ///      Used only by the member/approver hat setters so a RoleManager can fan out role wiring.
-    function _checkExecutorOrConfigAdmin() private view {
-        Layout storage l = _layout();
-        address s = _msgSender();
-        if (s == l.executor) return;
-        if (s != address(0) && s == l.configAdmin) return;
-        revert Unauthorized();
-    }
-
     /*──────── Admin setters ───────*/
     /// @notice Set the TaskManager authorized to mint tokens. Executor-only.
     /// @dev C-01 fix: previously the first set (while `taskManager == 0`) was open
@@ -232,35 +193,11 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         emit EducationHubSet(eh);
     }
 
-    /// @notice Set the secondary config admin permitted to set member/approver hat allowlists.
-    /// @dev Executor-only. `admin` may be address(0) to clear.
-    function setConfigAdmin(address admin) external onlyExecutor {
-        _layout().configAdmin = admin;
-        emit ConfigAdminSet(admin);
-    }
-
-    /// @notice Repoint this module to the org's MembershipAuthority (Access v2).
-    /// @dev Executor-only. When `authority != address(0)` member/approver reads route through the
-    ///      authority; `address(0)` restores the legacy Hats path (rollback). Dual-path §4.5/§4.1.
+    /// @notice Set the org's nonzero MembershipAuthority. Governance-only; no legacy rollback.
     function setMembershipAuthority(address authority) external onlyExecutor {
+        if (authority == address(0)) revert InvalidAddress();
         _layout().membershipAuthority = authority;
         emit MembershipAuthoritySet(authority);
-    }
-
-    /// @notice Add or remove a member hat. Executor or configAdmin.
-    function setMemberHatAllowed(uint256 h, bool ok) external {
-        _checkExecutorOrConfigAdmin();
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.memberHatIds, h, ok);
-        emit MemberHatSet(h, ok);
-    }
-
-    /// @notice Add or remove an approver hat. Executor or configAdmin.
-    function setApproverHatAllowed(uint256 h, bool ok) external {
-        _checkExecutorOrConfigAdmin();
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.approverHatIds, h, ok);
-        emit ApproverHatSet(h, ok);
     }
 
     /// @notice Update the ERC20 token name. Executor-only — typically called via
@@ -430,16 +367,9 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     /*───────── Internal Helper Functions ─────────*/
     /// @dev Returns true if `user` wears *any* hat of the requested type. Access v2: when an authority
     ///      is set, the check routes through `hasPerm(user, PT_MEMBER|PT_APPROVE, GLOBAL) != 0` (§4.5);
-    ///      legacy Hats otherwise (byte-identical / rollback path).
     function _hasHat(address user, HatType hatType) internal view returns (bool) {
-        Layout storage l = _layout();
-        address a = l.membershipAuthority;
-        if (a != address(0)) {
-            bytes32 key = hatType == HatType.MEMBER ? AccessV2PermKeys.PT_MEMBER : AccessV2PermKeys.PT_APPROVE;
-            return IMembershipAuthority(a).hasPerm(user, key, bytes32(0)) != 0;
-        }
-        uint256[] storage ids = hatType == HatType.MEMBER ? l.memberHatIds : l.approverHatIds;
-        return HatManager.hasAnyHat(l.hats, ids, user);
+        bytes32 key = hatType == HatType.MEMBER ? AccessV2PermKeys.PT_MEMBER : AccessV2PermKeys.PT_APPROVE;
+        return IMembershipAuthority(_layout().membershipAuthority).hasPerm(user, key, bytes32(0)) != 0;
     }
 
     /*───────── View helpers ─────────*/
@@ -469,7 +399,7 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
         return _layout().executor;
     }
 
-    /// @notice The org's MembershipAuthority pointer (Access v2). address(0) = legacy Hats path.
+    /// @notice The org's authority, or zero for an inactive, unmigrated module.
     function membershipAuthority() external view returns (address) {
         return _layout().membershipAuthority;
     }
@@ -479,27 +409,19 @@ contract ParticipationToken is Initializable, ERC20VotesUpgradeable, ReentrancyG
     }
 
     function memberHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().memberHatIds);
+        return _layout().memberHatIds;
     }
 
     function approverHatIds() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().approverHatIds);
+        return _layout().approverHatIds;
     }
 
     /*───────── Hat Management View Functions ─────────*/
     function memberHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().memberHatIds);
+        return _layout().memberHatIds.length;
     }
 
     function approverHatCount() external view returns (uint256) {
-        return HatManager.getHatCount(_layout().approverHatIds);
-    }
-
-    function isMemberHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().memberHatIds, hatId);
-    }
-
-    function isApproverHat(uint256 hatId) external view returns (bool) {
-        return HatManager.isHatInArray(_layout().approverHatIds, hatId);
+        return _layout().approverHatIds.length;
     }
 }

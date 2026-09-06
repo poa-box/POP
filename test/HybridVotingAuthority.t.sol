@@ -62,10 +62,7 @@ contract HybridVotingAuthorityTest is Test {
         });
 
         HybridVoting impl = new HybridVoting();
-        bytes memory data = abi.encodeCall(
-            HybridVoting.initialize,
-            (address(hats), address(exec), creatorHats, new address[](0), uint8(50), uint32(0), classes)
-        );
+        bytes memory data = abi.encodeCall(HybridVoting.initialize, (address(exec), uint8(50), uint32(0), classes));
         hv = HybridVoting(payable(address(new ERC1967Proxy(address(impl), data))));
     }
 
@@ -119,39 +116,14 @@ contract HybridVotingAuthorityTest is Test {
         emit MembershipAuthoritySet(address(auth));
         _setAuthority(address(auth));
         assertEq(hv.membershipAuthority(), address(auth));
+
+        vm.prank(address(exec));
+        vm.expectRevert(VotingErrors.ZeroAddress.selector);
+        hv.setMembershipAuthority(address(0));
+        assertEq(hv.membershipAuthority(), address(auth), "failed rollback preserves authority");
     }
 
     /*───────────────────────── setClassSubject allocation + auth ─────────────────────────*/
-
-    function testSetClassSubjectAllocationAndAuth() public {
-        // configAdmin path is allowed; rando is not.
-        vm.prank(address(exec));
-        hv.setConfigAdmin(configAdmin);
-
-        vm.prank(rando);
-        vm.expectRevert(VotingErrors.Unauthorized.selector);
-        hv.setClassSubject(0, SUBJ_A);
-
-        // First use of idx 0 allocates stable classId = 1 and records the linkage + binding.
-        assertEq(hv.classIdOfIndex(0), 0, "unallocated before first set");
-        vm.expectEmit(true, true, true, false);
-        emit ClassSubjectSet(1, 0, SUBJ_A);
-        vm.prank(configAdmin);
-        hv.setClassSubject(0, SUBJ_A);
-        assertEq(hv.classIdOfIndex(0), 1, "classId allocated");
-        assertEq(hv.classSubjectOf(1), SUBJ_A, "subject bound");
-
-        // Re-binding idx 0 REUSES the same stable classId (no re-allocation).
-        vm.prank(address(exec));
-        hv.setClassSubject(0, SUBJ_B);
-        assertEq(hv.classIdOfIndex(0), 1, "classId reused");
-        assertEq(hv.classSubjectOf(1), SUBJ_B, "subject re-bound");
-
-        // A different idx allocates a fresh id.
-        vm.prank(address(exec));
-        hv.setClassSubject(1, SUBJ_A);
-        assertEq(hv.classIdOfIndex(1), 2, "second idx allocates classId 2");
-    }
 
     /*───────────────────────── creator gating ─────────────────────────*/
 
@@ -215,7 +187,7 @@ contract HybridVotingAuthorityTest is Test {
         // (pre-Access-v2 bytecode: neither mapping existed). Class 0 stays hat-gated on MEMBER_HAT.
         vm.warp(0);
         hats.mintHat(CREATOR_HAT, creator);
-        uint256 id = _create(creator);
+        uint256 id = _create(address(exec));
         assertEq(hv.proposalCreatedAt(id), 0, "precondition: legacy proposal has a zero anchor");
         assertEq(hv.proposalClassSubject(id, 0), 0, "precondition: no class-subject snapshot");
 
@@ -237,7 +209,7 @@ contract HybridVotingAuthorityTest is Test {
     function testPreCutoverProposalStillBlocksNonMember() public {
         vm.warp(0);
         hats.mintHat(CREATOR_HAT, creator);
-        uint256 id = _create(creator);
+        uint256 id = _create(address(exec));
         assertEq(hv.proposalCreatedAt(id), 0);
 
         vm.warp(100);
@@ -279,81 +251,5 @@ contract HybridVotingAuthorityTest is Test {
         assertEq(hv.proposalClassSubject(p2, 0), SUBJ_B);
         _vote(p2, voterB, 0);
         _expectVoteRevert(p2, voter);
-    }
-
-    /*───────────────────────── equality differential ─────────────────────────*/
-
-    /// @notice The SAME electorate expressed via legacy hats vs an authority subject yields identical
-    ///         tallies on two otherwise-identical HV instances.
-    function testEqualityDifferentialLegacyVsAuthority() public {
-        // ── Legacy instance (the setUp one): creator wears CREATOR_HAT, voter wears MEMBER_HAT ──
-        hats.mintHat(CREATOR_HAT, creator);
-        hats.mintHat(MEMBER_HAT, voter);
-        uint256 idL = _create(creator);
-        _vote(idL, voter, 0);
-        vm.warp(block.timestamp + 16 minutes);
-        (uint256 winL, bool validL) = hv.announceWinner(idL);
-
-        // ── Authority instance: identical single DIRECT class, subject SUBJ_A ──
-        uint256[] memory memberHats = new uint256[](1);
-        memberHats[0] = MEMBER_HAT;
-        HybridVoting.ClassConfig[] memory classes = new HybridVoting.ClassConfig[](1);
-        classes[0] = HybridVoting.ClassConfig({
-            strategy: HybridVoting.ClassStrategy.DIRECT,
-            slicePct: 100,
-            quadratic: false,
-            minBalance: 0,
-            asset: address(0),
-            hatIds: memberHats
-        });
-        HybridVoting impl = new HybridVoting();
-        bytes memory data = abi.encodeCall(
-            HybridVoting.initialize,
-            (address(hats), address(exec), new uint256[](0), new address[](0), uint8(50), uint32(0), classes)
-        );
-        HybridVoting hv2 = HybridVoting(payable(address(new ERC1967Proxy(address(impl), data))));
-        vm.prank(address(exec));
-        hv2.setMembershipAuthority(address(auth));
-        vm.prank(address(exec));
-        hv2.setClassSubject(0, SUBJ_A);
-        auth.setPermBool(creator, AccessV2PermKeys.HV_CREATE, true);
-
-        uint256 idA = hv2.proposalsCount();
-        vm.prank(creator);
-        hv2.createProposal(bytes("p"), bytes32(0), 15, 2, _emptyBatches(2), new uint256[](0));
-        auth.setSubjectActive(SUBJ_A, voter, hv2.proposalCreatedAt(idA));
-        {
-            uint8[] memory idx = new uint8[](1);
-            idx[0] = 0;
-            uint8[] memory w = new uint8[](1);
-            w[0] = 100;
-            vm.prank(voter);
-            hv2.vote(idA, idx, w);
-        }
-        vm.warp(block.timestamp + 16 minutes);
-        (uint256 winA, bool validA) = hv2.announceWinner(idA);
-
-        assertEq(winL, winA, "winner idx differs");
-        assertEq(validL, validA, "validity differs");
-        assertTrue(validA);
-    }
-
-    /*───────────────────────── rollback to zero ─────────────────────────*/
-
-    function testRollbackToZeroRestoresLegacy() public {
-        _setAuthority(address(auth));
-        assertEq(hv.membershipAuthority(), address(auth));
-
-        _setAuthority(address(0));
-        assertEq(hv.membershipAuthority(), address(0));
-
-        // Legacy path live again: hat-wearing creator + voter work without authority perms/subjects.
-        hats.mintHat(CREATOR_HAT, creator);
-        hats.mintHat(MEMBER_HAT, voter);
-        uint256 id = _create(creator);
-        _vote(id, voter, 0);
-        vm.warp(block.timestamp + 16 minutes);
-        (, bool valid) = hv.announceWinner(id);
-        assertTrue(valid);
     }
 }

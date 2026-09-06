@@ -7,13 +7,11 @@ import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 import {Executor, IExecutor} from "../src/Executor.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
 import {MockHats} from "./mocks/MockHats.sol";
 
 /// @title ExecutorAccessV2Test
-/// @notice Coverage for the §4.7 `l.hats` repoint: setMembershipAuthority switches the stored hats
-///         pointer to the authority, stashes the ORIGINAL on the first repoint, and restores it on
-///         rollback-to-zero. Auth mirrors setHatMinterAuthorization (owner / allowedCaller / self via
-///         the execute() self-target allowlist).
+/// @notice Authority repoints require matching executor ownership, and zero cannot restore Hats.
 contract ExecutorAccessV2Test is Test {
     Executor exec;
     MockHats legacyHats;
@@ -31,14 +29,16 @@ contract ExecutorAccessV2Test is Test {
         Executor impl = new Executor();
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
         exec = Executor(payable(address(new BeaconProxy(address(beacon), ""))));
-        exec.initialize(owner, address(legacyHats));
+        exec.initialize(owner);
+        authorityA = address(new MockModuleAuthority(address(legacyHats), address(exec)));
+        authorityB = address(new MockModuleAuthority(address(legacyHats), address(exec)));
         // First-time governor set (owner path).
         exec.setCaller(governance);
     }
 
     /*───────────────────── Default / legacy ─────────────────────*/
-    function testDefaultHatsIsLegacy() public {
-        assertEq(address(exec.hats()), address(legacyHats));
+    function testFreshExecutorHasNoAuthority() public {
+        assertEq(address(exec.hats()), address(0));
         assertEq(exec.membershipAuthority(), address(0));
     }
 
@@ -52,35 +52,40 @@ contract ExecutorAccessV2Test is Test {
         assertEq(exec.membershipAuthority(), authorityA);
     }
 
-    function testSecondRepointKeepsOriginalLegacy() public {
+    function testSecondRepointCannotRestoreLegacy() public {
         exec.setMembershipAuthority(authorityA);
         exec.setMembershipAuthority(authorityB);
         assertEq(address(exec.hats()), authorityB);
         assertEq(exec.membershipAuthority(), authorityB);
 
-        // Rollback must restore the ORIGINAL legacy hats, not authorityA.
+        // Zero cannot restore Hats or clear the current authority.
+        vm.expectRevert(Executor.ZeroAddress.selector);
         exec.setMembershipAuthority(address(0));
-        assertEq(address(exec.hats()), address(legacyHats), "original legacy restored");
-        assertEq(exec.membershipAuthority(), address(0));
-    }
-
-    /*───────────────────── Rollback ─────────────────────*/
-    function testRollbackRestoresLegacy() public {
-        exec.setMembershipAuthority(authorityA);
-        vm.expectEmit(true, false, false, false, address(exec));
-        emit HatsRepointed(address(legacyHats));
-        exec.setMembershipAuthority(address(0));
-        assertEq(address(exec.hats()), address(legacyHats));
-        assertEq(exec.membershipAuthority(), address(0));
-    }
-
-    function testRollbackWhenNeverRepointedIsNoop() public {
-        exec.setMembershipAuthority(address(0));
-        assertEq(address(exec.hats()), address(legacyHats));
-        assertEq(exec.membershipAuthority(), address(0));
+        assertEq(exec.membershipAuthority(), authorityB);
     }
 
     /*───────────────────── Auth matrix ─────────────────────*/
+    function testCannotRepointToAnotherOrgsAuthority() public {
+        exec.setMembershipAuthority(authorityA);
+        address foreignAuthority = address(new MockModuleAuthority(address(legacyHats), stranger));
+        vm.expectRevert(Executor.UnauthorizedCaller.selector);
+        exec.setMembershipAuthority(foreignAuthority);
+        assertEq(exec.membershipAuthority(), authorityA);
+    }
+
+    function testUnmigratedLegacyHatsCannotMint() public {
+        // Model an upgraded V1 proxy: its first namespaced slot still holds real Hats.
+        vm.store(address(exec), keccak256("poa.executor.storage"), bytes32(uint256(uint160(address(legacyHats)))));
+        assertEq(exec.membershipAuthority(), address(0));
+        exec.setHatMinterAuthorization(stranger, true);
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = 1;
+        vm.prank(stranger);
+        vm.expectRevert(Executor.ZeroAddress.selector);
+        exec.mintHatsForUser(stranger, ids);
+        assertFalse(legacyHats.isWearerOfHat(stranger, 1));
+    }
+
     function testOwnerCanRepoint() public {
         exec.setMembershipAuthority(authorityA); // owner == address(this)
         assertEq(address(exec.hats()), authorityA);

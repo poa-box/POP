@@ -1,5 +1,7 @@
 // SPDX‑License‑Identifier: MIT
 pragma solidity ^0.8.20;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 /* forge‑std helpers */
 import "forge-std/Test.sol";
@@ -151,11 +153,8 @@ contract MockERC20 is IERC20 {
 
             bytes memory initData = abi.encodeCall(
                 HybridVoting.initialize,
-                (
-                    address(hats), // hats
-                    address(exec), // executor
-                    creatorHats, // allowed creator hats
-                    targets, // allowed target(s)
+                ( // hats
+                    address(exec), // allowed target(s)
                     uint8(50), // threshold %
                     uint32(0), // quorum (disabled)
                     classes // class configurations
@@ -168,6 +167,11 @@ contract MockERC20 is IERC20 {
             BeaconProxy proxy = new BeaconProxy(address(beacon), initData);
 
             hv = HybridVoting(payable(address(proxy)));
+            MockModuleAuthority moduleAuthority = new MockModuleAuthority(address(hats), address(exec));
+            moduleAuthority.setSubjects(AccessV2PermKeys.HV_CREATE, creatorHats);
+            vm.prank(address(exec));
+            hv.setMembershipAuthority(address(moduleAuthority));
+
             vm.label(address(hv), "HybridVoting");
         }
 
@@ -408,68 +412,7 @@ contract MockERC20 is IERC20 {
             hv.vote(proposalId, idx, w);
         }
 
-        function testSetCreatorHatAllowed() public {
-            // Test that executor can modify creator hat permissions
-            uint256 newCreatorHat = 99;
-            address newCreator = vm.addr(20);
-
-            // Give new creator the new hat
-            hats.mintHat(newCreatorHat, newCreator);
-
-            // Enable new hat as creator hat
-            vm.prank(address(exec));
-            hv.setCreatorHatAllowed(newCreatorHat, true);
-
-            // New creator should be able to create proposal
-            IExecutor.Call[][] memory batches = new IExecutor.Call[][](2);
-            batches[0] = new IExecutor.Call[](0);
-            batches[1] = new IExecutor.Call[](0);
-
-            vm.prank(newCreator);
-            uint256[] memory hatIds = new uint256[](0);
-            hv.createProposal(bytes("Test Proposal"), bytes32(0), 15, 2, batches, hatIds);
-            assertEq(hv.proposalsCount(), 1);
-
-            // Disable new hat
-            vm.prank(address(exec));
-            hv.setCreatorHatAllowed(newCreatorHat, false);
-
-            // Should now fail
-            vm.prank(newCreator);
-            vm.expectRevert(VotingErrors.Unauthorized.selector);
-            hv.createProposal(bytes("Test Proposal 2"), bytes32(0), 15, 2, batches, hatIds);
-        }
-
         /* ───────────────────────── UNAUTHORIZED ACCESS TESTS ───────────────────────── */
-        function testOnlyExecutorRevertWhenNonExecutorCallsAdminFunctions() public {
-            // Test that non-executors cannot call admin functions
-            vm.startPrank(nonExecutor);
-
-            // Pause
-            vm.expectRevert();
-            hv.pause();
-
-            // Set executor
-            vm.expectRevert();
-            hv.setConfig(HybridVoting.ConfigKey.EXECUTOR, abi.encode(nonExecutor));
-
-            // Set creator hat allowed
-            vm.expectRevert();
-            hv.setCreatorHatAllowed(CREATOR_HAT_ID, false);
-
-            // Set target allowed
-            vm.expectRevert();
-            hv.setConfig(HybridVoting.ConfigKey.TARGET_ALLOWED, abi.encode(address(0xDEAD), true));
-
-            // Set threshold
-            vm.expectRevert();
-            hv.setConfig(HybridVoting.ConfigKey.THRESHOLD, abi.encode(60));
-
-            // Split, quadratic, and min balance are now configured via setClasses
-            // These legacy config options no longer exist
-
-            vm.stopPrank();
-        }
 
         function testExecutorCanCallAdminFunctions() public {
             // Test that executor can call admin functions

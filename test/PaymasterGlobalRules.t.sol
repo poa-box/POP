@@ -878,15 +878,12 @@ contract PaymasterGlobalRulesTest is Test {
     }
 
     function _expectedRulebookPairs() internal pure returns (bytes32[] memory p) {
-        p = new bytes32[](67);
+        p = new bytes32[](56);
         uint256 n;
         bytes32 t = ModuleTypes.QUICK_JOIN_ID;
         p[n++] = _pair(t, QuickJoin.quickJoinWithUser.selector);
         p[n++] = _pair(t, QuickJoin.registerAndQuickJoin.selector);
         p[n++] = _pair(t, QuickJoin.registerAndQuickJoinWithPasskey.selector);
-        p[n++] = _pair(t, QuickJoin.claimHatsWithUser.selector);
-        p[n++] = _pair(t, QuickJoin.registerAndClaimHats.selector);
-        p[n++] = _pair(t, QuickJoin.registerAndClaimHatsWithPasskey.selector);
         t = ModuleTypes.TASK_MANAGER_ID;
         p[n++] = _pair(t, TaskManager.createTask.selector);
         p[n++] = _pair(t, TaskManager.createTasksBatch.selector);
@@ -920,14 +917,6 @@ contract PaymasterGlobalRulesTest is Test {
         p[n++] = _pair(t, PaymentManager.createDistribution.selector);
         p[n++] = _pair(t, PaymentManager.finalizeDistribution.selector);
         t = ModuleTypes.ELIGIBILITY_MODULE_ID;
-        p[n++] = _pair(t, EligibilityModule.claimVouchedHat.selector);
-        p[n++] = _pair(t, EligibilityModule.vouchFor.selector);
-        p[n++] = _pair(t, EligibilityModule.revokeVouch.selector);
-        p[n++] = _pair(t, EligibilityModule.applyForRole.selector);
-        p[n++] = _pair(t, EligibilityModule.withdrawApplication.selector);
-        p[n++] = _pair(t, EligibilityModule.kickWearer.selector);
-        p[n++] = _pair(t, EligibilityModule.finalizeKick.selector);
-        p[n++] = _pair(t, EligibilityModule.unkickWearer.selector);
         t = ModuleTypes.PARTICIPATION_TOKEN_ID;
         p[n++] = _pair(t, ParticipationToken.requestTokens.selector);
         p[n++] = _pair(t, ParticipationToken.approveRequest.selector);

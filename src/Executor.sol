@@ -2,10 +2,13 @@
 pragma solidity ^0.8.20;
 
 /* OpenZeppelin v5.3 Upgradeables */
-import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/PausableUpgradeable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
+import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/utils/PausableUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {SwitchableBeacon} from "./SwitchableBeacon.sol";
 
@@ -50,15 +53,11 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     /// @custom:storage-location erc7201:poa.executor.storage
     struct Layout {
         address allowedCaller; // sole authorised governor
-        IHats hats; // Hats Protocol interface (repointed to the MembershipAuthority when migrated, §4.7)
+        IHats hats; // authority address in the original slot; IHats type preserves storage layout
         mapping(address => bool) authorizedHatMinters; // contracts authorized to request hat minting
         address pendingCaller;
         uint256 callerChangeTimestamp;
-        // ─── Access v2 dual-path (append-only tail) ───
-        // Access v2 repoints `hats` itself to the org's MembershipAuthority (§4.7): there is NO second
-        // pointer. `legacyHats` stashes the ORIGINAL Hats address on the first repoint so a rollback
-        // (`setMembershipAuthority(0)`) can restore the byte-identical legacy read. address(0) = never
-        // repointed (still on legacy Hats).
+        // Reserved original Hats pointer from migration; never restored or written.
         address legacyHats;
     }
 
@@ -91,15 +90,11 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     }
 
     /* ─────────── Initialiser ─────────── */
-    function initialize(address owner_, address hats_) external initializer {
-        if (owner_ == address(0) || hats_ == address(0)) revert ZeroAddress();
+    function initialize(address owner_) external initializer {
+        if (owner_ == address(0)) revert ZeroAddress();
         __Ownable_init(owner_);
         __Pausable_init();
         __ReentrancyGuard_init();
-
-        Layout storage l = _layout();
-        l.hats = IHats(hats_);
-        emit HatsSet(hats_);
     }
 
     /* ─────────── Governor management ─────────── */
@@ -159,31 +154,15 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         emit HatMinterAuthorized(minter, authorized);
     }
 
-    /// @notice Repoint {hats} to the org's MembershipAuthority (or back to legacy Hats at `address(0)`).
-    /// @dev §4.7: the repoint IS the mechanism — there is NO second pointer. Every `hats()` consumer
-    ///      (ZkEmailInvites' hats-surface resolution, {mintHatsForUser}'s `l.hats.mintHat`) follows
-    ///      automatically because the authority exposes an IHats-shaped {mintHat}. On the FIRST repoint
-    ///      the original Hats address is stashed in `legacyHats`; `setMembershipAuthority(0)` restores it
-    ///      byte-identically (the rollback path). AUTH mirrors {setHatMinterAuthorization}: owner, the
-    ///      allowed caller (governance), or the Executor itself via a self-targeted batch (the sole
-    ///      other self-target-permitted selector) — so a renounced org can repoint through governance.
-    ///      Emits HatsRepointed.
+    /// @notice Set the org's nonzero MembershipAuthority. Governance-only; no legacy rollback.
     function setMembershipAuthority(address authority) external {
         Layout storage l = _layout();
         if (msg.sender != owner() && msg.sender != l.allowedCaller && msg.sender != address(this)) {
             revert UnauthorizedCaller();
         }
-        if (authority != address(0)) {
-            // Repoint: stash the original Hats on the first repoint only, then point `hats` at the authority.
-            if (l.legacyHats == address(0)) l.legacyHats = address(l.hats);
-            l.hats = IHats(authority);
-        } else {
-            // Rollback: restore the original Hats. No-op if never repointed (legacyHats == 0).
-            if (l.legacyHats != address(0)) {
-                l.hats = IHats(l.legacyHats);
-                l.legacyHats = address(0);
-            }
-        }
+        if (authority == address(0)) revert ZeroAddress();
+        if (IMembershipAuthority(authority).executor() != address(this)) revert UnauthorizedCaller();
+        l.hats = IHats(authority);
         emit HatsRepointed(address(l.hats));
     }
 
@@ -194,7 +173,10 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         // L-60 fix: cap the caller-supplied array to bound gas / prevent grief.
         if (hatIds.length > MAX_HATS_PER_MINT) revert TooManyHats();
 
-        // Mint each hat to the user
+        address authority = membershipAuthority();
+        if (authority == address(0)) revert ZeroAddress();
+
+        // Mint each authority subject to the user
         for (uint256 i = 0; i < hatIds.length; i++) {
             l.hats.mintHat(hatIds[i], user);
         }
@@ -214,7 +196,7 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
                 // Self-targeting is forbidden EXCEPT for a narrow allowlist of admin functions that
                 // governance must be able to invoke on the Executor itself (impossible otherwise once
                 // ownership is renounced): setHatMinterAuthorization and setMembershipAuthority (the
-                // §4.7 hats repoint / rollback). Every other self-admin function (setCaller, pause,
+                // authority repoint). Every other self-admin function (setCaller, pause,
                 // sweep, …) still reverts TargetSelf.
                 bytes4 sel = bytes4(batch[i].data);
                 if (sel != this.setHatMinterAuthorization.selector && sel != this.setMembershipAuthority.selector) {
@@ -264,7 +246,7 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
      * @dev Bootstrap-only lifecycle (precedent: {configureParticipationToken}/{configureVouching},
      *      the C-01 pattern). During org deployment the owner is the OrgDeployer, so this lets the
      *      deployer invoke executor-gated setters on freshly deployed modules — e.g.
-     *      `EligibilityModule.setRoleManager` (where this Executor is the superAdmin) and the sibling
+     *      authority governance configuration and the sibling
      *      modules' `setConfigAdmin` (executor-gated) — with `msg.sender == executor`, exactly as a
      *      governance batch would. It is DEAD on live orgs: immediately after deployment OrgDeployer
      *      calls `renounceOwnership()`, so `owner() == address(0)` and this reverts for everyone.
@@ -302,85 +284,12 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         }
     }
 
-    /**
-     * @notice Configure vouching on EligibilityModule during initial setup
-     * @dev Only callable by owner before renouncing ownership
-     * @param eligibilityModule Address of the EligibilityModule
-     * @param hatId Hat ID to configure vouching for
-     * @param quorum Number of vouches required
-     * @param membershipHatId Hat ID whose wearers can vouch
-     * @param combineWithHierarchy Whether to combine with parent hat eligibility
-     */
-    function configureVouching(
-        address eligibilityModule,
-        uint256 hatId,
-        uint32 quorum,
-        uint256 membershipHatId,
-        bool combineWithHierarchy
-    ) external onlyOwner {
-        if (eligibilityModule == address(0)) revert ZeroAddress();
-        (bool success,) = eligibilityModule.call(
-            abi.encodeWithSignature(
-                "configureVouching(uint256,uint32,uint256,bool)", hatId, quorum, membershipHatId, combineWithHierarchy
-            )
-        );
-        require(success, "configureVouching failed");
-    }
-
-    /**
-     * @notice Batch configure vouching for multiple hats during initial setup
-     * @dev Only callable by owner before renouncing ownership - gas optimized for org deployment
-     * @param eligibilityModule Address of the EligibilityModule
-     * @param hatIds Array of hat IDs to configure
-     * @param quorums Array of quorum values
-     * @param membershipHatIds Array of membership hat IDs
-     * @param combineWithHierarchyFlags Array of combine flags
-     */
-    function batchConfigureVouching(
-        address eligibilityModule,
-        uint256[] calldata hatIds,
-        uint32[] calldata quorums,
-        uint256[] calldata membershipHatIds,
-        bool[] calldata combineWithHierarchyFlags
-    ) external onlyOwner {
-        if (eligibilityModule == address(0)) revert ZeroAddress();
-        (bool success,) = eligibilityModule.call(
-            abi.encodeWithSignature(
-                "batchConfigureVouching(uint256[],uint32[],uint256[],bool[])",
-                hatIds,
-                quorums,
-                membershipHatIds,
-                combineWithHierarchyFlags
-            )
-        );
-        require(success, "batchConfigureVouching failed");
-    }
-
-    /**
-     * @notice Set default eligibility for a hat during initial setup
-     * @dev Only callable by owner before renouncing ownership
-     * @param eligibilityModule Address of the EligibilityModule
-     * @param hatId Hat ID to set default eligibility for
-     * @param eligible Whether wearers are eligible by default
-     * @param standing Whether wearers have good standing by default
-     */
-    function setDefaultEligibility(address eligibilityModule, uint256 hatId, bool eligible, bool standing)
-        external
-        onlyOwner
-    {
-        if (eligibilityModule == address(0)) revert ZeroAddress();
-        (bool success,) = eligibilityModule.call(
-            abi.encodeWithSignature("setDefaultEligibility(uint256,bool,bool)", hatId, eligible, standing)
-        );
-        require(success, "setDefaultEligibility failed");
-    }
-
     /* ─────────── View Helpers ─────────── */
     function allowedCaller() external view returns (address) {
         return _layout().allowedCaller;
     }
 
-    /// @notice The org's Hats Protocol instance.
+    /// @notice Historical address getter; migrated orgs return their authority here.
     /// @dev    Exposed so authorized hat-minter modules (e.g. ZkEmailInvites) can reach the same Hats
     ///         reference the Executor mints through — without carrying a duplicate, migration-sensitive
     ///         Hats field in their own ERC-7201 storage. Pure getter: safe to add via impl upgrade.
@@ -393,11 +302,15 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         return _layout().authorizedHatMinters[minter];
     }
 
-    /// @notice The org's MembershipAuthority when migrated (§4.7), else `address(0)` (legacy Hats).
-    /// @dev Derived: once repointed, `legacyHats` holds the original and `hats` IS the authority.
-    function membershipAuthority() external view returns (address) {
-        Layout storage l = _layout();
-        return l.legacyHats == address(0) ? address(0) : address(l.hats);
+    /// @notice The org's authority, or zero for an inactive, unmigrated module.
+    function membershipAuthority() public view returns (address) {
+        address authority = address(_layout().hats);
+        if (authority == address(0)) return address(0);
+        try IMembershipAuthority(authority).executor() returns (address executor_) {
+            return executor_ == address(this) ? authority : address(0);
+        } catch {
+            return address(0);
+        }
     }
 
     /* accept ETH for payable calls within a batch */

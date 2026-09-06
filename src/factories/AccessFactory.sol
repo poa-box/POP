@@ -181,11 +181,7 @@ contract AccessFactory {
 
         /* 1. Deploy QuickJoin (without registration) */
         {
-            // Auto-join subjects for new members. Once the authority is wired these are re-derived
-            // from the QJ_AUTOJOIN perm rows; the stored list is the rollback-path copy.
-            uint256[] memory memberSubjects =
-                RoleResolver.resolveRoleBitmap(params.roleSubjectIds, params.roleAssignments.quickJoinRolesBitmap);
-
+            // Auto-join eligibility is seeded on MembershipAuthority by OrgDeployer.
             quickJoinBeacon = _createBeacon(
                 ModuleTypes.QUICK_JOIN_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)
             );
@@ -201,7 +197,7 @@ contract AccessFactory {
             });
 
             result.quickJoin = ModuleDeploymentLib.deployQuickJoin(
-                config, params.executor, params.registryAddr, address(this), memberSubjects, quickJoinBeacon
+                config, params.executor, params.registryAddr, address(this), quickJoinBeacon
             );
         }
 
@@ -211,12 +207,6 @@ contract AccessFactory {
                 ? params.tokenName
                 : string(abi.encodePacked(params.orgName, " Token"));
             string memory tSymbol = bytes(params.tokenSymbol).length > 0 ? params.tokenSymbol : "PT";
-
-            uint256[] memory memberSubjects =
-                RoleResolver.resolveRoleBitmap(params.roleSubjectIds, params.roleAssignments.tokenMemberRolesBitmap);
-
-            uint256[] memory approverSubjects =
-                RoleResolver.resolveRoleBitmap(params.roleSubjectIds, params.roleAssignments.tokenApproverRolesBitmap);
 
             participationTokenBeacon = _createBeacon(
                 ModuleTypes.PARTICIPATION_TOKEN_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)
@@ -233,7 +223,7 @@ contract AccessFactory {
             });
 
             result.participationToken = ModuleDeploymentLib.deployParticipationToken(
-                config, params.executor, tName, tSymbol, memberSubjects, approverSubjects, participationTokenBeacon
+                config, params.executor, tName, tSymbol, participationTokenBeacon
             );
         }
 

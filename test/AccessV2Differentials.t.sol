@@ -192,113 +192,6 @@ contract AccessV2DifferentialsLocalTest is Test {
         (winner, valid) = dd.announceWinner(id);
     }
 
-    function test_obl5_rollbackRehearsal_ddModule() public {
-        MockHats hats = new MockHats();
-        DiffMockExecutor exec = new DiffMockExecutor();
-        MembershipAuthority auth = _deployAuthority(keccak256("org.rollback"));
-
-        DirectDemocracyVoting impl = new DirectDemocracyVoting();
-        uint256[] memory vh = new uint256[](1);
-        vh[0] = VOTING_HAT;
-        uint256[] memory ch = new uint256[](1);
-        ch[0] = CREATOR_HAT;
-        bytes memory data = abi.encodeCall(
-            DirectDemocracyVoting.initialize, (address(hats), address(exec), vh, ch, new address[](0), 50, 0)
-        );
-        DirectDemocracyVoting dd = DirectDemocracyVoting(address(new ERC1967Proxy(address(impl), data)));
-
-        // ── Phase A: LEGACY baseline (authority == 0) ──
-        (uint256 winL, bool validL) = _ddLegacyActionSet(dd, hats);
-        assertTrue(validL, "legacy baseline proposal valid");
-
-        // ── Phase B: go to v2 rails — the legacy CREATOR_HAT wearer is now dead, needs DD_CREATE ──
-        vm.prank(address(exec));
-        dd.setMembershipAuthority(address(auth));
-        assertEq(dd.membershipAuthority(), address(auth), "on v2 rails");
-        vm.prank(creator); // already wears CREATOR_HAT, but v2 arm ignores hats
-        vm.expectRevert(VotingErrors.Unauthorized.selector);
-        dd.createProposal(bytes("v2"), bytes32(0), 10, 2, _emptyBatches(2), new uint256[](0));
-
-        // ── Phase C: ROLLBACK to zero → legacy resumes BYTE-IDENTICALLY ──
-        vm.prank(address(exec));
-        dd.setMembershipAuthority(address(0));
-        assertEq(dd.membershipAuthority(), address(0), "rolled back to legacy");
-        (uint256 winR, bool validR) = _ddLegacyActionSet(dd, hats);
-        assertEq(winR, winL, "rollback winner byte-identical to legacy baseline");
-        assertEq(validR, validL, "rollback validity byte-identical to legacy baseline");
-
-        // ── Phase D: RE-SET v2 → v2 gate active again ──
-        vm.prank(address(exec));
-        dd.setMembershipAuthority(address(auth));
-        vm.prank(creator);
-        vm.expectRevert(VotingErrors.Unauthorized.selector);
-        dd.createProposal(bytes("v2b"), bytes32(0), 10, 2, _emptyBatches(2), new uint256[](0));
-    }
-
-    function test_obl5_rollbackRehearsal_tmModule() public {
-        MockHats hats = new MockHats();
-        DiffMockPToken token = new DiffMockPToken();
-        MembershipAuthority auth = _deployAuthority(keccak256("org.rollback.tm"));
-
-        uint256[] memory ch = new uint256[](1);
-        ch[0] = CREATOR_HAT;
-        TMDiffHarness impl = new TMDiffHarness();
-        bytes memory initCall =
-            abi.encodeCall(TaskManager.initialize, (address(token), address(hats), ch, executor, address(0)));
-        TMDiffHarness tm = TMDiffHarness(address(new ERC1967Proxy(address(impl), initCall)));
-
-        // Legacy baseline: alice wears HAT 101 with global CREATE.
-        hats.mintHat(101, alice);
-        vm.prank(executor);
-        tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(uint256(101), TaskPerm.CREATE));
-        uint8 legacyMask = tm.permMask(alice, bytes32("p1"));
-        assertEq(legacyMask, TaskPerm.CREATE, "legacy baseline mask");
-
-        // v2 rails — alice has no perms on the fresh authority.
-        vm.prank(executor);
-        tm.setMembershipAuthority(address(auth));
-        assertEq(tm.permMask(alice, bytes32("p1")), 0, "authority arm overrides legacy");
-
-        // Rollback → byte-identical legacy answer.
-        vm.prank(executor);
-        tm.setMembershipAuthority(address(0));
-        assertEq(tm.permMask(alice, bytes32("p1")), legacyMask, "rollback restores legacy byte-identically");
-
-        // Re-set → v2 arm again.
-        vm.prank(executor);
-        tm.setMembershipAuthority(address(auth));
-        assertEq(tm.permMask(alice, bytes32("p1")), 0, "v2 resumes");
-    }
-
-    function test_obl5_executorHatsRepointRoundTrip() public {
-        // The Executor's setMembershipAuthority IS the l.hats switch (§4.7): repoint stashes legacyHats,
-        // rollback restores it byte-identically. hats() must track the pointer both ways.
-        MockHats legacyHats = new MockHats();
-        MembershipAuthority auth = _deployAuthority(keccak256("org.exec"));
-
-        Executor impl = new Executor();
-        Executor ex = Executor(
-            payable(address(
-                    new ERC1967Proxy(
-                        address(impl), abi.encodeCall(Executor.initialize, (address(this), address(legacyHats)))
-                    )
-                ))
-        );
-        assertEq(address(ex.hats()), address(legacyHats), "starts on legacy hats");
-
-        // Repoint (owner path).
-        ex.setMembershipAuthority(address(auth));
-        assertEq(address(ex.hats()), address(auth), "executor.hats() follows the authority");
-
-        // Rollback restores the ORIGINAL hats pointer byte-identically.
-        ex.setMembershipAuthority(address(0));
-        assertEq(address(ex.hats()), address(legacyHats), "rollback restores original hats pointer");
-
-        // Re-set resumes v2.
-        ex.setMembershipAuthority(address(auth));
-        assertEq(address(ex.hats()), address(auth), "v2 resumes on executor");
-    }
-
     /*───────────────────────────────────────────────────────────────────────────────────────────
       OBLIGATION 6 — Fold-mirror / slot-mirror conformance for Wave-B module side-mappings.
 
@@ -320,48 +213,6 @@ contract AccessV2DifferentialsLocalTest is Test {
         });
     }
 
-    function test_obl6_hvSideMappingSlotMirror() public {
-        MockHats hats = new MockHats();
-        DiffMockExecutor exec = new DiffMockExecutor();
-
-        uint256[] memory memberHats = new uint256[](1);
-        memberHats[0] = 1;
-        HybridVoting.ClassConfig[] memory classes = new HybridVoting.ClassConfig[](1);
-        classes[0] = _hvClass(memberHats);
-        uint256[] memory creatorHats = new uint256[](1);
-        creatorHats[0] = CREATOR_HAT;
-
-        HybridVoting impl = new HybridVoting();
-        bytes memory data = abi.encodeCall(
-            HybridVoting.initialize,
-            (address(hats), address(exec), creatorHats, new address[](0), uint8(50), uint32(0), classes)
-        );
-        HybridVoting hv = HybridVoting(payable(address(new ERC1967Proxy(address(impl), data))));
-
-        // Pin the shared ERC-7201 slot constant used by all three libs.
-        bytes32 SLOT = keccak256("poa.hybridvoting.v2.storage");
-        assertEq(SLOT, keccak256("poa.hybridvoting.v2.storage"), "HV shared slot constant pinned");
-
-        // CONFIG-lib write (HybridVotingConfig.setClassSubject via delegatecall) → hub-accessor read.
-        vm.prank(address(exec));
-        hv.setConfigAdmin(address(this));
-        uint256 SUBJ = 0xABCDEF;
-        hv.setClassSubject(0, SUBJ); // allocates classId 1 for idx 0
-        assertEq(hv.classIdOfIndex(0), 1, "config-lib allocated classId visible via accessor");
-        assertEq(hv.classSubjectOf(1), SUBJ, "config-lib classSubject visible via accessor");
-
-        // PROPOSALS-lib write (HybridVotingProposals.createProposal snapshots proposalClassSubjects)
-        // → hub-accessor read: the snapshot mapping resolves the SAME slot the config lib wrote.
-        uint256 pid = hv.proposalsCount();
-        hats.mintHat(CREATOR_HAT, creator); // legacy creator gate
-        vm.prank(creator);
-        hv.createProposal(bytes("p"), bytes32(0), 15, 2, _emptyBatches(2), new uint256[](0));
-        // classSubject snapshot for idx 0 must equal the config-lib-written SUBJ (cross-lib read).
-        assertEq(hv.proposalClassSubject(pid, 0), SUBJ, "proposals-lib snapshot mirrors config-lib write");
-        // proposalCreatedAt side-mapping (W1) written by the proposals lib, read by the accessor.
-        assertEq(hv.proposalCreatedAt(pid), uint64(block.timestamp), "proposalCreatedAt side-mapping mirrored");
-    }
-
     function test_obl6_ddSideMappingSlotMirror() public {
         MockHats hats = new MockHats();
         DiffMockExecutor exec = new DiffMockExecutor();
@@ -371,9 +222,7 @@ contract AccessV2DifferentialsLocalTest is Test {
         vh[0] = VOTING_HAT;
         uint256[] memory ch = new uint256[](1);
         ch[0] = CREATOR_HAT;
-        bytes memory data = abi.encodeCall(
-            DirectDemocracyVoting.initialize, (address(hats), address(exec), vh, ch, new address[](0), 50, 0)
-        );
+        bytes memory data = abi.encodeCall(DirectDemocracyVoting.initialize, (address(exec), new address[](0), 50, 0));
         DirectDemocracyVoting dd = DirectDemocracyVoting(address(new ERC1967Proxy(address(impl), data)));
 
         // proposalCreatedAt (W1 side-mapping) is written on createProposal and read via the accessor
@@ -381,7 +230,7 @@ contract AccessV2DifferentialsLocalTest is Test {
         hats.mintHat(CREATOR_HAT, creator);
         uint256 t0 = block.timestamp;
         uint256 id = dd.proposalsCount();
-        vm.prank(creator);
+        vm.prank(address(exec));
         dd.createProposal(bytes("p"), bytes32(0), 10, 2, _emptyBatches(2), new uint256[](0));
         assertEq(dd.proposalCreatedAt(id), uint64(t0), "DD proposalCreatedAt side-mapping mirrored");
         assertTrue(dd.proposalCreatedAt(id) != 0, "side-mapping non-zero => slot resolved");
@@ -437,8 +286,7 @@ contract AccessV2DifferentialsLocalTest is Test {
         uint256[] memory ch = new uint256[](1);
         ch[0] = CREATOR_HAT;
         TMDiffHarness impl = new TMDiffHarness();
-        bytes memory initCall =
-            abi.encodeCall(TaskManager.initialize, (address(token), address(hats), ch, executor, address(0)));
+        bytes memory initCall = abi.encodeCall(TaskManager.initialize, (address(token), ch, executor, address(0)));
         TMDiffHarness tm = TMDiffHarness(address(new ERC1967Proxy(address(impl), initCall)));
 
         uint256 sid = _role(auth, "Taskers", 0);
