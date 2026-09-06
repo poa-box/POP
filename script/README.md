@@ -34,13 +34,13 @@ Deploy all protocol infrastructure contracts to the target chain. This is done *
 
 ```bash
 # Deploy infrastructure (uses DEPLOYER_PRIVATE_KEY from .env)
-forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
+forge script script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure \
   --rpc-url sepolia \
   --broadcast
 
 # With verification (requires ETHERSCAN_API_KEY in .env):
 source .env  # Load ETHERSCAN_API_KEY into your shell
-forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
+forge script script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure \
   --rpc-url sepolia \
   --broadcast \
   --verify \
@@ -57,10 +57,11 @@ forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
 - OrgDeployer (orchestrates org creation)
 - Factory contracts (GovernanceFactory, AccessFactory, ModulesFactory)
 - Global UniversalAccountRegistry
-- HatsTreeSetup helper
+- PaymasterHub (gas sponsorship) + the seeded global rulebook
+- AuthorityRouter singleton, with PaymasterHub and OrgRegistry repointed at it (Access v2 read path)
 
 **Output:**
-The script automatically saves deployment addresses to `script/infrastructure.json`. This file is committed to the repo and automatically loaded by org deployments - no manual copying needed!
+The script automatically saves deployment addresses to `script/config/infrastructure.json`. This file is committed to the repo and automatically loaded by org deployments - no manual copying needed!
 
 ### Step 2: Configure Your Organization
 
@@ -153,13 +154,13 @@ Create a JSON configuration file for your organization. See example configs:
 
 ```bash
 # Deploy org on Base Sepolia (recommended - higher gas limits)
-FOUNDRY_PROFILE=production forge script script/DeployOrg.s.sol:DeployOrg \
+FOUNDRY_PROFILE=production forge script script/org/DeployOrg.s.sol:DeployOrg \
   --rpc-url base-sepolia \
   --broadcast
 
 # With verification on Base Sepolia:
 source .env  # Load ETHERSCAN_API_KEY into your shell
-FOUNDRY_PROFILE=production forge script script/DeployOrg.s.sol:DeployOrg \
+FOUNDRY_PROFILE=production forge script script/org/DeployOrg.s.sol:DeployOrg \
   --rpc-url base-sepolia \
   --broadcast \
   --verify \
@@ -167,13 +168,13 @@ FOUNDRY_PROFILE=production forge script script/DeployOrg.s.sol:DeployOrg \
   --verifier-url https://api-sepolia.basescan.org/api
 
 # Or use Optimism Sepolia:
-FOUNDRY_PROFILE=production forge script script/DeployOrg.s.sol:DeployOrg \
+FOUNDRY_PROFILE=production forge script script/org/DeployOrg.s.sol:DeployOrg \
   --rpc-url optimism-sepolia \
   --broadcast
 
 # Or with a custom config:
 ORG_CONFIG_PATH=script/my-org-config.json \
-FOUNDRY_PROFILE=production forge script script/DeployOrg.s.sol:DeployOrg \
+FOUNDRY_PROFILE=production forge script script/org/DeployOrg.s.sol:DeployOrg \
   --rpc-url base-sepolia \
   --broadcast
 ```
@@ -209,7 +210,7 @@ cp .env.example .env
 # Edit .env with your private key and optionally Etherscan API key
 
 # 2. Deploy infrastructure on Base Sepolia (recommended for org deployments)
-forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
+forge script script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure \
   --rpc-url base-sepolia \
   --broadcast
 
@@ -221,7 +222,7 @@ forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
 ```bash
 # Everything is auto-loaded from .env and infrastructure.json - just deploy!
 # NOTE: Must use same network as infrastructure deployment
-FOUNDRY_PROFILE=production forge script script/DeployOrg.s.sol:DeployOrg \
+FOUNDRY_PROFILE=production forge script script/org/DeployOrg.s.sol:DeployOrg \
   --rpc-url base-sepolia \
   --broadcast
 ```
@@ -312,7 +313,7 @@ anvil --fork-url https://sepolia.drpc.org
 # 2. Deploy (use anvil's default private key)
 export DEPLOYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 
-forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
+forge script script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure \
   --rpc-url local \
   --broadcast
 ```
@@ -354,7 +355,7 @@ export ETHERSCAN_API_KEY=YOUR_API_KEY_HERE
 
 ```bash
 source .env  # Load ETHERSCAN_API_KEY into your shell
-forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
+forge script script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure \
   --rpc-url sepolia \
   --broadcast \
   --verify \
@@ -366,7 +367,7 @@ forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
 ```bash
 # Base Sepolia example
 source .env  # Load ETHERSCAN_API_KEY into your shell
-forge script script/DeployInfrastructure.s.sol:DeployInfrastructure \
+forge script script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure \
   --rpc-url base-sepolia \
   --broadcast \
   --verify \

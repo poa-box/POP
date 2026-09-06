@@ -4,8 +4,9 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 import "forge-std/console.sol";
 import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-// Shared contract type registry (single source of truth for the 13 application types)
+// Shared contract type registry (single source of truth for the application types)
 import {DeployHelper} from "../helpers/DeployHelper.s.sol";
 
 // Infrastructure
@@ -14,6 +15,7 @@ import {PoaManager} from "../../src/PoaManager.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
 import {OrgDeployer, ITaskManagerBootstrap} from "../../src/OrgDeployer.sol";
 import {PaymasterHub} from "../../src/PaymasterHub.sol";
+import {AuthorityRouter} from "../../src/AuthorityRouter.sol";
 import {DefaultGlobalRules} from "../helpers/DefaultGlobalRules.sol";
 import {UniversalAccountRegistry} from "../../src/UniversalAccountRegistry.sol";
 
@@ -21,7 +23,6 @@ import {UniversalAccountRegistry} from "../../src/UniversalAccountRegistry.sol";
 import {GovernanceFactory} from "../../src/factories/GovernanceFactory.sol";
 import {AccessFactory} from "../../src/factories/AccessFactory.sol";
 import {ModulesFactory} from "../../src/factories/ModulesFactory.sol";
-import {HatsTreeSetup} from "../../src/HatsTreeSetup.sol";
 
 // Cross-chain
 import {DeterministicDeployer} from "../../src/crosschain/DeterministicDeployer.sol";
@@ -72,12 +73,12 @@ contract DeployHomeChain is DeployHelper {
         address orgRegistry;
         address orgDeployer;
         address paymasterHub;
+        address authorityRouter;
         address globalAccountRegistry;
         address universalPasskeyFactory;
         address governanceFactory;
         address accessFactory;
         address modulesFactory;
-        address hatsTreeSetup;
     }
 
     /*═══════════════════════════ MAIN ═══════════════════════════*/
@@ -194,7 +195,6 @@ contract DeployHomeChain is DeployHelper {
         infra.governanceFactory = address(new GovernanceFactory());
         infra.accessFactory = address(new AccessFactory());
         infra.modulesFactory = address(new ModulesFactory());
-        infra.hatsTreeSetup = address(new HatsTreeSetup());
 
         // Deploy PaymasterHub
         address paymasterHubImpl = address(new PaymasterHub());
@@ -213,6 +213,16 @@ contract DeployHomeChain is DeployHelper {
         PoaManager(infra.poaManager)
             .adminCall(infra.paymasterHub, abi.encodeWithSignature("unpauseSolidarityDistribution()"));
         console.log("Solidarity distribution unpaused for onboarding");
+
+        // Access-v2 read path: deploy the AuthorityRouter singleton and repoint the hub + OrgRegistry
+        // at it (see DeployHelper._wireAuthorityRouter — without this every org-admin surface is dead).
+        {
+            address routerImpl = address(new AuthorityRouter());
+            PoaManager(infra.poaManager).addContractType("AuthorityRouter", routerImpl);
+            infra.authorityRouter = _wireAuthorityRouter(
+                PoaManager(infra.poaManager), routerImpl, infra.orgRegistry, infra.paymasterHub, deployer
+            );
+        }
 
         // Seed the global rulebook — without this, orgs deployed with autoWhitelistContracts
         // resolve ZERO sponsored selectors (the deployer registers target types only).
@@ -240,14 +250,13 @@ contract DeployHomeChain is DeployHelper {
         // Deploy OrgDeployer proxy
         address deployerBeacon = PoaManager(infra.poaManager).getBeaconById(keccak256("OrgDeployer"));
         bytes memory orgDeployerInit = abi.encodeWithSignature(
-            "initialize(address,address,address,address,address,address,address,address)",
+            "initialize(address,address,address,address,address,address,address)",
             infra.governanceFactory,
             infra.accessFactory,
             infra.modulesFactory,
             infra.poaManager,
             infra.orgRegistry,
             HATS_PROTOCOL,
-            infra.hatsTreeSetup,
             infra.paymasterHub
         );
         infra.orgDeployer = address(new BeaconProxy(deployerBeacon, orgDeployerInit));
@@ -372,15 +381,12 @@ contract DeployHomeChain is DeployHelper {
             image: memberImage,
             metadataCID: memberMetadata,
             canVote: true,
-            vouching: RoleConfigStructs.RoleVouchingConfig({
-                enabled: true, quorum: 1, voucherRoleIndex: 1, combineWithHierarchy: false
-            }),
-            defaults: RoleConfigStructs.RoleEligibilityDefaults({eligible: true, standing: true}),
-            hierarchy: RoleConfigStructs.RoleHierarchyConfig({adminRoleIndex: type(uint256).max}),
+            open: false, // vouch-gated, not self-claimable
+            maxMembers: 0,
+            vouching: RoleConfigStructs.RoleVouchingConfig({enabled: true, quorum: 1, voucherRoleIndex: 1}),
             distribution: RoleConfigStructs.RoleDistributionConfig({
                 mintToDeployer: false, additionalWearers: emptyAddrs
-            }),
-            hatConfig: RoleConfigStructs.HatConfig({maxSupply: type(uint32).max, mutableHat: true})
+            })
         });
 
         // Role 1: CONTRIBUTOR (can create tasks/projects/approve, deployer gets this)
@@ -389,16 +395,20 @@ contract DeployHomeChain is DeployHelper {
             image: contributorImage,
             metadataCID: contributorMetadata,
             canVote: true,
-            vouching: RoleConfigStructs.RoleVouchingConfig({
-                enabled: false, quorum: 0, voucherRoleIndex: 0, combineWithHierarchy: false
-            }),
-            defaults: RoleConfigStructs.RoleEligibilityDefaults({eligible: true, standing: true}),
-            hierarchy: RoleConfigStructs.RoleHierarchyConfig({adminRoleIndex: type(uint256).max}),
+            open: false,
+            maxMembers: 0,
+            vouching: RoleConfigStructs.RoleVouchingConfig({enabled: false, quorum: 0, voucherRoleIndex: 0}),
             distribution: RoleConfigStructs.RoleDistributionConfig({
                 mintToDeployer: true, additionalWearers: emptyAddrs
-            }),
-            hatConfig: RoleConfigStructs.HatConfig({maxSupply: type(uint32).max, mutableHat: true})
+            })
         });
+
+        // --- Groups ---
+        // "Contributors" is the group restricted polls and manager delegation point at.
+        params.groups = new RoleConfigStructs.GroupConfig[](1);
+        uint256[] memory contributorOnly = new uint256[](1);
+        contributorOnly[0] = 1;
+        params.groups[0] = RoleConfigStructs.GroupConfig({name: "Contributors", memberRoleIndices: contributorOnly});
 
         // --- Voting Classes ---
         params.hybridClasses = new IHybridVotingInit.ClassConfig[](2);
@@ -448,11 +458,11 @@ contract DeployHomeChain is DeployHelper {
 
         // --- Other Config ---
         params.ddInitialTargets = new address[](0);
-        params.metadataAdminRoleIndex = type(uint256).max; // Skip — topHat fallback
+        params.metadataAdminRoleIndex = 1; // CONTRIBUTOR holds SUBJECT_RENAME
         params.educationHubConfig = ModulesFactory.EducationHubConfig({enabled: true});
         params.passkeyEnabled = false;
         // bootstrap is left default (empty)
-        params.paymasterConfig.operatorRoleIndex = type(uint256).max; // skip operator, topHat-only
+        params.paymasterConfig.operatorRoleIndex = type(uint256).max; // skip operator, admin-subject only
 
         console.log("\nDeploying governance org: Poa");
 
@@ -498,12 +508,12 @@ contract DeployHomeChain is DeployHelper {
         vm.serializeAddress(home, "orgRegistry", infra.orgRegistry);
         vm.serializeAddress(home, "orgDeployer", infra.orgDeployer);
         vm.serializeAddress(home, "paymasterHub", infra.paymasterHub);
+        vm.serializeAddress(home, "authorityRouter", infra.authorityRouter);
         vm.serializeAddress(home, "globalAccountRegistry", infra.globalAccountRegistry);
         vm.serializeAddress(home, "universalPasskeyFactory", infra.universalPasskeyFactory);
         vm.serializeAddress(home, "governanceFactory", infra.governanceFactory);
         vm.serializeAddress(home, "accessFactory", infra.accessFactory);
         vm.serializeAddress(home, "modulesFactory", infra.modulesFactory);
-        vm.serializeAddress(home, "hatsTreeSetup", infra.hatsTreeSetup);
         vm.serializeAddress(home, "hub", hub);
         string memory homeJson = vm.serializeString(home, "governance", govJson);
 
@@ -545,12 +555,12 @@ contract DeploySatellite is DeployHelper {
         address orgRegistry;
         address orgDeployer;
         address paymasterHub;
+        address authorityRouter;
         address globalAccountRegistry;
         address universalPasskeyFactory;
         address governanceFactory;
         address accessFactory;
         address modulesFactory;
-        address hatsTreeSetup;
     }
 
     function run() public {
@@ -636,7 +646,6 @@ contract DeploySatellite is DeployHelper {
         infra.governanceFactory = address(new GovernanceFactory());
         infra.accessFactory = address(new AccessFactory());
         infra.modulesFactory = address(new ModulesFactory());
-        infra.hatsTreeSetup = address(new HatsTreeSetup());
         console.log("Factories deployed");
 
         // --- OrgRegistry proxy ---
@@ -659,17 +668,27 @@ contract DeploySatellite is DeployHelper {
         pm.adminCall(infra.paymasterHub, abi.encodeWithSignature("unpauseSolidarityDistribution()"));
         console.log("Solidarity distribution unpaused for onboarding");
 
+        // --- AuthorityRouter singleton (Access-v2 read path) ---
+        // The impl was DD-deployed + type-registered by _deployAndRegisterInfraTypesDD; the singleton
+        // proxy is wired here, before OrgRegistry ownership leaves the deployer.
+        infra.authorityRouter = _wireAuthorityRouter(
+            pm,
+            pm.getCurrentImplementationById(keccak256("AuthorityRouter")),
+            infra.orgRegistry,
+            infra.paymasterHub,
+            deployer
+        );
+
         // --- OrgDeployer proxy ---
         address deployerBeacon = pm.getBeaconById(keccak256("OrgDeployer"));
         bytes memory orgDeployerInit = abi.encodeWithSignature(
-            "initialize(address,address,address,address,address,address,address,address)",
+            "initialize(address,address,address,address,address,address,address)",
             infra.governanceFactory,
             infra.accessFactory,
             infra.modulesFactory,
             address(pm),
             infra.orgRegistry,
             HATS_PROTOCOL,
-            infra.hatsTreeSetup,
             infra.paymasterHub
         );
         infra.orgDeployer = address(new BeaconProxy(deployerBeacon, orgDeployerInit));
@@ -760,12 +779,12 @@ contract DeploySatellite is DeployHelper {
         vm.serializeAddress(satObj, "orgRegistry", infra.orgRegistry);
         vm.serializeAddress(satObj, "orgDeployer", infra.orgDeployer);
         vm.serializeAddress(satObj, "paymasterHub", infra.paymasterHub);
+        vm.serializeAddress(satObj, "authorityRouter", infra.authorityRouter);
         vm.serializeAddress(satObj, "globalAccountRegistry", infra.globalAccountRegistry);
         vm.serializeAddress(satObj, "universalPasskeyFactory", infra.universalPasskeyFactory);
         vm.serializeAddress(satObj, "governanceFactory", infra.governanceFactory);
         vm.serializeAddress(satObj, "accessFactory", infra.accessFactory);
-        vm.serializeAddress(satObj, "modulesFactory", infra.modulesFactory);
-        string memory satJson = vm.serializeAddress(satObj, "hatsTreeSetup", infra.hatsTreeSetup);
+        string memory satJson = vm.serializeAddress(satObj, "modulesFactory", infra.modulesFactory);
 
         string memory filename =
             string.concat("script/config/satellite-state-", vm.toString(uint256(satDomain)), ".json");

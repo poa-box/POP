@@ -178,10 +178,10 @@ This creates:
 ┌───────────────────┐            ┌───────────────────┐            ┌───────────────────┐
 │    Governance     │            │      Access       │            │    Operations     │
 │                   │            │                   │            │                   │
-│ • DirectDemocracy │            │ • QuickJoin       │            │ • TaskManager     │
-│ • HybridVoting    │            │ • Participation   │            │ • EducationHub    │
-│ • Executor        │            │   Token           │            │ • PaymentManager  │
-│ • Hats Protocol   │            │                   │            │                   │
+│ • DirectDemocracy │            │ • MembershipAuth. │            │ • TaskManager     │
+│ • HybridVoting    │            │ • QuickJoin       │            │ • EducationHub    │
+│ • Executor        │            │ • Participation   │            │ • PaymentManager  │
+│                   │            │   Token           │            │                   │
 └───────────────────┘            └───────────────────┘            └───────────────────┘
 ```
 
@@ -458,22 +458,21 @@ Mutual aid, encoded in smart contracts.
 
 ---
 
-## Role-Based Access with Hats Protocol
+## Role-Based Access with the MembershipAuthority
 
-POP uses Hats Protocol for flexible, decentralized role management.
+Every org owns one `MembershipAuthority`: membership, eligibility and permissions in a single
+per-org contract, expressed as **subjects**.
 
 ```
               ┌──────────────┐
-              │   Top Hat    │  ← Organization root
-              │   (Admin)    │
+              │    ADMIN     │  ← held by the Executor (lock-out guard)
               └──────┬───────┘
                      │
-        ┌────────────┼────────────┐
-        │            │            │
-        ▼            ▼            ▼
-   ┌─────────┐  ┌─────────┐  ┌─────────┐
-   │ Member  │  │ Worker  │  │Reviewer │
-   │   Hat   │  │   Hat   │  │   Hat   │
+        ┌────────────┼────────────┐        ┌────────────────────┐
+        ▼            ▼            ▼        │  GROUP: Reviewers  │
+   ┌─────────┐  ┌─────────┐  ┌─────────┐   │  = {Worker, …}     │
+   │ Member  │  │ Worker  │  │Reviewer │◄──┤  derived membership│
+   │  role   │  │  role   │  │  role   │   └────────────────────┘
    └─────────┘  └─────────┘  └─────────┘
         │            │            │
         ▼            ▼            ▼
@@ -482,10 +481,13 @@ POP uses Hats Protocol for flexible, decentralized role management.
 ```
 
 **Key Features:**
-- Role-based voting eligibility
-- Permission management without centralized admin
-- Vouching systems for role progression
-- Dynamic assignment through governance
+- Role and group subjects, with per-subject default verdicts (`open` = anyone may claim) and caps
+- Permission rows keyed by module (voting, tasks, education, token) — no separate eligibility module
+- Vouching attestors for role progression
+- Dynamic assignment through governance, all from one contract
+
+Orgs deployed before Access v2 run on [Hats Protocol](https://docs.hatsprotocol.xyz) and read
+through the protocol's `AuthorityRouter` until they migrate.
 
 ---
 
@@ -679,7 +681,7 @@ function _layout() private pure returns (Layout storage s) {
 ### Security
 
 - **Reentrancy guards** on all state-changing functions
-- **Role-based access** through Hats Protocol
+- **Role-based access** through each org's `MembershipAuthority`
 - **Input validation** via ValidationLib
 - **Emergency pause** capabilities
 - **Atomic deployment** (no intermediate vulnerable states)

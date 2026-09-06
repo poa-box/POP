@@ -6,6 +6,7 @@ import "./VotingErrors.sol";
 import "./VotingMath.sol";
 import {IExecutor} from "../Executor.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IMembershipAuthority} from "../interfaces/IMembershipAuthority.sol";
 
 library HybridVotingCore {
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.hybridvoting.v2.storage");
@@ -29,6 +30,31 @@ library HybridVotingCore {
         }
     }
 
+    /// @dev Effective voter-count quorum honouring any V2 override (H-2):
+    ///      - no override (0) → global quorum.
+    ///      - override + executable (any non-empty batch) → max(global, override) (raise-only).
+    ///      - override + non-executable poll → override (may lower for small-group signals).
+    function _effectiveQuorum(HybridVoting.Layout storage l, HybridVoting.Proposal storage p, uint256 id)
+        internal
+        view
+        returns (uint32)
+    {
+        uint32 ov = l.proposalQuorumOverride[id];
+        if (ov == 0) return l.quorum;
+        uint256 n = p.batches.length;
+        for (uint256 i; i < n;) {
+            if (p.batches[i].length > 0) {
+                // executable: override can only raise the bar
+                return ov > l.quorum ? ov : l.quorum;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        // non-executable signal poll: override replaces the global quorum
+        return ov;
+    }
+
     function vote(uint256 id, uint8[] calldata idxs, uint8[] calldata weights) external {
         if (idxs.length != weights.length) revert VotingErrors.LengthMismatch();
         if (block.timestamp > _layout()._proposals[id].endTimestamp) revert VotingErrors.VotingExpired();
@@ -36,13 +62,22 @@ library HybridVotingCore {
         HybridVoting.Layout storage l = _layout();
         HybridVoting.Proposal storage p = l._proposals[id];
         address voter = msg.sender;
+        // Authority membership and activation gate are mandatory.
+        address a = l.membershipAuthority;
+        if (a == address(0)) revert VotingErrors.ZeroAddress();
+        // Authority-path anti-packing anchor: only members active AT OR BEFORE creation may vote.
+        uint64 createdAt = l.proposalCreatedAt[id];
 
-        // Check poll-level restrictions
+        // Check poll-level restrictions. `pollHatIds` are opaque uint256 ids (Hats ids on the legacy
+        // path, adopted-verbatim subject ids on the authority path); the id-agnostic scan is reused.
         if (p.restricted) {
             bool hasAllowedHat = false;
             uint256 len = p.pollHatIds.length;
             for (uint256 i = 0; i < len;) {
-                if (l.hats.isWearerOfHat(voter, p.pollHatIds[i])) {
+                bool ok = VotingMath.activationOk(
+                    IMembershipAuthority(a).activeMemberSince(p.pollHatIds[i], voter), createdAt
+                );
+                if (ok) {
                     hasAllowedHat = true;
                     break;
                 }
@@ -64,7 +99,9 @@ library HybridVotingCore {
 
         for (uint256 c; c < classCount;) {
             HybridVoting.ClassConfig memory cls = p.classesSnapshot[c];
-            uint256 rawPower = _calculateClassPower(voter, cls, l);
+            uint256 rawPower;
+            bool member = (voter == address(l.executor)) || _classMemberAuthority(l, a, id, c, cls, voter, createdAt);
+            rawPower = member ? _classPower(voter, cls) : 0;
             classRawPowers[c] = rawPower;
             p.classTotalsRaw[c] += rawPower;
             unchecked {
@@ -118,29 +155,45 @@ library HybridVotingCore {
         emit VoteCast(id, voter, idxs, weights, classRawPowers, uint64(block.timestamp));
     }
 
-    function _calculateClassPower(address voter, HybridVoting.ClassConfig memory cls, HybridVoting.Layout storage l)
-        internal
-        view
-        returns (uint256)
-    {
-        // Check hat gating for this class
-        bool hasClassHat = (voter == address(l.executor)) || (cls.hatIds.length == 0);
+    /// @dev LEGACY (Hats) class power: hat-gated, byte-identical to pre-Access-v2 behaviour.
 
-        // Check if voter has any of the class hats
-        if (!hasClassHat && cls.hatIds.length > 0) {
-            for (uint256 i; i < cls.hatIds.length;) {
-                if (l.hats.isWearerOfHat(voter, cls.hatIds[i])) {
-                    hasClassHat = true;
-                    break;
-                }
-                unchecked {
-                    ++i;
-                }
+    /// @dev Authority-path class MEMBERSHIP predicate (§4). Resolution order:
+    ///      1. the IMMUTABLE per-proposal subject snapshot `proposalClassSubjects[id][classIdx]` — a
+    ///         ROLE resolves via its own acceptedAt, a GROUP via its EARLIEST qualifying member-role
+    ///         activation, so a mid-vote group-packer is caught;
+    ///      2. snapshot 0 (a legacy in-flight proposal, an unconfigured class, or the equalWeight
+    ///         synthetic class) ⇒ treat `cls.hatIds` as adopted-verbatim subject ids (empty = OPEN
+    ///         class, legacy parity) — each subject is activation-gated identically.
+    ///      No LIVE `classSubject` read is consulted at vote time: the snapshot is the sole source of
+    ///      truth, which is what makes the binding immutable across later setClassSubject edits.
+    function _classMemberAuthority(
+        HybridVoting.Layout storage l,
+        address a,
+        uint256 id,
+        uint256 classIdx,
+        HybridVoting.ClassConfig memory cls,
+        address voter,
+        uint64 createdAt
+    ) internal view returns (bool) {
+        uint256 sid = l.proposalClassSubjects[id][classIdx];
+        if (sid != 0) {
+            return VotingMath.activationOk(IMembershipAuthority(a).activeMemberSince(sid, voter), createdAt);
+        }
+        uint256 n = cls.hatIds.length;
+        if (n == 0) return true; // open class (legacy `cls.hatIds.length == 0` parity)
+        for (uint256 i; i < n;) {
+            if (VotingMath.activationOk(IMembershipAuthority(a).activeMemberSince(cls.hatIds[i], voter), createdAt)) {
+                return true;
+            }
+            unchecked {
+                ++i;
             }
         }
+        return false;
+    }
 
-        if (!hasClassHat) return 0;
-
+    /// @dev Post-gate class power (strategy math shared by both paths; UNTOUCHED from v1).
+    function _classPower(address voter, HybridVoting.ClassConfig memory cls) internal view returns (uint256) {
         if (cls.strategy == HybridVoting.ClassStrategy.DIRECT) {
             return 100; // Direct democracy: 1 person = 100 raw points
         } else if (cls.strategy == HybridVoting.ClassStrategy.ERC20_BAL) {
@@ -191,8 +244,10 @@ library HybridVotingCore {
             return (0, false);
         }
 
-        // Check quorum: minimum number of voters required
-        if (l.quorum > 0 && p.voterCount < l.quorum) {
+        // Check quorum: minimum number of voters required (V2 override honoured, raise-only for
+        // executable proposals — see _effectiveQuorum).
+        uint32 eq = _effectiveQuorum(l, p, id);
+        if (eq > 0 && p.voterCount < eq) {
             emit Winner(id, 0, false, false, uint64(block.timestamp));
             return (0, false);
         }

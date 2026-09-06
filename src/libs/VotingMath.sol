@@ -29,11 +29,39 @@ library VotingMath {
     ///      has a very large `classTotal` and `slice ≤ 100`).
     uint256 internal constant N_SLICE_PRECISION = 10000;
 
+    /// @notice Sentinel returned by IMembershipAuthority.activeMemberSince for a non-member
+    ///         (mirrors MembershipAuthorityLogic.SENTINEL = type(uint64).max).
+    uint64 internal constant MEMBERSHIP_SENTINEL = type(uint64).max;
+
     /* ─────────── Structs ─────────── */
     struct Weights {
         uint8[] idxs;
         uint8[] weights;
         uint256 optionsLen;
+    }
+
+    /* ─────────── Authority-path activation gate ─────────── */
+
+    /// @notice Authority-path electorate gate for one (voter, subject/permKey) activation read.
+    /// @dev `since` is the result of `IMembershipAuthority.activeMemberSince(...)`: a real
+    ///      `acceptedAt` (>0) for an active member, or `MEMBERSHIP_SENTINEL` for a non-member.
+    ///
+    ///      `createdAt == 0` is the PRE-AUTHORITY SENTINEL. `proposalCreatedAt[id]` is a
+    ///      Layout-tail side-mapping written (as `block.timestamp`, always >0) only at creation
+    ///      by the dual-path implementation. Any proposal created BEFORE the module carried the
+    ///      mapping — i.e. before the beacon upgrade / before `setMembershipAuthority` — reads 0.
+    ///      Such a proposal predates the anti-packing concern (no mid-proposal group-packing was
+    ///      even possible when it was created), so we SKIP the activation anchor and enforce only
+    ///      membership. Without this carve-out the entire electorate is locked out of every
+    ///      in-flight proposal that spans an org's cutover (findings C5/C8/C9).
+    ///
+    ///      For a real anchor (`createdAt != 0`) the full gate applies: the voter must have been
+    ///      an active member AT OR BEFORE creation (`since <= createdAt`), which also rejects
+    ///      non-members because the sentinel exceeds every real timestamp — the anti-packing
+    ///      property survives for every proposal created under the authority path.
+    function activationOk(uint64 since, uint64 createdAt) internal pure returns (bool) {
+        if (createdAt == 0) return since != MEMBERSHIP_SENTINEL;
+        return since <= createdAt;
     }
 
     /* ─────────── Validation Functions ─────────── */

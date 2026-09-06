@@ -1,57 +1,41 @@
 # OrgDeployer: The Genesis of Worker-Owned Organizations
 
-## Philosophy: From Individual Action to Collective Power
+`OrgDeployer` turns a group of individuals into a **Perpetual Organization** in one atomic
+transaction: governance, access control, economic participation and collaborative work, wired
+together and handed straight to the community.
 
-The `OrgDeployer` contract is the foundational layer that transforms a group of individuals into a **Perpetual Organization**. In a single atomic transaction, it weaves together governance, access control, economic participation, and collaborative work infrastructure into a unified system where every member has voice, every contribution has value, and every decision belongs to the community.
-
-This document explores how `OrgDeployer` embodies the Poa vision: organizations that are owned by those who build them, governed by those who participate in them, and designed to persist beyond any individual founder.
+> **Access v2.** Orgs deployed today are *authority-native*: access lives in a per-org
+> **MembershipAuthority**, not in a Hats Protocol tree. The old `HatsTreeSetup` /
+> `EligibilityModule` / `ToggleModule` deploy path is gone. Legacy orgs keep their Hats tree and
+> read through the protocol's `AuthorityRouter` until they migrate — see
+> [`script/accessv2/MIGRATION-RUNBOOK.md`](../script/accessv2/MIGRATION-RUNBOOK.md).
 
 ---
 
-## Core Principles in Code
+## Core principles in code
 
-### 1. Atomic Birth: One Transaction, One Organization
+### Atomic birth: one transaction, one organization
 
-The `deployFullOrg` function creates an entire organization in a single transaction. This isn't just technical elegance—it's a design choice with purpose. There is no interim period where a founder "owns" the organization before handing it over. From the moment of creation, the governance structure is complete and autonomous.
+`deployFullOrg` creates the whole organization in a single call, behind a manual reentrancy guard
+(`_deployFullOrgGuarded`). There is no interim period in which a founder "owns" the org before
+handing it over — it is born whole or not at all.
 
-```solidity
-function deployFullOrg(DeploymentParams calldata params)
-    external
-    returns (DeploymentResult memory result)
-{
-    // Manual reentrancy guard
-    Layout storage l = _layout();
-    if (l._status == 2) revert Reentrant();
-    l._status = 2;
+### The deployer's paradox: power that immediately dissolves
 
-    result = _deployFullOrgInternal(params);
-
-    // Reset reentrancy guard
-    l._status = 1;
-    return result;
-}
-```
-
-The reentrancy guard ensures this creation cannot be interrupted or manipulated—the organization is born whole or not at all.
-
-### 2. The Deployer's Paradox: Power That Immediately Dissolves
-
-At the end of deployment, something important happens:
+The last thing the deployer does is give everything away:
 
 ```solidity
-/* 11. Renounce executor ownership - now only governed by voting */
+/* 14. Renounce executor ownership - now only governed by voting */
 OwnableUpgradeable(result.executor).renounceOwnership();
 ```
 
-The deployer—the person who initiated the organization—**immediately relinquishes all special privileges**. From this moment forward, only collective decisions through the voting mechanisms can control the organization. This is the Poa approach: no hidden backdoors, no founder override, no "emergency" admin keys.
-
-The deployer becomes just another member, distinguished only by being the first to believe in the community's potential.
+From that moment only collective decisions through the voting modules can move the org. No hidden
+backdoors, no founder override, no emergency admin key. The Executor's ADMIN authority subject is
+held by the Executor itself — the lock-out guard, not a person.
 
 ---
 
-## Architecture: The Three Pillars
-
-OrgDeployer orchestrates three specialized factories, each responsible for a domain of organizational life:
+## Architecture: three factories
 
 ```
                     ┌─────────────────────┐
@@ -60,317 +44,223 @@ OrgDeployer orchestrates three specialized factories, each responsible for a dom
                     └──────────┬──────────┘
                                │
            ┌───────────────────┼───────────────────┐
-           │                   │                   │
            ▼                   ▼                   ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│ GovernanceFactory│ │  AccessFactory  │ │ ModulesFactory  │
-│                 │ │                 │ │                 │
-│ • Executor      │ │ • QuickJoin     │ │ • TaskManager   │
-│ • Hats Tree     │ │ • Participation │ │ • EducationHub  │
-│ • HybridVoting  │ │   Token         │ │ • PaymentManager│
-│ • DirectDemo    │ │                 │ │                 │
-│ • Eligibility   │ │                 │ │                 │
-│ • Toggle        │ │                 │ │                 │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
+┌──────────────────┐ ┌───────────────────┐ ┌──────────────────┐
+│ GovernanceFactory│ │   AccessFactory   │ │  ModulesFactory  │
+│                  │ │                   │ │                  │
+│ • Executor       │ │ • MembershipAuth. │ │ • TaskManager    │
+│ • HybridVoting   │ │ • QuickJoin       │ │ • EducationHub   │
+│ • DirectDemocracy│ │ • Participation   │ │ • PaymentManager │
+│                  │ │   Token           │ │ • ZkEmailInvites │
+└──────────────────┘ └───────────────────┘ └──────────────────┘
 ```
 
-### Pillar 1: Governance (Who Decides)
+- **Governance (who decides)** — `Executor` is the org's hands: it acts only when the authorized
+  voting contract tells it to. `HybridVoting` blends token weight with one-person-one-vote;
+  `DirectDemocracyVoting` is pure one-person-one-vote.
+- **Access (who belongs)** — the **MembershipAuthority** is the org's single source of truth for
+  membership, eligibility and permissions. `QuickJoin` is the front door; `ParticipationToken` is
+  the non-transferable record of contribution.
+- **Modules (what work happens)** — `TaskManager`, `EducationHub`, `PaymentManager`, and
+  (where the chain has ZK Email infra wired) `ZkEmailInvites`.
 
-The **GovernanceFactory** creates the decision-making infrastructure:
+### Subjects, not hats
 
-- **Executor**: The "hands" of the organization—it can only act when instructed by approved governance mechanisms
-- **HybridVoting**: Combines token-weighted voting with direct democracy, allowing organizations to balance expertise with equality
-- **DirectDemocracyVoting**: Pure one-person-one-vote for decisions that require equal say
-- **Hats Protocol Integration**: A flexible role system where "hats" represent responsibilities, not permanent hierarchies
+The authority allocates **subject ids** deterministically from its own address:
+`newSubjectId(authority, seq)` = `(uint160(authority) << 64) | seq`. Every id is therefore
+< 2^224, which is exactly what distinguishes it from a real Hats id (those always carry a nonzero
+tophat domain in bits 224-255).
 
-### Pillar 2: Access (Who Belongs)
+| seq | Subject |
+|-----|---------|
+| 1 | `ADMIN` — worn by the Executor only |
+| 2 + i | role `i` (`params.roles[i]`) |
+| 2 + n + j | group `j` (`params.groups[j]`), where `n = roles.length` |
 
-The **AccessFactory** creates the membership infrastructure:
+Callers never read these ids back from the authority: the deployer derives them from the proxy
+address alone and publishes them via `OrgRegistry.registerHatsTree(orgId, adminSubjectId, …)`
+(the registry's storage names are historical; the values are subject ids).
 
-- **QuickJoin**: The welcoming door—enables new members to join and immediately receive their roles
-- **ParticipationToken**: Non-transferable tokens that represent contribution, not speculation
-
-### Pillar 3: Modules (What Work Happens)
-
-The **ModulesFactory** creates the collaboration infrastructure:
-
-- **TaskManager**: Coordinated work with token rewards
-- **EducationHub**: Knowledge sharing and skill development
-- **PaymentManager**: Treasury operations and member compensation
+Chain-wide readers that used to call Hats — `PaymasterHub` and `OrgRegistry` — resolve these ids
+through the protocol's `AuthorityRouter`, which self-routes an embedded-authority id to that
+authority and passes legacy Hats ids straight through. The router must exist and both readers must
+point at it; the deploy scripts wire this (see `script/deploy/DeployHelper.s.sol`).
 
 ---
 
-## The Deployment Sequence: 12 Steps
+## The deployment sequence
 
 ```
-Step 1: Validate Role Configurations
-        ↓
-Step 2: Validate Deployer Address
-        ↓
-Step 3: Create Org in Bootstrap Mode
-        ↓
-Step 4: Deploy Governance Infrastructure
-        ↓
-Step 5: Set Org Executor
-        ↓
-Step 6: Register Hats Tree
-        ↓
-Step 7: Register with PaymasterHub
-        ↓
-Step 8: Deploy Access Infrastructure
-        ↓
-Step 9: Deploy Functional Modules
-        ↓
-Step 10: Deploy Voting Mechanisms
-        ↓
-Step 11: Wire Cross-Module Connections
-        ↓
-Step 12: Renounce Ownership
+ 1 Validate role/group configuration        9 Wire the token to TaskManager/EducationHub
+ 2 Create the org in bootstrap mode        10 Bootstrap projects + per-project TM_PERMS rows
+ 3 Deploy the Executor                     11 Authorize the hat-minting modules
+ 4 Deploy the MembershipAuthority          12 Repoint modules -> authority, seed genesis
+ 5 Deploy access (QuickJoin, Token)           memberships, unpause
+ 6 Deploy functional modules               13 Link the Executor to its governor
+ 7 Deploy the voting mechanisms            14 Renounce Executor ownership
+ 8 Register the org with PaymasterHub      15 Emit the deployment events
 ```
 
-### Step-by-Step: What's Really Happening
+### 1. Validation
 
-#### 1-2. Validation: Ensuring a Sound Foundation
+`_validateRoleConfigs` rejects the shapes that would otherwise fail deep inside the authority's
+constructor, or silently produce a broken org:
+
+- 1..`MAX_ROLES` (16) roles, ≤ `MAX_GROUPS` (8) groups, ≤ `MAX_GROUP_MEMBERS` (16) members each;
+  non-empty names.
+- vouching: non-zero quorum and an in-range `voucherRoleIndex`.
+- every role bitmap addresses only existing role indices.
+- `QuickJoinRoleNotOpen` — a role in `quickJoinRolesBitmap` must be `open` (default-ALLOW).
+  QuickJoin enumerates the subjects carrying `QJ_AUTOJOIN` with no eligibility filter, so a closed
+  role there would brick every join at runtime.
+- `DuplicateGroupMemberRole` — a group may not list the same role twice.
+- `RoleCapacityBelowGenesisSeed` — a role's `maxMembers` must fit the wearers its genesis seed mints.
+
+### 2. Bootstrap mode
+
+`OrgRegistry.createOrgBootstrap` opens a protected window in which the deployer (and only the
+deployer) may register the org's contracts. It closes automatically when the last module registers.
+
+### 3-4. Executor, then authority
+
+The Executor is deployed first — it owns nearly everything else, and it is the ADMIN subject's sole
+member. The **MembershipAuthority** is then deployed *born initialized and paused*: its whole access
+shape (subjects, defaults, caps, vouch attestors, permission rows) is passed as constructor data, so
+there is no window in which an uninitialized authority exists. Its subject ids are published to the
+`OrgRegistry`, and `metadataAdminRoleIndex` (when in range) selects the role that may edit org
+metadata directly.
+
+### 5-7. Access, modules, voting
+
+Modules are deployed against the org's Executor and role subject ids. No module reads the authority
+during its own `initialize` — the repoint happens in step 12, after every address exists.
+
+### 8. PaymasterHub
 
 ```solidity
-_validateRoleConfigs(params.roles);
-if (params.deployerAddress == address(0)) {
-    revert InvalidAddress();
-}
+IPaymasterHub(l.paymasterHub).registerAndConfigureOrg{value: msg.value}(orgId, adminSubjectId, config);
 ```
 
-Before anything is created, the contract validates that the role structure makes sense—no circular hierarchies, valid vouching configurations, non-empty role names. An organization built on flawed foundations will fail its members.
+The org's hub admin is its **ADMIN subject** and its operator is the role named by
+`paymasterConfig.operatorRoleIndex` — both resolved through the `AuthorityRouter`.
 
-#### 3. Bootstrap Mode: A Protected State
+With `paymasterConfig.autoWhitelistContracts`, the deployer does **not** seed a hardcoded selector
+whitelist. It registers each deployed module (and the shared registries) under its module typeId
+(`_buildTargetTypes`), and sponsored selectors resolve through the hub's Poa-managed **global
+rulebook** (see `docs/PAYMASTER_HUB.md` → Rules Engine). `autoUpgrade = true` orgs start in Mirror
+mode (rules follow the rulebook); `autoUpgrade = false` starts Static with a local snapshot. Adding
+a sponsored function is one `setGlobalRulesBatch` — never an OrgDeployer change.
 
-```solidity
-if (!_orgExists(params.orgId)) {
-    l.orgRegistry.createOrgBootstrap(params.orgId, bytes(params.orgName), bytes32(0));
-} else {
-    revert OrgExistsMismatch();
-}
-```
+### 9-11. Wiring
 
-The organization is created in "bootstrap mode"—a protected state where contracts can be registered but no external parties can interfere. The organization is being assembled but not yet ready for the world.
+The token's `setTaskManager` / `setEducationHub` are executor-only, so they are relayed through the
+Executor (still owned by the deployer at this point). Bootstrap projects mirror their role lists
+into the authority's **per-project** `TM_PERMS` rows, which carry `INHERIT_GLOBAL` — a project grant
+*adds to* the org-wide grant instead of shadowing it. `QuickJoin` (and `ZkEmailInvites`, when
+deployed) are authorized to mint through `Executor.mintHatsForUser`.
 
-#### 4-6. The Executor and the Hat Tree
+### 12-15. Activation and release
 
-The Executor is deployed first because it becomes the owner of nearly everything else. Then the Hats tree is created—a hierarchy of roles that defines who can do what within the organization.
-
-```solidity
-GovernanceFactory.GovernanceResult memory gov = _deployGovernanceInfrastructure(params);
-result.executor = gov.executor;
-l.orgRegistry.setOrgExecutor(params.orgId, result.executor);
-l.orgRegistry.registerHatsTree(params.orgId, gov.topHatId, gov.roleHatIds);
-```
-
-#### 7. PaymasterHub: Shared Infrastructure
-
-```solidity
-IPaymasterHub(l.paymasterHub).registerAndConfigureOrg{value: msg.value}(params.orgId, topHatId, config);
-```
-
-Organizations share a common PaymasterHub for gas sponsorship. Infrastructure should serve all communities, not be duplicated inefficiently.
-
-When `paymasterConfig.autoWhitelistContracts` is set, the deployer no longer seeds a hardcoded selector whitelist. Instead it registers each deployed module (and the shared registries) with its module typeId (`_buildTargetTypes`), and the org's sponsored selectors resolve through the PaymasterHub's Poa-managed **global rulebook** (see `docs/PAYMASTER_HUB.md` → Rules Engine). Orgs deployed with `autoUpgrade = true` start in Mirror mode (rules follow the rulebook automatically); `autoUpgrade = false` would start Static with a local snapshot of the current rulebook. Adding a new sponsored function no longer requires touching OrgDeployer — one `setGlobalRulesBatch` covers all Mirror orgs, current and future.
-
-#### 8-9. Access and Modules: The Living Organization
-
-With governance in place, the organization gains its ability to accept members and coordinate work:
-
-```solidity
-access = l.accessFactory.deployAccess(accessParams);
-modules = l.modulesFactory.deployModules(moduleParams);
-```
-
-#### 10-11. Wiring the Connections
-
-The organization isn't just individual contracts—it's an interconnected system:
-
-```solidity
-IParticipationToken(result.participationToken).setTaskManager(result.taskManager);
-IParticipationToken(result.participationToken).setEducationHub(result.educationHub);
-IExecutorAdmin(result.executor).setHatMinterAuthorization(result.quickJoin, true);
-IExecutorAdmin(result.executor).setCaller(result.hybridVoting);
-```
-
-Tasks and education can mint tokens. QuickJoin can assign hats. HybridVoting controls the Executor. These connections create a system where contribution flows into representation.
-
-#### 12. The Final Release
-
-```solidity
-OwnableUpgradeable(result.executor).renounceOwnership();
-```
-
-The organization is now self-governing. The deployer has no more power than any other member.
+`_activateAuthority` points every module at the authority, seeds the genesis memberships (Executor
+on ADMIN, then each role's `mintToDeployer` / `additionalWearers`) and unpauses it. The Executor is
+linked to `HybridVoting`, ownership is renounced, and the deployment events are emitted.
 
 ---
 
-## Role Configuration: Designing Community Structure
+## Role configuration
 
-One of the most powerful aspects of OrgDeployer is its flexible role system. Roles aren't just labels—they're bundles of permissions, voting power, and community responsibilities.
-
-### The RoleConfig Structure
+### `RoleConfig` (`src/libs/RoleConfigStructs.sol`)
 
 ```solidity
 struct RoleConfig {
-    string name;                           // Human-readable identifier
-    string image;                          // Visual representation
-    bool canVote;                          // Participation in governance
-    RoleVouchingConfig vouching;           // How new members earn this role
-    RoleEligibilityDefaults defaults;      // Initial standing
-    RoleHierarchyConfig hierarchy;         // Administrative relationships
-    RoleDistributionConfig distribution;   // Who starts with this role
-    HatConfig hatConfig;                   // Hats Protocol settings
+    string name;
+    string image;                        // IPFS hash or URI (subgraph metadata)
+    bytes32 metadataCID;                 // IPFS CID of the extended role metadata JSON
+    bool canVote;                        // included in the HybridVoting default class electorate
+    bool open;                           // true = default-ALLOW; false = deny-by-default (titled)
+    uint32 maxMembers;                   // 0 = unlimited
+    RoleVouchingConfig vouching;         // quorum vouches from `voucherRoleIndex` grant eligibility
+    RoleDistributionConfig distribution; // mintToDeployer + additionalWearers
+}
+
+struct GroupConfig {
+    string name;
+    uint256[] memberRoleIndices;         // membership derived from these roles; no cap, no acceptance
 }
 ```
 
-### Example: A Three-Tier Community
+`open` replaces the v1 eligibility defaults, and the Hats-native knobs (hierarchy, maxSupply,
+mutability, toggle) are gone — the authority stores only what it actually enforces.
 
-Consider a community with three roles:
+### Example: a three-tier community
 
-**NEWCOMER** (Index 0)
-- Assigned automatically via QuickJoin
-- Cannot vote
-- Limited token holding rights
-- Path to becoming a Member
+| Role | Shape |
+|------|-------|
+| **NEWCOMER** (0) | `open = true` — auto-joined by QuickJoin, no vote |
+| **MEMBER** (1) | `open = false`, vouching enabled (quorum 3 from MEMBER), `canVote = true` |
+| **STEWARD** (2) | `open = false`, vouching enabled (quorum 2 from STEWARD), capped via `maxMembers` |
 
-**MEMBER** (Index 1)
-- Requires vouching from 3 existing Members
-- Full voting rights
-- Can hold and earn tokens
-- Can create tasks and educational content
+Add a `GroupConfig{"Stewards", [2]}` to give restricted polls and manager delegation something to
+point at.
 
-**STEWARD** (Index 2)
-- Requires vouching from 2 Stewards or 5 Members
-- Can moderate content
-- Administrative capabilities
-- Trusted community guides
-
-### Role Bitmaps: Efficient Permission Assignment
-
-Rather than listing roles individually, OrgDeployer uses bitmaps for gas-efficient permission assignment:
+### Role bitmaps
 
 ```solidity
 struct RoleAssignments {
-    uint256 quickJoinRolesBitmap;           // Bit N = Role N on join
-    uint256 tokenMemberRolesBitmap;         // Bit N = Role N holds tokens
-    uint256 tokenApproverRolesBitmap;       // Bit N = Role N approves transfers
-    uint256 taskCreatorRolesBitmap;         // Bit N = Role N creates tasks
-    uint256 educationCreatorRolesBitmap;    // Bit N = Role N creates courses
-    uint256 educationMemberRolesBitmap;     // Bit N = Role N accesses courses
+    uint256 quickJoinRolesBitmap;             // Bit N = Role N auto-joins (QJ_AUTOJOIN; must be open)
+    uint256 tokenMemberRolesBitmap;           // Bit N = Role N holds tokens
+    uint256 tokenApproverRolesBitmap;         // Bit N = Role N approves transfers
+    uint256 taskCreatorRolesBitmap;           // Bit N = Role N is a TaskManager organizer
+    uint256 educationCreatorRolesBitmap;      // Bit N = Role N creates courses
+    uint256 educationMemberRolesBitmap;       // Bit N = Role N accesses courses
     uint256 hybridProposalCreatorRolesBitmap; // Bit N = Role N proposes
-    uint256 ddVotingRolesBitmap;            // Bit N = Role N votes in DD
-    uint256 ddCreatorRolesBitmap;           // Bit N = Role N creates polls
+    uint256 ddVotingRolesBitmap;              // Bit N = Role N votes in polls
+    uint256 ddCreatorRolesBitmap;             // Bit N = Role N creates polls
 }
 ```
 
-Example: If `tokenMemberRolesBitmap = 0b110` (binary), roles 1 and 2 can hold tokens, but role 0 cannot.
+Each bit becomes a permission row on that role's subject. `tokenMemberRolesBitmap = 0b110` means
+roles 1 and 2 hold tokens, role 0 does not.
 
 ---
 
-## The Vouching System: Trust Through Community
+## Vouching: trust through community
 
-Poa believes that membership should be earned through community recognition, not purchased or self-assigned. The vouching system implements this:
-
-```solidity
-if (vouchCount > 0) {
-    uint256[] memory hatIds = new uint256[](vouchCount);
-    uint32[] memory quorums = new uint32[](vouchCount);
-    uint256[] memory membershipHatIds = new uint256[](vouchCount);
-    bool[] memory combineFlags = new bool[](vouchCount);
-
-    // ... populate arrays from role configs ...
-
-    IExecutorAdmin(result.executor).batchConfigureVouching(
-        gov.eligibilityModule,
-        hatIds,
-        quorums,
-        membershipHatIds,
-        combineFlags
-    );
-}
-```
-
-### How Vouching Works
-
-1. A newcomer requests a higher-tier role
-2. Existing members with vouching power signal their approval
-3. Once the quorum is met, the role is granted
-4. The new member inherits the responsibilities and rights of their role
-
-This creates a web of trust—every Member was vouched for by other Members, creating accountability chains throughout the community.
+Vouching is an **attestor** on a role subject, seeded from `RoleVouchingConfig` at deploy time:
+`quorum` vouches from members of `voucherRoleIndex` make a user eligible (ALLOW at the attestor
+tier — an explicit BAN still wins). Membership is earned through community recognition rather than
+purchased or self-assigned, and every accepted member has a traceable eligibility source.
 
 ---
 
-## Beacon Proxies: Evolvable but Accountable
+## Beacon proxies: evolvable but accountable
 
-Every contract deployed uses the Beacon Proxy pattern, allowing organizations to upgrade their infrastructure:
+Every module is a BeaconProxy behind a per-org `SwitchableBeacon`:
 
-```solidity
-struct AccessParams {
-    // ...
-    bool autoUpgrade;  // Follow platform upgrades automatically
-    // ...
-}
-```
+- **Mirror (`autoUpgrade = true`)** — follow protocol upgrades automatically.
+- **Static (`autoUpgrade = false`)** — pinned; upgrading takes an explicit governance vote.
 
-Organizations can choose:
-- **Auto-Upgrade (autoUpgrade = true)**: Trust the Poa platform to evolve your contracts responsibly
-- **Static Mode (autoUpgrade = false)**: Lock to a specific implementation, requiring explicit governance votes to upgrade
-
-This respects organizational sovereignty while enabling shared infrastructure improvements.
+See `SWITCHABLE_BEACON.md`.
 
 ---
 
-## Security Considerations
+## Security notes
 
-### 1. Reentrancy Protection
-
-The manual reentrancy guard prevents the complex deployment from being attacked:
-
-```solidity
-if (l._status == 2) revert Reentrant();
-l._status = 2;
-// ... deployment logic ...
-l._status = 1;
-```
-
-### 2. Role Validation
-
-Comprehensive validation prevents malformed organizations:
-
-```solidity
-function _validateRoleConfigs(RoleConfigStructs.RoleConfig[] calldata roles) internal pure {
-    if (len == 0) revert InvalidRoleConfiguration();
-    if (len > 32) revert InvalidRoleConfiguration();
-
-    for (uint256 i = 0; i < len; i++) {
-        if (role.vouching.enabled) {
-            if (role.vouching.quorum == 0) revert InvalidRoleConfiguration();
-            if (role.vouching.voucherRoleIndex >= len) revert InvalidRoleConfiguration();
-        }
-        // ... additional validations ...
-    }
-}
-```
-
-### 3. Bootstrap Mode
-
-Only during the protected bootstrap phase can contracts be registered, preventing injection attacks:
-
-```solidity
-(,, bool bootstrap,) = l.orgRegistry.orgOf(orgId);
-if (!bootstrap) revert("Deployment complete");
-```
+- **Reentrancy** — `_deployFullOrgGuarded` wraps the whole deployment in a manual guard.
+- **Validation** — see step 1; misconfiguration fails with the deployer's own named errors rather
+  than an opaque revert from inside a factory or the authority's constructor.
+- **Bootstrap mode** — contracts can only be registered during the protected window; the deployer's
+  own registration callbacks revert `DeploymentComplete` afterwards.
+- **No uninitialized window** — the authority is initialized via constructor data, so it can never
+  be front-run into a different shape.
 
 ---
 
-## Integration Points
+## Integration points
 
-### For Frontend Developers
+### Frontend
 
-Listen for the `OrgDeployed` event to capture all contract addresses:
+`OrgDeployed` carries every address plus the authority's subject ids:
 
 ```solidity
 event OrgDeployed(
@@ -383,49 +273,38 @@ event OrgDeployed(
     address taskManager,
     address educationHub,
     address paymentManager,
-    address eligibilityModule,
-    address toggleModule,
-    uint256 topHatId,
-    uint256[] roleHatIds
+    address membershipAuthority,
+    uint256 adminSubjectId,
+    uint256[] roleSubjectIds
 );
 ```
 
-### For Subgraph Indexers
+`RolesCreated` carries the role/group names and metadata alongside their subject ids.
 
-The event structure enables complete organization discovery in a single event, simplifying indexing.
+### Subgraph
 
----
-
-## Conclusion
-
-The OrgDeployer contract is more than deployment infrastructure—it's a commitment to worker ownership in code. Every function, every validation, every connection serves the principle that organizations should belong to those who build them.
-
-When you call `deployFullOrg`, you're:
-- Establishing a governance system that respects every voice
-- Creating economic infrastructure that rewards contribution over capital
-- Building collaborative tools that enable meaningful work
-- Setting up permission systems that trust communities to self-govern
-
-And then, in that final `renounceOwnership()`, the organization belongs to everyone who will ever be a part of it.
+Complete organization discovery from one event, plus per-module `ContractRegistered` entries from
+the `OrgRegistry`. Deploy-time module config is emitted *after* registration so the per-org data
+source templates index it without any `eth_call`.
 
 ---
 
-## Quick Reference
+## Quick reference
 
 | Function | Purpose |
 |----------|---------|
-| `deployFullOrg(params)` | Deploy complete organization |
-| `registerContract(...)` | Factory callback for contract registration |
-| `batchRegisterContracts(...)` | Optimized batch registration |
+| `deployFullOrg(params)` | Deploy a complete organization |
+| `deployFullOrgWithZkEmail(params, zkConfig)` | …plus ZK Email role invitations |
+| `registerContract(...)` / `batchRegisterContracts(...)` | Factory callbacks for registration |
 
 | Struct | Purpose |
 |--------|---------|
 | `DeploymentParams` | Full organization configuration |
-| `DeploymentResult` | Deployed contract addresses |
+| `DeploymentResult` | Deployed contract addresses (incl. `membershipAuthority`) |
 | `RoleAssignments` | Permission bitmaps for all modules |
 
 | Factory | Deploys |
 |---------|---------|
-| `GovernanceFactory` | Executor, Voting, Hats modules |
-| `AccessFactory` | QuickJoin, ParticipationToken |
-| `ModulesFactory` | TaskManager, EducationHub, PaymentManager |
+| `GovernanceFactory` | Executor, HybridVoting, DirectDemocracyVoting |
+| `AccessFactory` | MembershipAuthority, QuickJoin, ParticipationToken |
+| `ModulesFactory` | TaskManager, EducationHub, PaymentManager, ZkEmailInvites |

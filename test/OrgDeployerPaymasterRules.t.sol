@@ -25,6 +25,7 @@ import {OrgDeployer} from "../src/OrgDeployer.sol";
 import {ModuleTypes} from "../src/libs/ModuleTypes.sol";
 import {DefaultGlobalRules} from "../script/helpers/DefaultGlobalRules.sol";
 import {ZkEmailInvites} from "../src/ZkEmailInvites.sol";
+import {EligibilityModule} from "../src/EligibilityModule.sol";
 
 /// @dev `_buildTargetTypes` is `internal pure`, so a derived contract can expose it with no
 ///      initialization, no proxy and no infra. Deploying an over-EIP-170 contract is fine in tests.
@@ -50,7 +51,7 @@ contract OrgDeployerPaymasterRulesTest is Test {
     address internal constant TM = address(0x1006);
     address internal constant EDU = address(0x1007);
     address internal constant PAY = address(0x1008);
-    address internal constant ELIG = address(0x1009);
+    address internal constant AUTH = address(0x1009);
     address internal constant ZK = address(0x100A);
     address internal constant ACCT_REG = address(0x100B);
     address internal constant ORG_REG = address(0x100C);
@@ -147,10 +148,35 @@ contract OrgDeployerPaymasterRulesTest is Test {
         assertEq(_hintOf(entries, ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector), 1_200_000);
         assertEq(_hintOf(entries, ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector), 1_200_000);
 
+        // The legacy-rails delegated-kick lifecycle entries carry hints (user-facing since the
+        // manager-hat wave). `claimHat` / `claimHats` are deliberately absent — see the rationale in
+        // DefaultGlobalRules.sol: the v20 rulebook has never been broadcast, the legacy targetTypes
+        // backfill was never broadcast either, and the selectors exist only on the unshipped
+        // EligibilityModule v8 impl.
+
+        // Access-v2 MembershipAuthority user-facing entries (Wave D1) carry the calibrated hints;
+        // vouch mirrors EM vouchFor's hint-free entry, finalize is the heavy verb.
+        bytes32 maId = ModuleTypes.MEMBERSHIP_AUTHORITY_ID;
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("claim(uint256)"))), 300_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("renounce(uint256)"))), 200_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("vouch(uint256,address)"))), 0);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("revokeVouch(uint256,address)"))), 200_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("delegatedGrant(uint256,address)"))), 250_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("delegatedOffer(uint256,address)"))), 300_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("delegatedRemove(uint256,address,bool)"))), 250_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("delegatedUnremove(uint256,address)"))), 200_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("finalize(uint256)"))), 600_000);
+        assertEq(_hintOfType(entries, maId, bytes4(keccak256("cancel(uint256)"))), 200_000);
+
         // Everything else is hint-free (0 = "no per-rule cap", the hub's default).
         for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID) {
-                assertEq(entries[i].maxCallGasHint, 0, "only zk-email entries carry gas hints");
+            bool isHintedEm = entries[i].typeId == ModuleTypes.ELIGIBILITY_MODULE_ID
+                && (entries[i].selector == EligibilityModule.kickWearer.selector
+                    || entries[i].selector == EligibilityModule.finalizeKick.selector
+                    || entries[i].selector == EligibilityModule.unkickWearer.selector);
+            bool isAuthority = entries[i].typeId == maId;
+            if (entries[i].typeId != ModuleTypes.ZKEMAIL_INVITES_ID && !isHintedEm && !isAuthority) {
+                assertEq(entries[i].maxCallGasHint, 0, "unexpected gas hint outside the hinted entry set");
             }
         }
     }
@@ -193,7 +219,7 @@ contract OrgDeployerPaymasterRulesTest is Test {
         r.taskManager = TM;
         r.educationHub = educationHub;
         r.paymentManager = PAY;
-        r.eligibilityModule = ELIG;
+        r.membershipAuthority = AUTH;
         r.zkEmailInvites = zkEmailInvites;
     }
 
@@ -218,7 +244,7 @@ contract OrgDeployerPaymasterRulesTest is Test {
         n++;
         (targets[n], typeIds[n]) = (PAY, ModuleTypes.PAYMENT_MANAGER_ID);
         n++;
-        (targets[n], typeIds[n]) = (ELIG, ModuleTypes.ELIGIBILITY_MODULE_ID);
+        (targets[n], typeIds[n]) = (AUTH, ModuleTypes.MEMBERSHIP_AUTHORITY_ID);
         n++;
         (targets[n], typeIds[n]) = (PT, ModuleTypes.PARTICIPATION_TOKEN_ID);
         n++;
@@ -260,11 +286,19 @@ contract OrgDeployerPaymasterRulesTest is Test {
     }
 
     function _hintOf(DefaultGlobalRules.Entry[] memory entries, bytes4 selector) internal pure returns (uint32) {
+        return _hintOfType(entries, ModuleTypes.ZKEMAIL_INVITES_ID, selector);
+    }
+
+    function _hintOfType(DefaultGlobalRules.Entry[] memory entries, bytes32 typeId, bytes4 selector)
+        internal
+        pure
+        returns (uint32)
+    {
         for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].typeId == ModuleTypes.ZKEMAIL_INVITES_ID && entries[i].selector == selector) {
+            if (entries[i].typeId == typeId && entries[i].selector == selector) {
                 return entries[i].maxCallGasHint;
             }
         }
-        revert("zk-email selector missing from DefaultGlobalRules");
+        revert("selector missing from DefaultGlobalRules");
     }
 }

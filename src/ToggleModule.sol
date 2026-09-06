@@ -87,7 +87,7 @@ contract ToggleModule is Initializable {
 
     /**
      * @notice Batch set multiple hats' active status
-     * @dev Sets status for multiple hats in a single call - gas optimized for HatsTreeSetup
+     * @dev Sets status for multiple hats in a single call - gas optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @param hatIds Array of hat IDs to toggle
      * @param actives Array of active statuses (must match hatIds length)
      */

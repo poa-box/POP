@@ -2,10 +2,13 @@
 pragma solidity ^0.8.20;
 
 /* OpenZeppelin v5.3 Upgradeables */
-import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/PausableUpgradeable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
+import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/utils/PausableUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin-contracts-upgradeable/contracts/utils/ReentrancyGuardUpgradeable.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {SwitchableBeacon} from "./SwitchableBeacon.sol";
 
@@ -50,10 +53,12 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     /// @custom:storage-location erc7201:poa.executor.storage
     struct Layout {
         address allowedCaller; // sole authorised governor
-        IHats hats; // Hats Protocol interface
+        IHats hats; // authority address in the original slot; IHats type preserves storage layout
         mapping(address => bool) authorizedHatMinters; // contracts authorized to request hat minting
         address pendingCaller;
         uint256 callerChangeTimestamp;
+        // Reserved original Hats pointer from migration; never restored or written.
+        address legacyHats;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.executor.storage");
@@ -73,8 +78,11 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     event CallExecuted(uint256 indexed proposalId, uint256 indexed index, address target, uint256 value);
     event Swept(address indexed to, uint256 amount);
     event HatsSet(address indexed hats);
+    /// @notice Emitted when {setMembershipAuthority} repoints (or restores) the `hats` slot (§4.7).
+    event HatsRepointed(address indexed hats);
     event HatMinterAuthorized(address indexed minter, bool authorized);
     event HatsMinted(address indexed user, uint256[] hatIds);
+    event ModuleConfigured(address indexed target, bytes4 indexed selector);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -82,15 +90,11 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     }
 
     /* ─────────── Initialiser ─────────── */
-    function initialize(address owner_, address hats_) external initializer {
-        if (owner_ == address(0) || hats_ == address(0)) revert ZeroAddress();
+    function initialize(address owner_) external initializer {
+        if (owner_ == address(0)) revert ZeroAddress();
         __Ownable_init(owner_);
         __Pausable_init();
         __ReentrancyGuard_init();
-
-        Layout storage l = _layout();
-        l.hats = IHats(hats_);
-        emit HatsSet(hats_);
     }
 
     /* ─────────── Governor management ─────────── */
@@ -150,6 +154,18 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         emit HatMinterAuthorized(minter, authorized);
     }
 
+    /// @notice Set the org's nonzero MembershipAuthority. Governance-only; no legacy rollback.
+    function setMembershipAuthority(address authority) external {
+        Layout storage l = _layout();
+        if (msg.sender != owner() && msg.sender != l.allowedCaller && msg.sender != address(this)) {
+            revert UnauthorizedCaller();
+        }
+        if (authority == address(0)) revert ZeroAddress();
+        if (IMembershipAuthority(authority).executor() != address(this)) revert UnauthorizedCaller();
+        l.hats = IHats(authority);
+        emit HatsRepointed(address(l.hats));
+    }
+
     function mintHatsForUser(address user, uint256[] calldata hatIds) external {
         Layout storage l = _layout();
         if (!l.authorizedHatMinters[msg.sender]) revert UnauthorizedCaller();
@@ -157,7 +173,10 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         // L-60 fix: cap the caller-supplied array to bound gas / prevent grief.
         if (hatIds.length > MAX_HATS_PER_MINT) revert TooManyHats();
 
-        // Mint each hat to the user
+        address authority = membershipAuthority();
+        if (authority == address(0)) revert ZeroAddress();
+
+        // Mint each authority subject to the user
         for (uint256 i = 0; i < hatIds.length; i++) {
             l.hats.mintHat(hatIds[i], user);
         }
@@ -176,9 +195,13 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
             if (batch[i].target == address(this)) {
                 // Self-targeting is forbidden EXCEPT for a narrow allowlist of admin functions that
                 // governance must be able to invoke on the Executor itself (impossible otherwise once
-                // ownership is renounced). Only setHatMinterAuthorization is permitted; every other
-                // self-admin function (setCaller, pause, sweep, …) still reverts TargetSelf.
-                if (bytes4(batch[i].data) != this.setHatMinterAuthorization.selector) revert TargetSelf();
+                // ownership is renounced): setHatMinterAuthorization and setMembershipAuthority (the
+                // authority repoint). Every other self-admin function (setCaller, pause,
+                // sweep, …) still reverts TargetSelf.
+                bytes4 sel = bytes4(batch[i].data);
+                if (sel != this.setHatMinterAuthorization.selector && sel != this.setMembershipAuthority.selector) {
+                    revert TargetSelf();
+                }
             }
 
             (bool ok, bytes memory ret) = batch[i].target.call{value: batch[i].value}(batch[i].data);
@@ -219,6 +242,29 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
 
     /* ─────────── Module Configuration ─────────── */
     /**
+     * @notice Generic owner-gated bootstrap relay: perform an arbitrary call THROUGH the Executor.
+     * @dev Bootstrap-only lifecycle (precedent: {configureParticipationToken}/{configureVouching},
+     *      the C-01 pattern). During org deployment the owner is the OrgDeployer, so this lets the
+     *      deployer invoke executor-gated setters on freshly deployed modules — e.g.
+     *      authority governance configuration and the sibling
+     *      modules' `setConfigAdmin` (executor-gated) — with `msg.sender == executor`, exactly as a
+     *      governance batch would. It is DEAD on live orgs: immediately after deployment OrgDeployer
+     *      calls `renounceOwnership()`, so `owner() == address(0)` and this reverts for everyone.
+     *      Live-org adoption instead drives these same setters through governance batches
+     *      ({execute}). Bubbles the callee's revert data on failure via {CallFailed}.
+     * @param target Module to call (non-zero).
+     * @param data ABI-encoded call (selector + args).
+     * @return The raw return data of the call.
+     */
+    function configureModule(address target, bytes calldata data) external onlyOwner returns (bytes memory) {
+        if (target == address(0)) revert ZeroAddress();
+        (bool ok, bytes memory ret) = target.call(data);
+        if (!ok) revert CallFailed(0, ret);
+        emit ModuleConfigured(target, bytes4(data));
+        return ret;
+    }
+
+    /**
      * @notice One-shot wiring of the org's ParticipationToken during initial setup.
      * @dev C-01 fix: the token's `setTaskManager` / `setEducationHub` are now
      *      executor-only. Since this Executor IS the token's `executor`, routing
@@ -238,85 +284,12 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
         }
     }
 
-    /**
-     * @notice Configure vouching on EligibilityModule during initial setup
-     * @dev Only callable by owner before renouncing ownership
-     * @param eligibilityModule Address of the EligibilityModule
-     * @param hatId Hat ID to configure vouching for
-     * @param quorum Number of vouches required
-     * @param membershipHatId Hat ID whose wearers can vouch
-     * @param combineWithHierarchy Whether to combine with parent hat eligibility
-     */
-    function configureVouching(
-        address eligibilityModule,
-        uint256 hatId,
-        uint32 quorum,
-        uint256 membershipHatId,
-        bool combineWithHierarchy
-    ) external onlyOwner {
-        if (eligibilityModule == address(0)) revert ZeroAddress();
-        (bool success,) = eligibilityModule.call(
-            abi.encodeWithSignature(
-                "configureVouching(uint256,uint32,uint256,bool)", hatId, quorum, membershipHatId, combineWithHierarchy
-            )
-        );
-        require(success, "configureVouching failed");
-    }
-
-    /**
-     * @notice Batch configure vouching for multiple hats during initial setup
-     * @dev Only callable by owner before renouncing ownership - gas optimized for org deployment
-     * @param eligibilityModule Address of the EligibilityModule
-     * @param hatIds Array of hat IDs to configure
-     * @param quorums Array of quorum values
-     * @param membershipHatIds Array of membership hat IDs
-     * @param combineWithHierarchyFlags Array of combine flags
-     */
-    function batchConfigureVouching(
-        address eligibilityModule,
-        uint256[] calldata hatIds,
-        uint32[] calldata quorums,
-        uint256[] calldata membershipHatIds,
-        bool[] calldata combineWithHierarchyFlags
-    ) external onlyOwner {
-        if (eligibilityModule == address(0)) revert ZeroAddress();
-        (bool success,) = eligibilityModule.call(
-            abi.encodeWithSignature(
-                "batchConfigureVouching(uint256[],uint32[],uint256[],bool[])",
-                hatIds,
-                quorums,
-                membershipHatIds,
-                combineWithHierarchyFlags
-            )
-        );
-        require(success, "batchConfigureVouching failed");
-    }
-
-    /**
-     * @notice Set default eligibility for a hat during initial setup
-     * @dev Only callable by owner before renouncing ownership
-     * @param eligibilityModule Address of the EligibilityModule
-     * @param hatId Hat ID to set default eligibility for
-     * @param eligible Whether wearers are eligible by default
-     * @param standing Whether wearers have good standing by default
-     */
-    function setDefaultEligibility(address eligibilityModule, uint256 hatId, bool eligible, bool standing)
-        external
-        onlyOwner
-    {
-        if (eligibilityModule == address(0)) revert ZeroAddress();
-        (bool success,) = eligibilityModule.call(
-            abi.encodeWithSignature("setDefaultEligibility(uint256,bool,bool)", hatId, eligible, standing)
-        );
-        require(success, "setDefaultEligibility failed");
-    }
-
     /* ─────────── View Helpers ─────────── */
     function allowedCaller() external view returns (address) {
         return _layout().allowedCaller;
     }
 
-    /// @notice The org's Hats Protocol instance.
+    /// @notice Historical address getter; migrated orgs return their authority here.
     /// @dev    Exposed so authorized hat-minter modules (e.g. ZkEmailInvites) can reach the same Hats
     ///         reference the Executor mints through — without carrying a duplicate, migration-sensitive
     ///         Hats field in their own ERC-7201 storage. Pure getter: safe to add via impl upgrade.
@@ -327,6 +300,17 @@ contract Executor is Initializable, OwnableUpgradeable, PausableUpgradeable, Ree
     /// @notice Whether `minter` is authorized to request hat minting via {mintHatsForUser}.
     function isAuthorizedHatMinter(address minter) external view returns (bool) {
         return _layout().authorizedHatMinters[minter];
+    }
+
+    /// @notice The org's authority, or zero for an inactive, unmigrated module.
+    function membershipAuthority() public view returns (address) {
+        address authority = address(_layout().hats);
+        if (authority == address(0)) return address(0);
+        try IMembershipAuthority(authority).executor() returns (address executor_) {
+            return executor_ == address(this) ? authority : address(0);
+        } catch {
+            return address(0);
+        }
     }
 
     /* accept ETH for payable calls within a batch */

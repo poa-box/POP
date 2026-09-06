@@ -22,6 +22,7 @@ import {EducationHub} from "../src/EducationHub.sol";
 import {ZkEmailInvites} from "../src/ZkEmailInvites.sol";
 import {UniversalAccountRegistry} from "../src/UniversalAccountRegistry.sol";
 import {OrgRegistry} from "../src/OrgRegistry.sol";
+import {IMembershipAuthority} from "../src/interfaces/IMembershipAuthority.sol";
 
 /// @title PaymasterGlobalRulesTest
 /// @notice Coverage for the type-keyed GLOBAL RULEBOOK (PaymasterRuleLib): rulebook admin +
@@ -877,15 +878,12 @@ contract PaymasterGlobalRulesTest is Test {
     }
 
     function _expectedRulebookPairs() internal pure returns (bytes32[] memory p) {
-        p = new bytes32[](52);
+        p = new bytes32[](56);
         uint256 n;
         bytes32 t = ModuleTypes.QUICK_JOIN_ID;
         p[n++] = _pair(t, QuickJoin.quickJoinWithUser.selector);
         p[n++] = _pair(t, QuickJoin.registerAndQuickJoin.selector);
         p[n++] = _pair(t, QuickJoin.registerAndQuickJoinWithPasskey.selector);
-        p[n++] = _pair(t, QuickJoin.claimHatsWithUser.selector);
-        p[n++] = _pair(t, QuickJoin.registerAndClaimHats.selector);
-        p[n++] = _pair(t, QuickJoin.registerAndClaimHatsWithPasskey.selector);
         t = ModuleTypes.TASK_MANAGER_ID;
         p[n++] = _pair(t, TaskManager.createTask.selector);
         p[n++] = _pair(t, TaskManager.createTasksBatch.selector);
@@ -907,9 +905,11 @@ contract PaymasterGlobalRulesTest is Test {
         p[n++] = _pair(ModuleTypes.HYBRID_VOTING_ID, HybridVoting.vote.selector);
         p[n++] = _pair(ModuleTypes.HYBRID_VOTING_ID, HybridVoting.announceWinner.selector);
         p[n++] = _pair(ModuleTypes.HYBRID_VOTING_ID, HybridVoting.createProposal.selector);
+        p[n++] = _pair(ModuleTypes.HYBRID_VOTING_ID, HybridVoting.createProposalV2.selector);
         p[n++] = _pair(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, DirectDemocracyVoting.vote.selector);
         p[n++] = _pair(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, DirectDemocracyVoting.announceWinner.selector);
         p[n++] = _pair(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, DirectDemocracyVoting.createProposal.selector);
+        p[n++] = _pair(ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID, DirectDemocracyVoting.createProposalV2.selector);
         t = ModuleTypes.PAYMENT_MANAGER_ID;
         p[n++] = _pair(t, PaymentManager.claimDistribution.selector);
         p[n++] = _pair(t, PaymentManager.claimMultiple.selector);
@@ -917,11 +917,6 @@ contract PaymasterGlobalRulesTest is Test {
         p[n++] = _pair(t, PaymentManager.createDistribution.selector);
         p[n++] = _pair(t, PaymentManager.finalizeDistribution.selector);
         t = ModuleTypes.ELIGIBILITY_MODULE_ID;
-        p[n++] = _pair(t, EligibilityModule.claimVouchedHat.selector);
-        p[n++] = _pair(t, EligibilityModule.vouchFor.selector);
-        p[n++] = _pair(t, EligibilityModule.revokeVouch.selector);
-        p[n++] = _pair(t, EligibilityModule.applyForRole.selector);
-        p[n++] = _pair(t, EligibilityModule.withdrawApplication.selector);
         t = ModuleTypes.PARTICIPATION_TOKEN_ID;
         p[n++] = _pair(t, ParticipationToken.requestTokens.selector);
         p[n++] = _pair(t, ParticipationToken.approveRequest.selector);
@@ -938,6 +933,17 @@ contract PaymasterGlobalRulesTest is Test {
         p[n++] = _pair(t, ZkEmailInvites.claimRoleByEmail.selector);
         p[n++] = _pair(t, ZkEmailInvites.registerAndClaimByDomainWithPasskey.selector);
         p[n++] = _pair(t, ZkEmailInvites.registerAndClaimByEmailWithPasskey.selector);
+        t = ModuleTypes.MEMBERSHIP_AUTHORITY_ID;
+        p[n++] = _pair(t, IMembershipAuthority.claim.selector);
+        p[n++] = _pair(t, IMembershipAuthority.renounce.selector);
+        p[n++] = _pair(t, IMembershipAuthority.vouch.selector);
+        p[n++] = _pair(t, IMembershipAuthority.revokeVouch.selector);
+        p[n++] = _pair(t, IMembershipAuthority.delegatedGrant.selector);
+        p[n++] = _pair(t, IMembershipAuthority.delegatedOffer.selector);
+        p[n++] = _pair(t, IMembershipAuthority.delegatedRemove.selector);
+        p[n++] = _pair(t, IMembershipAuthority.delegatedUnremove.selector);
+        p[n++] = _pair(t, IMembershipAuthority.finalize.selector);
+        p[n++] = _pair(t, IMembershipAuthority.cancel.selector);
         require(n == p.length, "expected-pair count mismatch");
     }
 

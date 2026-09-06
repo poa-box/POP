@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -69,7 +71,10 @@ contract ExecutorTest is Test {
         Executor impl = new Executor();
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
         exec = Executor(payable(address(new BeaconProxy(address(beacon), ""))));
-        exec.initialize(owner, address(hats));
+        exec.initialize(owner);
+        MockModuleAuthority moduleAuthority = new MockModuleAuthority(address(hats), address(exec));
+        exec.setMembershipAuthority(address(moduleAuthority));
+
         target = new Target();
         exec.setCaller(caller);
     }

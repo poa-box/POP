@@ -1028,6 +1028,23 @@ contract PaymasterHub is IPaymaster, Initializable, UUPSUpgradeable, ReentrancyG
     }
 
     /**
+     * @notice Repoint the hub's hats pointer to the AuthorityRouter (Access v2 §4.8 / §6 step 0.3).
+     * @dev The `hats` slot is written only at {initialize} today (no setter) — without this, the
+     *      router bind is unexecutable. Validation semantics stay byte-identical: the existing
+     *      `IHats(hats).isWearerOfHat(...)` / `isEligible` / `viewHat` calls simply resolve through
+     *      the router once repointed. poaManager/protocolAdmin gated (mirrors {setSolidarityFee}).
+     *      Emits HatsSet.
+     * @param newHats The new hats surface (the AuthorityRouter, or a legacy Hats address for rollback).
+     */
+    function setHats(address newHats) external {
+        MainStorage storage m = _getMainStorage();
+        if (msg.sender != m.poaManager && msg.sender != m.protocolAdmin) revert PaymasterHubErrors.NotOperator();
+        if (newHats == address(0)) revert PaymasterHubErrors.ZeroAddress();
+        m.hats = newHats;
+        emit PaymasterHubErrors.HatsSet(newHats);
+    }
+
+    /**
      * @notice Set the authorized org registrar (e.g. OrgDeployer)
      * @dev Only PoaManager can set the registrar
      * @param registrar Address authorized to call registerOrg

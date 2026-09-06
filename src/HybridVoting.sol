@@ -2,15 +2,16 @@
 pragma solidity ^0.8.30;
 
 /*  OpenZeppelin v5.3 Upgradeables  */
-import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
 import {IExecutor} from "./Executor.sol";
-import {HatManager} from "./libs/HatManager.sol";
 import {VotingMath} from "./libs/VotingMath.sol";
 import {VotingErrors} from "./libs/VotingErrors.sol";
 import {HybridVotingProposals} from "./libs/HybridVotingProposals.sol";
 import {HybridVotingCore} from "./libs/HybridVotingCore.sol";
 import {HybridVotingConfig} from "./libs/HybridVotingConfig.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
+import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 
 /* ─────────────────── HybridVoting ─────────────────── */
 contract HybridVoting is Initializable {
@@ -77,6 +78,23 @@ contract HybridVoting is Initializable {
         bool _paused; // Inline pausable state
         uint256 _lock; // Inline reentrancy guard state
         uint32 quorum; // minimum number of voters required (0 = disabled)
+        // ─── RoleManager Phase 2 (V2) append-only tail ───
+        // NOTE: this Layout is the single source of truth; HybridVotingCore/Config/Proposals all
+        // re-derive the SAME ERC-7201 slot and import this struct, so appends here propagate to the
+        // three libs automatically. Per-proposal override lives in a SIDE mapping keyed by
+        // proposalId — NEVER a field on the Proposal struct (stride corruption). equalWeight needs
+        // no field: it is realised by snapshotting a synthetic DIRECT class at proposal creation.
+        mapping(uint256 => uint32) proposalQuorumOverride; // proposalId => override (0 = none)
+        address configAdmin; // reserved historical slot; no authority
+        // Required MembershipAuthority; zero means an inactive, unmigrated module.
+        address membershipAuthority;
+        uint256 classSubjectSeq; // stable-classId ALLOCATOR (monotonic; ++ starts at 1; 0 = unallocated)
+        mapping(uint256 => uint256) classIdOfIdx; // positional classIdx → stable classId (the idx→classId linkage)
+        mapping(uint256 => uint256) classSubject; // stable classId → subjectId (0 ⇒ fall back to legacy hatIds)
+        mapping(uint256 => mapping(uint256 => uint256)) proposalClassSubjects; // proposalId → classIdx → subjectId (immutable snapshot)
+        // Per-proposal creation timestamp — the authority-path activation-gate anchor (anti-packing,
+        // §4). A SIDE mapping keyed by proposalId, NEVER a Proposal-struct field (stride is frozen).
+        mapping(uint256 => uint64) proposalCreatedAt;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.hybridvoting.v2.storage");
@@ -122,6 +140,11 @@ contract HybridVoting is Initializable {
     event ExecutorUpdated(address newExec);
     event ThresholdPctSet(uint8 pct);
     event QuorumSet(uint32 quorum);
+    // V2 (RoleManager Phase 2): scoped config admin set/cleared. ProposalConfigV2 + ClassHatSet are
+    // declared/emitted in the libraries that own the mutation (HybridVotingProposals / -Config).
+    event ConfigAdminSet(address indexed admin);
+    // Authority changes cannot restore the retired Hats permission path.
+    event MembershipAuthoritySet(address indexed authority);
 
     /* ─────── Initialiser ─────── */
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -129,23 +152,17 @@ contract HybridVoting is Initializable {
         _disableInitializers();
     }
 
-    function initialize(
-        address hats_,
-        address executor_,
-        uint256[] calldata initialCreatorHats,
-        address[] calldata initialTargets,
-        uint8 thresholdPct_,
-        uint32 quorum_,
-        ClassConfig[] calldata initialClasses
-    ) external initializer {
-        if (hats_ == address(0) || executor_ == address(0)) {
+    function initialize(address executor_, uint8 thresholdPct_, uint32 quorum_, ClassConfig[] calldata initialClasses)
+        external
+        initializer
+    {
+        if (executor_ == address(0)) {
             revert VotingErrors.ZeroAddress();
         }
 
         VotingMath.validateThreshold(thresholdPct_);
 
         Layout storage l = _layout();
-        l.hats = IHats(hats_);
         l.executor = IExecutor(executor_);
         l._paused = false; // Initialize paused state
         l._lock = 0; // Initialize reentrancy guard state
@@ -158,23 +175,11 @@ contract HybridVoting is Initializable {
         l.quorum = quorum_;
         emit QuorumSet(quorum_);
 
-        _initializeCreatorHats(initialCreatorHats);
         // initialTargets parameter kept for ABI compatibility but not used;
         // HybridVoting passes batches directly to Executor without target restrictions.
 
         // Use library for class initialization
         HybridVotingConfig.validateAndInitClasses(initialClasses);
-    }
-
-    function _initializeCreatorHats(uint256[] calldata creatorHats) internal {
-        Layout storage l = _layout();
-        uint256 len = creatorHats.length;
-        for (uint256 i; i < len;) {
-            HatManager.setHatInArray(l.creatorHatIds, creatorHats[i], true);
-            unchecked {
-                ++i;
-            }
-        }
     }
 
     /* ─────── Governance setters (executor‑gated) ─────── */
@@ -187,6 +192,50 @@ contract HybridVoting is Initializable {
         if (_msgSender() != address(_layout().executor)) revert VotingErrors.Unauthorized();
     }
 
+    // Class configuration remains governed by the Executor.
+
+    /// @notice Set the org's nonzero MembershipAuthority. Governance-only; no legacy rollback.
+    function setMembershipAuthority(address authority) external onlyExecutor {
+        if (authority == address(0)) revert VotingErrors.ZeroAddress();
+        _layout().membershipAuthority = authority;
+        emit MembershipAuthoritySet(authority);
+    }
+
+    /// @notice Bind positional class index `classIdx` to authority subject `subjectId` (§4). Allocates
+    ///         the stable classId for `classIdx` on first use (`classId = ++classSubjectSeq`) and
+    ///         records the idx→classId linkage; later calls reuse it. `subjectId == 0` clears the
+    ///         binding (class falls back to its legacy `hatIds`). AUTH: executor only.
+    /// @dev Class-config edits that reorder/replace classes re-call this per affected idx — the stable
+    ///      id follows governance's explicit re-assignment, not positional churn. Emits ClassSubjectSet.
+    function setClassSubject(uint256 classIdx, uint256 subjectId) external onlyExecutor {
+        HybridVotingConfig.setClassSubject(classIdx, subjectId);
+    }
+
+    /// @notice The stable classId bound to positional class index `classIdx` (0 = unallocated).
+    function classIdOfIndex(uint256 classIdx) external view returns (uint256 classId) {
+        return _layout().classIdOfIdx[classIdx];
+    }
+
+    /// @notice The subject id bound to stable class id `classId` (0 = none / falls back to hatIds).
+    function classSubjectOf(uint256 classId) external view returns (uint256 subjectId) {
+        return _layout().classSubject[classId];
+    }
+
+    /// @notice The immutable per-proposal subject snapshot for `(proposalId, classIdx)` (0 = none).
+    function proposalClassSubject(uint256 proposalId, uint256 classIdx) external view returns (uint256 subjectId) {
+        return _layout().proposalClassSubjects[proposalId][classIdx];
+    }
+
+    /// @notice The org's authority, or zero for an inactive, unmigrated module.
+    function membershipAuthority() external view returns (address) {
+        return _layout().membershipAuthority;
+    }
+
+    /// @notice Proposal `id`'s creation timestamp — the authority-path activation-gate anchor.
+    function proposalCreatedAt(uint256 id) external view exists(id) returns (uint64) {
+        return _layout().proposalCreatedAt[id];
+    }
+
     function pause() external onlyExecutor {
         _pause();
     }
@@ -196,11 +245,6 @@ contract HybridVoting is Initializable {
     }
 
     /* ─────── Hat Management ─────── */
-    function setCreatorHatAllowed(uint256 h, bool ok) external onlyExecutor {
-        Layout storage l = _layout();
-        HatManager.setHatInArray(l.creatorHatIds, h, ok);
-        emit HatSet(HatType.CREATOR, h, ok);
-    }
 
     enum HatType {
         CREATOR
@@ -209,6 +253,18 @@ contract HybridVoting is Initializable {
     /* ─────── N-Class Configuration ─────── */
     function setClasses(ClassConfig[] calldata newClasses) external onlyExecutor {
         HybridVotingConfig.setClasses(newClasses);
+    }
+
+    /// @notice Add a single hat to class `classIdx`'s voter set (incremental; slices untouched).
+    /// @dev executor only. Kills the read-modify-write of a full setClasses for one hat.
+    function addHatToClass(uint8 classIdx, uint256 hatId) external onlyExecutor {
+        HybridVotingConfig.addHatToClass(classIdx, hatId);
+    }
+
+    /// @notice Remove a single hat from class `classIdx`'s voter set (incremental; slices untouched).
+    /// @dev executor only.
+    function removeHatFromClass(uint8 classIdx, uint256 hatId) external onlyExecutor {
+        HybridVotingConfig.removeHatFromClass(classIdx, hatId);
     }
 
     function getClasses() external view returns (ClassConfig[] memory) {
@@ -266,7 +322,9 @@ contract HybridVoting is Initializable {
     function _checkCreator() private view {
         Layout storage l = _layout();
         if (_msgSender() != address(l.executor)) {
-            bool canCreate = HatManager.hasAnyHat(l.hats, l.creatorHatIds, _msgSender());
+            address a = l.membershipAuthority;
+            if (a == address(0)) revert VotingErrors.ZeroAddress();
+            bool canCreate = IMembershipAuthority(a).hasPerm(_msgSender(), AccessV2PermKeys.HV_CREATE, bytes32(0)) != 0;
             if (!canCreate) revert VotingErrors.Unauthorized();
         }
     }
@@ -289,6 +347,30 @@ contract HybridVoting is Initializable {
         uint256[] calldata hatIds
     ) external onlyCreator whenNotPaused {
         HybridVotingProposals.createProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds);
+    }
+
+    /// @notice Create a proposal with a per-proposal quorum override and/or equalWeight tally.
+    /// @dev Adds per-proposal overrides alongside the original createProposal selector:
+    ///      - `quorumOverride`/`equalWeight` are only allowed on RESTRICTED polls (`hatIds.length > 0`);
+    ///        an unrestricted proposal MUST pass 0/false or it reverts (InvalidQuorum).
+    ///      - Executable proposals raise-only: effective quorum = max(globalQuorum, override).
+    ///      - Non-executable signal polls: effective quorum = override.
+    ///      - `equalWeight` snapshots a single synthetic DIRECT class {slicePct:100, hatIds: pollHatIds}
+    ///        so every eligible voter counts once regardless of token balances; vote()/announceWinner()
+    ///        machinery is unchanged.
+    function createProposalV2(
+        bytes calldata title,
+        bytes32 descriptionHash,
+        uint32 minutesDuration,
+        uint8 numOptions,
+        IExecutor.Call[][] calldata batches,
+        uint256[] calldata hatIds,
+        uint32 quorumOverride,
+        bool equalWeight
+    ) external onlyCreator whenNotPaused {
+        HybridVotingProposals.createProposalV2(
+            title, descriptionHash, minutesDuration, numOptions, batches, hatIds, quorumOverride, equalWeight
+        );
     }
 
     /* ─────── Voting ─────── */
@@ -321,7 +403,7 @@ contract HybridVoting is Initializable {
     }
 
     function creatorHats() external view returns (uint256[] memory) {
-        return HatManager.getHatArray(_layout().creatorHatIds);
+        return _layout().creatorHatIds;
     }
 
     function pollRestricted(uint256 id) external view exists(id) returns (bool) {
@@ -337,6 +419,16 @@ contract HybridVoting is Initializable {
 
     function pollHatAllowed(uint256 id, uint256 hat) external view exists(id) returns (bool) {
         return _layout()._proposals[id].pollHatAllowed[hat];
+    }
+
+    /// @notice Per-proposal quorum override (0 = none / legacy proposal). See createProposalV2.
+    function proposalQuorumOverride(uint256 id) external view exists(id) returns (uint32) {
+        return _layout().proposalQuorumOverride[id];
+    }
+
+    /// @notice Historical config-admin address, retained only for reading old state.
+    function configAdmin() external view returns (address) {
+        return _layout().configAdmin;
     }
 
     function executor() external view returns (address) {
