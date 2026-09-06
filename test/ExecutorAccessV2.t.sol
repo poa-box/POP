@@ -74,16 +74,37 @@ contract ExecutorAccessV2Test is Test {
     }
 
     function testUnmigratedLegacyHatsCannotMint() public {
-        // Model an upgraded V1 proxy: its first namespaced slot still holds real Hats.
-        vm.store(address(exec), keccak256("poa.executor.storage"), bytes32(uint256(uint160(address(legacyHats)))));
-        assertEq(exec.membershipAuthority(), address(0));
         exec.setHatMinterAuthorization(stranger, true);
+        // Model an upgraded V1 proxy: allowedCaller occupies the namespace base,
+        // followed by the original Hats pointer. Assert the fixture before testing the gate.
+        bytes32 hatsSlot = bytes32(uint256(keccak256("poa.executor.storage")) + 1);
+        vm.store(address(exec), hatsSlot, bytes32(uint256(uint160(address(legacyHats)))));
+        assertEq(address(exec.hats()), address(legacyHats), "fixture retains the nonzero V1 Hats pointer");
+        assertEq(exec.allowedCaller(), governance, "fixture preserves governance");
+        assertTrue(exec.isAuthorizedHatMinter(stranger), "fixture preserves the authorized minter");
+        assertEq(exec.membershipAuthority(), address(0));
+        exec.renounceOwnership();
         uint256[] memory ids = new uint256[](1);
         ids[0] = 1;
         vm.prank(stranger);
         vm.expectRevert(Executor.ZeroAddress.selector);
         exec.mintHatsForUser(stranger, ids);
         assertFalse(legacyHats.isWearerOfHat(stranger, 1));
+
+        // A surviving org can still cut over through governance after ownership is renounced.
+        // Use separate membership state so a legacy fallback cannot satisfy the positive check.
+        MockHats authorityMembers = new MockHats();
+        address authority = address(new MockModuleAuthority(address(authorityMembers), address(exec)));
+        vm.prank(governance);
+        exec.setMembershipAuthority(authority);
+        assertEq(address(exec.hats()), authority);
+        assertEq(exec.membershipAuthority(), authority);
+        assertEq(exec.allowedCaller(), governance);
+        assertTrue(exec.isAuthorizedHatMinter(stranger));
+        vm.prank(stranger);
+        exec.mintHatsForUser(stranger, ids);
+        assertTrue(authorityMembers.isWearerOfHat(stranger, 1), "mint routed through the current authority");
+        assertFalse(legacyHats.isWearerOfHat(stranger, 1), "legacy Hats never receive the mint");
     }
 
     function testOwnerCanRepoint() public {
