@@ -147,6 +147,10 @@ library PaymasterHubErrors {
     /// @notice Emitted when the PaymasterHub is initialized
     event PaymasterInitialized(address indexed entryPoint, address indexed hats, address indexed poaManager);
 
+    /// @notice Emitted when the hub's hats pointer is repointed (Access v2 §4.8 / §6 step 0.3 — the
+    ///         router bind); validation semantics are unchanged.
+    event HatsSet(address indexed hats);
+
     /// @notice Emitted when a new organization is registered
     event OrgRegistered(bytes32 indexed orgId, uint256 adminHatId, uint256 operatorHatId);
 

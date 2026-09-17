@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 library VotingErrors {
+    error InvalidConfigKey();
     error Unauthorized();
     error AlreadyVoted();
     error InvalidProposal();

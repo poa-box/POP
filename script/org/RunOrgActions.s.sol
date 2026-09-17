@@ -9,7 +9,6 @@ import {TaskManager} from "../../src/TaskManager.sol";
 import {HybridVoting} from "../../src/HybridVoting.sol";
 import {ParticipationToken} from "../../src/ParticipationToken.sol";
 import {QuickJoin} from "../../src/QuickJoin.sol";
-import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 import {Executor, IExecutor} from "../../src/Executor.sol";
 import {IHybridVotingInit} from "../../src/libs/ModuleDeploymentLib.sol";
 import {OrgRegistry} from "../../src/OrgRegistry.sol";
@@ -190,7 +189,6 @@ contract RunOrgActions is Script {
     OrgContracts public org;
     MemberAddresses public members;
     MemberKeys public memberKeys;
-    IHats public hats;
 
     /*=========================== MAIN ===========================*/
 
@@ -230,12 +228,9 @@ contract RunOrgActions is Script {
         string memory infraJson = vm.readFile("script/config/infrastructure.json");
         address orgDeployerAddr = vm.parseJsonAddress(infraJson, ".orgDeployer");
         address globalAccountRegistry = vm.parseJsonAddress(infraJson, ".globalAccountRegistry");
-        address hatsAddr = vm.parseJsonAddress(infraJson, ".hatsProtocol");
         address orgRegistryAddr = vm.parseJsonAddress(infraJson, ".orgRegistry");
 
         require(orgDeployerAddr != address(0), "OrgDeployer not found - deploy infrastructure first");
-
-        hats = IHats(hatsAddr);
 
         // Get org config path
         string memory configPath = vm.envOr("ORG_CONFIG_PATH", string("script/config/org-config-governance-demo.json"));
@@ -923,22 +918,20 @@ contract RunOrgActions is Script {
                 image: role.image,
                 metadataCID: bytes32(0),
                 canVote: role.canVote,
+                // Access v2 mapping of the JSON schema's Hats-era knobs: "default eligible" IS the
+                // subject's default-ALLOW verdict, and maxSupply IS the member cap (uint32 max meant
+                // unlimited, which the authority spells as 0). Hierarchy / standing / mutability have
+                // no analogue — subjects are flat and always renameable by SUBJECT_RENAME holders.
+                open: role.defaults.eligible,
+                maxMembers: role.hatConfig.maxSupply == type(uint32).max ? 0 : role.hatConfig.maxSupply,
                 vouching: RoleConfigStructs.RoleVouchingConfig({
                     enabled: role.vouching.enabled,
                     quorum: role.vouching.quorum,
-                    voucherRoleIndex: role.vouching.voucherRoleIndex,
-                    combineWithHierarchy: role.vouching.combineWithHierarchy
+                    voucherRoleIndex: role.vouching.voucherRoleIndex
                 }),
-                defaults: RoleConfigStructs.RoleEligibilityDefaults({
-                    eligible: role.defaults.eligible, standing: role.defaults.standing
-                }),
-                hierarchy: RoleConfigStructs.RoleHierarchyConfig({adminRoleIndex: role.hierarchy.adminRoleIndex}),
                 distribution: RoleConfigStructs.RoleDistributionConfig({
                     mintToDeployer: role.distribution.mintToDeployer,
                     additionalWearers: role.distribution.additionalWearers
-                }),
-                hatConfig: RoleConfigStructs.HatConfig({
-                    maxSupply: role.hatConfig.maxSupply, mutableHat: role.hatConfig.mutableHat
                 })
             });
         }

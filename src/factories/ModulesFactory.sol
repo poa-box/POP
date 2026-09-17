@@ -66,7 +66,7 @@ contract ModulesFactory {
         address executor;
         address deployer; // OrgDeployer address for registration callbacks
         address participationToken;
-        uint256[] roleHatIds;
+        uint256[] roleSubjectIds;
         bool autoUpgrade;
         RoleAssignments roleAssignments;
         EducationHubConfig educationHubConfig; // EducationHub deployment configuration
@@ -112,10 +112,9 @@ contract ModulesFactory {
 
         /* 1. Deploy TaskManager (without registration) */
         {
-            // Get the role hat IDs for creator permissions
-            uint256[] memory creatorHats = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.taskCreatorRolesBitmap
-            );
+            // Subject ids for the TaskManager organizer list
+            uint256[] memory creatorSubjects =
+                RoleResolver.resolveRoleBitmap(params.roleSubjectIds, params.roleAssignments.taskCreatorRolesBitmap);
 
             taskManagerBeacon = BeaconDeploymentLib.createBeacon(
                 ModuleTypes.TASK_MANAGER_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)
@@ -132,21 +131,13 @@ contract ModulesFactory {
             });
 
             result.taskManager = ModuleDeploymentLib.deployTaskManager(
-                config, params.executor, params.participationToken, creatorHats, taskManagerBeacon, params.deployer
+                config, params.executor, params.participationToken, creatorSubjects, taskManagerBeacon, params.deployer
             );
         }
 
         /* 2. Deploy EducationHub if enabled (without registration) */
         if (params.educationHubConfig.enabled) {
-            // Get the role hat IDs for creator and member permissions
-            uint256[] memory creatorHats = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.educationCreatorRolesBitmap
-            );
-
-            uint256[] memory memberHats = RoleResolver.resolveRoleBitmap(
-                OrgRegistry(params.orgRegistry), params.orgId, params.roleAssignments.educationMemberRolesBitmap
-            );
-
+            // Subject ids for the EducationHub creator / member lists
             educationHubBeacon = BeaconDeploymentLib.createBeacon(
                 ModuleTypes.EDUCATION_HUB_ID, params.poaManager, params.executor, params.autoUpgrade, address(0)
             );
@@ -162,7 +153,7 @@ contract ModulesFactory {
             });
 
             result.educationHub = ModuleDeploymentLib.deployEducationHub(
-                config, params.executor, params.participationToken, creatorHats, memberHats, educationHubBeacon
+                config, params.executor, params.participationToken, educationHubBeacon
             );
         }
 

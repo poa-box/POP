@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -43,35 +45,35 @@ contract UpgradeSafetyTest is Test {
     function testExecutorImplCannotBeInitialized() public {
         Executor impl = new Executor();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, HATS);
+        impl.initialize(OWNER);
     }
 
     function testParticipationTokenImplCannotBeInitialized() public {
         ParticipationToken impl = new ParticipationToken();
         uint256[] memory hats = new uint256[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, "Token", "TKN", HATS, hats, hats);
+        impl.initialize(OWNER, "Token", "TKN");
     }
 
     function testTaskManagerImplCannotBeInitialized() public {
         TaskManager impl = new TaskManager();
         uint256[] memory hats = new uint256[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, HATS, hats, OWNER, OWNER);
+        impl.initialize(OWNER, hats, OWNER, OWNER);
     }
 
     function testQuickJoinImplCannotBeInitialized() public {
         QuickJoin impl = new QuickJoin();
         uint256[] memory hats = new uint256[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, HATS, OWNER, OWNER, hats);
+        impl.initialize(OWNER, OWNER, OWNER);
     }
 
     function testEducationHubImplCannotBeInitialized() public {
         EducationHub impl = new EducationHub();
         uint256[] memory hats = new uint256[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, HATS, OWNER, hats, hats);
+        impl.initialize(OWNER, OWNER);
     }
 
     function testPaymentManagerImplCannotBeInitialized() public {
@@ -98,7 +100,7 @@ contract UpgradeSafetyTest is Test {
         address[] memory targets = new address[](0);
         HybridVoting.ClassConfig[] memory classes = new HybridVoting.ClassConfig[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(HATS, OWNER, hats, targets, 51, 0, classes);
+        impl.initialize(OWNER, 51, 0, classes);
     }
 
     function testDirectDemocracyVotingImplCannotBeInitialized() public {
@@ -106,7 +108,7 @@ contract UpgradeSafetyTest is Test {
         uint256[] memory hats = new uint256[](0);
         address[] memory targets = new address[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(HATS, OWNER, hats, hats, targets, 51, 0);
+        impl.initialize(OWNER, targets, 51, 0);
     }
 
     function testOrgRegistryImplCannotBeInitialized() public {
@@ -150,7 +152,7 @@ contract UpgradeSafetyTest is Test {
     function testOrgDeployerImplCannotBeInitialized() public {
         OrgDeployer impl = new OrgDeployer();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(OWNER, OWNER, OWNER, OWNER, OWNER, HATS, OWNER, OWNER);
+        impl.initialize(OWNER, OWNER, OWNER, OWNER, OWNER, HATS, OWNER);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -258,7 +260,10 @@ contract UpgradeSafetyTest is Test {
         uint256[] memory creators = new uint256[](1);
         creators[0] = creatorHat;
         vm.prank(creator);
-        tm.initialize(token, address(hats), creators, exec, address(0));
+        tm.initialize(token, creators, exec, address(0));
+        MockModuleAuthority authority = new MockModuleAuthority(address(hats), exec);
+        vm.prank(exec);
+        tm.setMembershipAuthority(address(authority));
 
         // Pre-upgrade state: an organizer hat allowance + a project + a folders root.
         vm.prank(exec);
@@ -271,7 +276,7 @@ contract UpgradeSafetyTest is Test {
                 metadataHash: bytes32(0),
                 cap: 5 ether,
                 managers: new address[](0),
-                createHats: creators,
+                createHats: new uint256[](0),
                 claimHats: new uint256[](0),
                 reviewHats: new uint256[](0),
                 assignHats: new uint256[](0),

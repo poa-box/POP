@@ -52,7 +52,8 @@ import {ZkEmailInvites} from "../../src/ZkEmailInvites.sol";
  * whose rules were set by their own scripts, and Test6's ceremony already wrote the correct
  * selectors). But the zk infra IS wired on both chains (OrgDeployer layout +10/+11/+12 all
  * non-zero) and the ZkEmailInvites beacon IS registered on both, so the bug is armed for the very
- * next `deployFullOrgWithZkEmail` — land this BEFORE broadcasting script/org/DeployComfiestHouse.
+ * next `deployFullOrgWithZkEmail` — land this BEFORE broadcasting any org-deploy script that opts
+ * into ZK Email invites.
  *
  * Uses the fee-free upgrade path (CLAUDE.md: prefer the destination chain over a Hyperlane
  * dispatch) — Satellite.upgradeBeaconDirect on Gnosis, Hub.upgradeBeaconLocal on Arbitrum. No
@@ -209,6 +210,7 @@ abstract contract ZkEmailRulesBase is Script {
             hybridClasses: _fixtureClasses(),
             ddInitialTargets: new address[](0),
             roles: _fixtureRoles(),
+            groups: new RoleConfigStructs.GroupConfig[](0),
             roleAssignments: _fixtureAssignments(),
             metadataAdminRoleIndex: type(uint256).max,
             passkeyEnabled: false,
@@ -244,15 +246,12 @@ abstract contract ZkEmailRulesBase is Script {
             image: "",
             metadataCID: bytes32(0),
             canVote: true,
-            vouching: RoleConfigStructs.RoleVouchingConfig({
-                enabled: false, quorum: 0, voucherRoleIndex: 0, combineWithHierarchy: false
-            }),
-            defaults: RoleConfigStructs.RoleEligibilityDefaults({eligible: true, standing: true}),
-            hierarchy: RoleConfigStructs.RoleHierarchyConfig({adminRoleIndex: type(uint256).max}),
+            open: true,
+            maxMembers: 0,
+            vouching: RoleConfigStructs.RoleVouchingConfig({enabled: false, quorum: 0, voucherRoleIndex: 0}),
             distribution: RoleConfigStructs.RoleDistributionConfig({
                 mintToDeployer: true, additionalWearers: new address[](0)
-            }),
-            hatConfig: RoleConfigStructs.HatConfig({maxSupply: 0, mutableHat: true})
+            })
         });
     }
 

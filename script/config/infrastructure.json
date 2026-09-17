@@ -8,6 +8,5 @@
   "hatsProtocol": "0x3bc1A0Ad72417f2d411118085256fC53CBdDd137",
   "governanceFactory": "0x2e3BCa0b6902285b7e8D747A14f118EbB8DB997D",
   "accessFactory": "0x05Db5Cf1540683A888E7aC656d7373aa03864a8c",
-  "modulesFactory": "0x0b5b1410E6e8FeE4eCd07C69CdDCf860eCc44981",
-  "hatsTreeSetup": "0xdc7C14AB68fcCf9bcD255f5be684EbDc892Da13a"
+  "modulesFactory": "0x0b5b1410E6e8FeE4eCd07C69CdDCf860eCc44981"
 }

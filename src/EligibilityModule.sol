@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import "../lib/hats-protocol/src/Interfaces/IHats.sol";
 import "../lib/hats-protocol/src/Interfaces/IHatsEligibility.sol";
 import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {EligibilityLogic} from "./libs/EligibilityLogic.sol";
 
 /**
  * @notice Minimal interface for ToggleModule - only includes functions we actually use
@@ -51,6 +52,20 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     error InvalidApplicationHash();
     error DefaultEligibilityConflictsWithVouch();
     error NotAuthorizedEmailVerifier();
+    error NotSuperAdminOrRoleManager();
+    error DerivedConflictsWithVouch(); // bidirectional derived<->vouch guard
+    error NestedDerivedHat(); // member hat has its own derived config, or target hat is a member elsewhere
+    error NotClaimableHat(); // claimHat: eligibility is default-open only (H-03 class)
+    error AlreadyWearingHat(); // claimHat/claimHats: caller already wears the hat (single-claim variant)
+    error TooManyClaims(); // claimHats: batch length exceeds MAX_CLAIM_BATCH
+    error UnexpectedHatId(); // createHatWithEligibilityChecked: created id != expectedHatId
+    error CannotKickGovernanceRuled(); // kick/finalize: target has a governance-owned non-(true,true) rule
+    error KickIneffective(); // kick reconcile: wearer still holds the hat after the ban (honest revert)
+    error NoPendingKick(); // finalize/cancel: no pending kick recorded for (wearer, hat)
+    error KickNotReady(); // finalize: called before effectiveAt
+    error NotAuthorizedToKick(); // kick/finalize/cancel/unkick: caller/kicker lacks the kicker hat (or auth)
+    error KickNotEnabled(); // kick/unkick: no enabled kick config for the hat
+    error NotDelegatedKick(); // unkick: current rule is not exactly a delegated-kick ban (0x04)
 
     /*═════════════════════════════════════════ STRUCTS ═════════════════════════════════════════*/
 
@@ -64,6 +79,21 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         uint32 quorum; // Number of vouches required
         uint256 membershipHatId; // Hat ID whose wearers can vouch
         uint8 flags; // Packed flags: bit 0 = enabled, bit 1 = combineWithHierarchy
+    }
+
+    /// @notice Per-hat delegated-kick configuration (Primitive B). MUST stay byte-identical to
+    ///         {EligibilityLogic.KickConfig}.
+    struct KickConfig {
+        uint256 kickerHatId; // wearers of this hat may kick/unkick wearers of the target hat
+        uint32 delaySecs; // 0 = kick applies immediately; else the pending-kick effect delay
+        bool enabled;
+    }
+
+    /// @notice A pending (delayed) kick awaiting finalize. MUST stay byte-identical to
+    ///         {EligibilityLogic.PendingKick}.
+    struct PendingKick {
+        uint64 effectiveAt; // 0 = no pending kick
+        address kicker; // the original kicker (re-checked at finalize)
     }
 
     /// @notice Parameters for creating a hat with eligibility configuration
@@ -116,6 +146,18 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         // org's authorized claim contracts (e.g. ZkEmailInvites) after a valid zk-email proof. Appended
         // for upgrade safety (ERC-7201 append-only).
         mapping(uint256 => mapping(address => bool)) emailVerified; // hatId => wearer => verified
+        // Derived (group) eligibility (FOURTH path, alongside hierarchy rules + vouching + email): a
+        // scoped secondary admin (RoleManager) may configure a group marker hat to derive eligibility
+        // from a flat list of member identity hats — a wearer of ANY listed member hat is eligible +
+        // in standing for the group hat, unless an explicit per-wearer rule says otherwise (kick wins).
+        // Appended for upgrade safety (ERC-7201 append-only).
+        address roleManager; // scoped secondary admin (0 = none)
+        mapping(uint256 => uint256[]) groupMemberHats; // group hat => member identity hats (derived eligibility)
+        mapping(uint256 => uint256) groupMembershipRefCount; // hat => number of groups listing it as a member
+        // Delegated-kick primitive (Primitive B). Appended for upgrade safety (ERC-7201 append-only) —
+        // MUST mirror {EligibilityLogic.Layout} byte-for-byte.
+        mapping(uint256 => KickConfig) kickConfigs; // hatId => kick config
+        mapping(uint256 => mapping(address => PendingKick)) pendingKicks; // hatId => wearer => pending kick
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.eligibilitymodule.storage");
@@ -155,6 +197,8 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     uint8 private constant ENABLED_FLAG = 0x01; // bit 0
     uint8 private constant COMBINE_HIERARCHY_FLAG = 0x02; // bit 1
+    /// @dev WearerRules.flags bit 2: DELEGATION_MANAGED provenance (delegated kick / RM-mediated write).
+    uint8 private constant DELEGATION_MANAGED = 0x04;
 
     /*═══════════════════════════════════ METADATA CONSTANTS ═══════════════════════════════════════*/
 
@@ -163,6 +207,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     /*═══════════════════════════════════ RATE LIMITING CONSTANTS ═══════════════════════════════════*/
 
     uint32 private constant DEFAULT_MAX_DAILY_VOUCHES = 20;
+    uint256 private constant MAX_CLAIM_BATCH = 20; // claimHats: max hats accepted in one batch call
     uint256 private constant NEW_USER_RESTRICTION_DAYS = 0; // Removed wait period for immediate vouching
     uint256 private constant SECONDS_PER_DAY = 86400;
 
@@ -171,6 +216,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     event WearerEligibilityUpdated(
         address indexed wearer, uint256 indexed hatId, bool eligible, bool standing, address indexed admin
     );
+    event WearerEligibilityCleared(address indexed wearer, uint256 indexed hatId, address indexed admin);
     event DefaultEligibilityUpdated(uint256 indexed hatId, bool eligible, bool standing, address indexed admin);
     event EmailVerifiedSet(address indexed wearer, uint256 indexed hatId, address indexed verifier);
     event EmailVerifiedCleared(address indexed wearer, uint256 indexed hatId, address indexed admin);
@@ -205,11 +251,32 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     event RoleApplicationSubmitted(uint256 indexed hatId, address indexed applicant, bytes32 applicationHash);
     event RoleApplicationWithdrawn(uint256 indexed hatId, address indexed applicant);
     event MaxDailyVouchesSet(uint32 maxDailyVouches);
+    event RoleManagerSet(address indexed roleManager);
+    event GroupEligibilitySet(uint256 indexed groupHatId, uint256[] memberHats);
+    event HatConfigUpdated(uint256 indexed hatId, uint32 newMaxSupply);
+    event KickConfigSet(uint256 indexed hatId, uint256 indexed kickerHatId, uint32 delaySecs, bool enabled);
+    event KickPending(uint256 indexed hatId, address indexed wearer, address indexed kicker, uint64 effectiveAt);
+    event KickCancelled(uint256 indexed hatId, address indexed wearer, address indexed by);
+    event WearerKicked(uint256 indexed hatId, address indexed wearer, address indexed kicker);
+    event WearerUnkicked(uint256 indexed hatId, address indexed wearer, address indexed by);
 
     /*═════════════════════════════════════════ MODIFIERS ═════════════════════════════════════════*/
 
     modifier onlySuperAdmin() {
         if (msg.sender != _layout().superAdmin) revert NotSuperAdmin();
+        _;
+    }
+
+    /// @dev Permits the org superAdmin (Executor/governance) OR the scoped RoleManager module. The
+    ///      RoleManager is a SCOPED secondary admin — this gate is applied ONLY to the whitelisted
+    ///      wiring/config functions (never to transferSuperAdmin/setToggleModule/setWearerEligibility/
+    ///      pause), so a buggy or compromised RoleManager cannot seize root, kick members, or repoint
+    ///      the toggle module (crit-security C-2/M-3).
+    modifier onlySuperAdminOrRoleManager() {
+        Layout storage l = _layout();
+        if (msg.sender != l.superAdmin && (l.roleManager == address(0) || msg.sender != l.roleManager)) {
+            revert NotSuperAdminOrRoleManager();
+        }
         _;
     }
 
@@ -260,7 +327,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     function setDefaultEligibility(uint256 hatId, bool _eligible, bool _standing)
         external
-        onlySuperAdmin
+        onlySuperAdminOrRoleManager
         whenNotPaused
     {
         Layout storage l = _layout();
@@ -274,12 +341,18 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         emit DefaultEligibilityUpdated(hatId, _eligible, _standing, msg.sender);
     }
 
-    function clearWearerEligibility(address wearer, uint256 hatId) external onlySuperAdmin whenNotPaused {
+    function clearWearerEligibility(address wearer, uint256 hatId) external onlySuperAdminOrRoleManager whenNotPaused {
         if (wearer == address(0)) revert ZeroAddress();
         Layout storage l = _layout();
         delete l.wearerRules[wearer][hatId];
         delete l.hasSpecificWearerRules[wearer][hatId];
-        emit WearerEligibilityUpdated(wearer, hatId, false, false, msg.sender);
+        // A rule write voids any pending delegated kick for this (wearer, hat) — governance/RM actions
+        // always reset provenance so a stale pending kick cannot re-ban after a reinstatement.
+        delete l.pendingKicks[hatId][wearer];
+        // Distinct event: a CLEAR falls back to the hat's default rules — emitting
+        // WearerEligibilityUpdated(false,false) here (the old behavior) was log-indistinguishable
+        // from an explicit ban and made indexers show routine grant-path cleanups as kicks.
+        emit WearerEligibilityCleared(wearer, hatId, msg.sender);
     }
 
     /*═══════════════════════════════ EMAIL-VERIFIED ELIGIBILITY ═══════════════════════════════════*/
@@ -347,6 +420,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
             if (wearer == address(0)) revert ZeroAddress();
             l.wearerRules[wearer][hatId] = WearerRules(packedFlags);
             l.hasSpecificWearerRules[wearer][hatId] = true;
+            delete l.pendingKicks[hatId][wearer]; // rule write voids any pending delegated kick
             unchecked {
                 ++i;
             }
@@ -359,6 +433,9 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         Layout storage l = _layout();
         l.wearerRules[wearer][hatId] = WearerRules(_packWearerFlags(_eligible, _standing));
         l.hasSpecificWearerRules[wearer][hatId] = true;
+        // Direct superAdmin write => governance-owned (provenance bit clear, correct-by-construction via
+        // _packWearerFlags), and voids any pending delegated kick for this (wearer, hat).
+        delete l.pendingKicks[hatId][wearer];
         emit WearerEligibilityUpdated(wearer, hatId, _eligible, _standing, msg.sender);
     }
 
@@ -390,6 +467,15 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         if (defaultEligible) revert DefaultEligibilityConflictsWithVouch();
     }
 
+    /// @dev Bidirectional derived<->vouch guard (mirror of the M-03 pattern). Reverts if `hatId` has a
+    ///      non-empty derived (group) member list — the derived path grants eligibility independently of
+    ///      the vouch quorum (like the email path), so mixing it with vouching would silently bypass the
+    ///      quorum. Used by every vouch-config writer (when enabling) and by setGroupEligibility's
+    ///      counterpart check runs the reverse direction.
+    function _requireNoDerivedVouchConflict(uint256 hatId) internal view {
+        if (_layout().groupMemberHats[hatId].length > 0) revert DerivedConflictsWithVouch();
+    }
+
     /*═══════════════════════════════════ BATCH OPERATIONS ═══════════════════════════════════════*/
 
     function batchSetWearerEligibility(
@@ -411,13 +497,14 @@ contract EligibilityModule is Initializable, IHatsEligibility {
                 address wearer = wearers[i];
                 l.wearerRules[wearer][hatId] = WearerRules(_packWearerFlags(eligibleFlags[i], standingFlags[i]));
                 l.hasSpecificWearerRules[wearer][hatId] = true;
+                delete l.pendingKicks[hatId][wearer]; // rule write voids any pending delegated kick
                 emit WearerEligibilityUpdated(wearer, hatId, eligibleFlags[i], standingFlags[i], msg.sender);
             }
         }
     }
 
     /**
-     * @notice Batch set wearer eligibility across multiple hats - optimized for HatsTreeSetup
+     * @notice Batch set wearer eligibility across multiple hats - optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @dev Sets eligibility for multiple (wearer, hatId) pairs in a single call
      * @param wearers Array of wearer addresses
      * @param hatIds Array of hat IDs (must match wearers length)
@@ -442,6 +529,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
                 uint256 hatId = hatIds[i];
                 l.wearerRules[wearer][hatId] = WearerRules(packedFlags);
                 l.hasSpecificWearerRules[wearer][hatId] = true;
+                delete l.pendingKicks[hatId][wearer]; // rule write voids any pending delegated kick
                 emit WearerEligibilityUpdated(wearer, hatId, eligible, standing, msg.sender);
             }
         }
@@ -456,7 +544,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
      */
     function batchSetDefaultEligibility(uint256[] calldata hatIds, bool[] calldata eligibles, bool[] calldata standings)
         external
-        onlySuperAdmin
+        onlySuperAdminOrRoleManager
         whenNotPaused
     {
         uint256 length = hatIds.length;
@@ -479,11 +567,11 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     /**
      * @notice Batch mint hats to multiple wearers
-     * @dev Mints multiple hats in a single call - optimized for HatsTreeSetup
+     * @dev Mints multiple hats in a single call - optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @param hatIds Array of hat IDs to mint
      * @param wearers Array of addresses to receive hats
      */
-    function batchMintHats(uint256[] calldata hatIds, address[] calldata wearers) external onlySuperAdmin {
+    function batchMintHats(uint256[] calldata hatIds, address[] calldata wearers) external onlySuperAdminOrRoleManager {
         uint256 length = hatIds.length;
         if (length != wearers.length) revert ArrayLengthMismatch();
 
@@ -499,7 +587,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     /**
      * @notice Batch register hat creations for subgraph indexing
-     * @dev Registers multiple hats in a single call - optimized for HatsTreeSetup
+     * @dev Registers multiple hats in a single call - optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @param hatIds Array of hat IDs that were created
      * @param parentHatIds Array of parent hat IDs
      * @param defaultEligibles Array of default eligibility flags
@@ -533,7 +621,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     }
 
     /**
-     * @dev Registers multiple hats with metadata in a single call - optimized for HatsTreeSetup
+     * @dev Registers multiple hats with metadata in a single call - optimized for legacy tree setup (HatsTreeSetup, deleted in Wave F)
      * @dev This version also emits HatMetadataUpdated events for subgraph indexing
      * @param hatIds Array of hat IDs that were created
      * @param parentHatIds Array of parent hat IDs
@@ -580,9 +668,28 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     function createHatWithEligibility(CreateHatParams calldata params)
         external
-        onlySuperAdmin
+        onlySuperAdminOrRoleManager
         returns (uint256 newHatId)
     {
+        newHatId = _createHatWithEligibility(params);
+    }
+
+    /// @notice Same as {createHatWithEligibility} but reverts if the created id != `expectedHatId`
+    ///         (when `expectedHatId != 0`) — an on-chain drift guard for callers that predicted the id
+    ///         off-chain (e.g. RoleManager fan-out sequencing). `expectedHatId == 0` skips the check.
+    /// @dev onlySuperAdminOrRoleManager. Emits the same events as {createHatWithEligibility}.
+    function createHatWithEligibilityChecked(CreateHatParams calldata params, uint256 expectedHatId)
+        external
+        onlySuperAdminOrRoleManager
+        returns (uint256 newHatId)
+    {
+        newHatId = _createHatWithEligibility(params);
+        if (expectedHatId != 0 && newHatId != expectedHatId) revert UnexpectedHatId();
+    }
+
+    /// @dev Shared body for {createHatWithEligibility} and {createHatWithEligibilityChecked}. Access is
+    ///      enforced by the external wrappers' modifiers; `msg.sender` is preserved for event emission.
+    function _createHatWithEligibility(CreateHatParams calldata params) internal returns (uint256 newHatId) {
         Layout storage l = _layout();
 
         // Create the new hat
@@ -624,7 +731,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
     }
 
     /// @notice Register a hat that was created externally and emit the HatCreatedWithEligibility event
-    /// @dev Used by HatsTreeSetup to emit events for subgraph indexing without needing admin rights to create hats
+    /// @dev Used by legacy tree setup (HatsTreeSetup, deleted in Wave F) to emit events for subgraph indexing without needing admin rights to create hats
     /// @param hatId The ID of the hat that was created
     /// @param parentHatId The ID of the parent hat
     /// @param defaultEligible Whether wearers are eligible by default
@@ -688,7 +795,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         emit EligibilityModuleAdminHatSet(hatId);
     }
 
-    function mintHatToAddress(uint256 hatId, address wearer) external onlySuperAdmin {
+    function mintHatToAddress(uint256 hatId, address wearer) external onlySuperAdminOrRoleManager {
         bool success = _layout().hats.mintHat(hatId, wearer);
         require(success, "Hat minting failed");
     }
@@ -739,7 +846,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
      */
     function updateHatMetadata(uint256 hatId, string memory name, bytes32 metadataCID)
         external
-        onlySuperAdmin
+        onlySuperAdminOrRoleManager
         whenNotPaused
     {
         string memory details = _formatHatDetails(name, metadataCID);
@@ -781,7 +888,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     function configureVouching(uint256 hatId, uint32 quorum, uint256 membershipHatId, bool combineWithHierarchy)
         external
-        onlySuperAdmin
+        onlySuperAdminOrRoleManager
     {
         Layout storage l = _layout();
         bool enabled = quorum > 0;
@@ -790,6 +897,11 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         // in), so any wearer clears the hat regardless of vouches. Reject it — governance must clear the
         // default-eligible flag first (setDefaultEligibility(hatId, false, ...)).
         _requireNoDefaultVouchConflictOnVouch(hatId, enabled, combineWithHierarchy);
+        // Bidirectional derived<->vouch guard: the derived (group) path ORs eligibility in exactly like
+        // the email path — independent of combineWithHierarchy — so enabling vouching on a hat that
+        // already has derived config would make the quorum a silent no-op. Reject it (mirror of the
+        // setGroupEligibility guard). Disabling (quorum 0) is always safe.
+        if (enabled) _requireNoDerivedVouchConflict(hatId);
         l.vouchConfigs[hatId] = VouchConfig({
             quorum: quorum, membershipHatId: membershipHatId, flags: _packVouchFlags(enabled, combineWithHierarchy)
         });
@@ -813,7 +925,7 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         uint32[] calldata quorums,
         uint256[] calldata membershipHatIds,
         bool[] calldata combineWithHierarchyFlags
-    ) external onlySuperAdmin {
+    ) external onlySuperAdminOrRoleManager {
         uint256 length = hatIds.length;
         if (length != quorums.length || length != membershipHatIds.length || length != combineWithHierarchyFlags.length)
         {
@@ -829,6 +941,9 @@ contract EligibilityModule is Initializable, IHatsEligibility {
                 // M-03 (reverse direction): reject enabling vouch+combine on an already
                 // default-eligible hat — the quorum would be a silent no-op.
                 _requireNoDefaultVouchConflictOnVouch(hatId, enabled, combineWithHierarchyFlags[i]);
+                // Bidirectional derived<->vouch guard: reject enabling vouching on a hat with derived
+                // config (the derived path would bypass the quorum). Disabling is always safe.
+                if (enabled) _requireNoDerivedVouchConflict(hatId);
                 l.vouchConfigs[hatId] = VouchConfig({
                     quorum: quorums[i],
                     membershipHatId: membershipHatIds[i],
@@ -843,107 +958,16 @@ contract EligibilityModule is Initializable, IHatsEligibility {
         }
     }
 
+    /// @notice Vouch for `wearer` on `hatId` (Nth-vouch eligibility). Body in {EligibilityLogic}
+    ///         (EIP-170 offload); behaviour identical to the pre-offload implementation.
     function vouchFor(address wearer, uint256 hatId) external whenNotPaused {
-        if (wearer == address(0)) revert ZeroAddress();
-        if (wearer == msg.sender) revert CannotVouchForSelf();
-
-        Layout storage l = _layout();
-        VouchConfig memory config = l.vouchConfigs[hatId];
-        if (!_isVouchingEnabled(config.flags)) revert VouchingNotEnabled();
-
-        // Check vouching authorization
-        bool isAuthorized = l.hats.isWearerOfHat(msg.sender, config.membershipHatId);
-
-        // If combineWithHierarchy is enabled, also check if voucher has admin privileges for this hat
-        if (!isAuthorized && _shouldCombineWithHierarchy(config.flags)) {
-            isAuthorized = l.hats.isAdminOfHat(msg.sender, hatId);
-        }
-
-        if (!isAuthorized) revert NotAuthorizedToVouch();
-
-        // Epoch-aware stale data handling:
-        // If the wearer's count is from a prior epoch, reset it lazily.
-        uint256 currentEpoch = l.vouchConfigEpoch[hatId];
-        if (l.wearerVouchEpoch[hatId][wearer] != currentEpoch) {
-            l.currentVouchCount[hatId][wearer] = 0;
-            l.wearerVouchEpoch[hatId][wearer] = currentEpoch;
-        }
-
-        // AlreadyVouched: only if this specific voucher's record is from the current epoch
-        if (l.vouchers[hatId][wearer][msg.sender] && l.voucherRecordEpoch[hatId][wearer][msg.sender] == currentEpoch) {
-            revert AlreadyVouched();
-        }
-
-        // SECURITY: Rate limiting checks
-        _checkVouchingRateLimit(msg.sender);
-
-        // Record the vouch with its epoch
-        l.vouchers[hatId][wearer][msg.sender] = true;
-        l.voucherRecordEpoch[hatId][wearer][msg.sender] = currentEpoch;
-        uint32 newCount = l.currentVouchCount[hatId][wearer] + 1;
-        l.currentVouchCount[hatId][wearer] = newCount;
-
-        // Update daily vouch count
-        uint256 currentDay = block.timestamp / SECONDS_PER_DAY;
-        uint32 dailyCount = l.dailyVouchCount[msg.sender][currentDay] + 1;
-        l.dailyVouchCount[msg.sender][currentDay] = dailyCount;
-
-        emit Vouched(msg.sender, wearer, hatId, newCount);
+        EligibilityLogic.vouchFor(wearer, hatId);
     }
 
-    function _checkVouchingRateLimit(address user) internal view {
-        Layout storage l = _layout();
-
-        // Check if user has been around long enough to vouch
-        // NEW_USER_RESTRICTION_DAYS = 0, so anyone can vouch immediately
-        uint256 joinTime = l.userJoinTime[user];
-        if (joinTime != 0) {
-            // Only check if join time is set
-            uint256 daysSinceJoined = (block.timestamp - joinTime) / SECONDS_PER_DAY;
-            if (daysSinceJoined < NEW_USER_RESTRICTION_DAYS) {
-                revert NewUserVouchingRestricted();
-            }
-        }
-        // If joinTime is 0 (never set), allow vouching since NEW_USER_RESTRICTION_DAYS = 0
-
-        // Check daily vouch limit
-        uint256 currentDay = block.timestamp / SECONDS_PER_DAY;
-        if (l.dailyVouchCount[user][currentDay] >= _getMaxDailyVouches()) {
-            revert VouchingRateLimitExceeded();
-        }
-    }
-
+    /// @notice Revoke a prior vouch for `wearer` on `hatId`. Body in {EligibilityLogic} (EIP-170 offload);
+    ///         behaviour identical to the pre-offload implementation.
     function revokeVouch(address wearer, uint256 hatId) external whenNotPaused {
-        if (wearer == address(0)) revert ZeroAddress();
-
-        Layout storage l = _layout();
-        VouchConfig memory config = l.vouchConfigs[hatId];
-        if (!_isVouchingEnabled(config.flags)) revert VouchingNotEnabled();
-
-        // Only current-epoch vouch records can be revoked
-        uint256 currentEpoch = l.vouchConfigEpoch[hatId];
-        if (l.wearerVouchEpoch[hatId][wearer] != currentEpoch) revert HasNotVouched();
-        if (!l.vouchers[hatId][wearer][msg.sender] || l.voucherRecordEpoch[hatId][wearer][msg.sender] != currentEpoch) {
-            revert HasNotVouched();
-        }
-
-        // Remove the vouch
-        l.vouchers[hatId][wearer][msg.sender] = false;
-        uint32 newCount = l.currentVouchCount[hatId][wearer] - 1;
-        l.currentVouchCount[hatId][wearer] = newCount;
-
-        // Note: dailyVouchCount is NOT decremented on revocation.
-        // It's a rate limiter only — revoking doesn't give back vouch slots.
-
-        emit VouchRevoked(msg.sender, wearer, hatId, newCount);
-
-        // Handle hat revocation if needed
-        if (
-            !_shouldCombineWithHierarchy(config.flags) && newCount < config.quorum
-                && l.hats.isWearerOfHat(wearer, hatId) && !l.hasSpecificWearerRules[wearer][hatId]
-        ) {
-            l.hats.setHatWearerStatus(hatId, wearer, false, false);
-        }
+        EligibilityLogic.revokeVouch(wearer, hatId);
     }
 
     function resetVouches(uint256 hatId) external onlySuperAdmin {
@@ -987,23 +1011,166 @@ contract EligibilityModule is Initializable, IHatsEligibility {
      * @param hatId The ID of the hat to claim
      */
     function claimVouchedHat(uint256 hatId) external whenNotPaused nonReentrant {
+        EligibilityLogic.claimVouchedHat(hatId);
+    }
+
+    /*═══════════════════════════ ROLE MANAGER + DERIVED (GROUP) ELIGIBILITY ═══════════════════════════*/
+
+    /// @notice Set (or clear) the scoped RoleManager module allowed to call the whitelisted wiring/
+    ///         config functions alongside the superAdmin. superAdmin (governance) only.
+    /// @dev `rm == address(0)` clears the RoleManager (the derived path stays inert until re-set).
+    function setRoleManager(address rm) external onlySuperAdmin {
+        _layout().roleManager = rm;
+        emit RoleManagerSet(rm);
+    }
+
+    /// @notice The scoped RoleManager module (address(0) = none).
+    function roleManager() external view returns (address) {
+        return _layout().roleManager;
+    }
+
+    /// @notice Configure derived (group) eligibility for `groupHatId` from a flat list of member
+    ///         identity hats. Any wearer of >=1 listed member hat becomes eligible + in standing for
+    ///         `groupHatId` (unless an explicit per-wearer rule says otherwise — kicks win). Replaces
+    ///         the whole list; an empty `memberHats` clears the config.
+    /// @dev onlySuperAdminOrRoleManager. Enforces the invariants that keep the derived path safe:
+    ///      - Bidirectional derived<->vouch guard: reverts DerivedConflictsWithVouch if vouching is
+    ///        enabled on `groupHatId` (and configureVouching reverts on hats with derived config).
+    ///      - Flat one-level only (cycle/OOG prevention): reverts NestedDerivedHat if `groupHatId` is
+    ///        itself listed as a member elsewhere (refcount > 0), if any member hat has its own derived
+    ///        config, or if a member hat equals `groupHatId` (self-reference).
+    ///      Maintains `groupMembershipRefCount` on replace/clear.
+    /// @notice Configure derived (group) eligibility for `groupHatId` from a flat list of member
+    ///         identity hats. Any wearer of >=1 listed member hat becomes eligible + in standing for
+    ///         `groupHatId` (unless an explicit per-wearer rule says otherwise — kicks win). Replaces
+    ///         the whole list; an empty `memberHats` clears the config.
+    /// @dev onlySuperAdminOrRoleManager. Body in {EligibilityLogic} (EIP-170 offload). Enforces the
+    ///      invariants that keep the derived path safe: bidirectional derived<->vouch guard
+    ///      (DerivedConflictsWithVouch) and flat one-level-only nesting (NestedDerivedHat). Maintains
+    ///      `groupMembershipRefCount` on replace/clear.
+    function setGroupEligibility(uint256 groupHatId, uint256[] calldata memberHats)
+        external
+        onlySuperAdminOrRoleManager
+    {
+        EligibilityLogic.setGroupEligibility(groupHatId, memberHats);
+    }
+
+    /// @notice The configured derived member hats for `groupHatId` (empty = no derived config).
+    function getGroupMemberHats(uint256 groupHatId) external view returns (uint256[] memory) {
+        return _layout().groupMemberHats[groupHatId];
+    }
+
+    /// @notice Grant an explicit per-wearer eligibility rule (eligible + standing) for `hatId`. This is
+    ///         the RoleManager's grant-only surface: it can affirmatively grant, never ban.
+    /// @dev onlySuperAdminOrRoleManager. Sets (true, true) ONLY — bans/kicks remain superAdmin-only via
+    ///      {setWearerEligibility}. Body in {EligibilityLogic}; mirrors {setWearerEligibility}'s event.
+    function grantWearerEligibility(address wearer, uint256 hatId) external onlySuperAdminOrRoleManager whenNotPaused {
+        EligibilityLogic.grantWearerEligibility(wearer, hatId);
+    }
+
+    /// @notice Update a hat's max supply (wraps Hats `changeHatMaxSupply`).
+    /// @dev onlySuperAdminOrRoleManager. Emits HatConfigUpdated for subgraph indexing (the native
+    ///      Hats event is also emitted by the Hats contract). Body in {EligibilityLogic}.
+    function updateHatConfig(uint256 hatId, uint32 newMaxSupply) external onlySuperAdminOrRoleManager whenNotPaused {
+        EligibilityLogic.updateHatConfig(hatId, newMaxSupply);
+    }
+
+    /// @notice Permissionlessly claim (self-mint) `hatId` when the caller is eligible from a SPECIFIC
+    ///         source — an explicit per-wearer rule, a met vouch quorum (current epoch), email
+    ///         verification, or derived (group) membership. Bare default-open eligibility is NOT
+    ///         claimable (H-03 class): revert NotClaimableHat.
+    /// @dev Reverts AlreadyWearingHat if the caller already wears the hat (mirrors claimVouchedHat).
+    ///      CEI + nonReentrant + whenNotPaused. Emits HatClaimed. Body in {EligibilityLogic}.
+    function claimHat(uint256 hatId) external whenNotPaused nonReentrant {
+        EligibilityLogic.claimHat(hatId, false);
+    }
+
+    /// @notice Batch claim — THE path for accepting a role offer with its group markers in one tx, e.g.
+    ///         claimHats([presidentHat, executivesMarker]). The identity hat minted first in the array
+    ///         makes the caller derived-eligible for the marker within the SAME call (Hats balanceOf is
+    ///         live after each mint).
+    /// @dev Per-entry: already-wearing => SKIP silently (idempotent); ineligible/not-claimable => REVERT
+    ///      the whole call (consent/safety). Cap: hatIds.length <= 20 (TooManyClaims). Same guards as
+    ///      {claimHat} per entry. CEI + nonReentrant + whenNotPaused.
+    function claimHats(uint256[] calldata hatIds) external whenNotPaused nonReentrant {
+        uint256 len = hatIds.length;
+        if (len > MAX_CLAIM_BATCH) revert TooManyClaims();
+        for (uint256 i; i < len;) {
+            EligibilityLogic.claimHat(hatIds[i], true);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /*═══════════════════════════════════ KICK DELEGATION (Primitive B) ═══════════════════════════════════*/
+
+    /// @notice Configure (or disable) delegated-kick authority for `hatId`: wearers of `kickerHatId` may
+    ///         kick/unkick wearers of `hatId`. `delaySecs == 0` applies kicks immediately; a positive
+    ///         delay records a pending kick that anyone may {finalizeKick} after it elapses (giving
+    ///         governance a window to counter a purge). `enabled == false` disables the delegation.
+    /// @dev onlySuperAdmin (governance). UI guidance: set `delaySecs >= the org's max voting duration`
+    ///      for hats wired into voting classes so a delegated kick cannot change the electorate of a
+    ///      proposal created before it. Body in {EligibilityLogic}.
+    function configureKick(uint256 hatId, uint256 kickerHatId, uint32 delaySecs, bool enabled)
+        external
+        onlySuperAdmin
+        whenNotPaused
+    {
+        EligibilityLogic.configureKick(hatId, kickerHatId, delaySecs, enabled);
+    }
+
+    /// @notice Kick `wearer` from `hatId` (writes an explicit (false,false|0x04) delegated-ban rule and
+    ///         reconciles the hat). Caller must wear the config's kicker hat. If the config has a delay,
+    ///         records a pending kick instead of applying immediately.
+    /// @dev Reverts CannotKickGovernanceRuled if a governance-owned non-(true,true) rule exists (never
+    ///      flip provenance on a governance ban). CEI + nonReentrant + whenNotPaused. Body in
+    ///      {EligibilityLogic}.
+    function kickWearer(address wearer, uint256 hatId) external whenNotPaused nonReentrant {
+        EligibilityLogic.kickWearer(wearer, hatId);
+    }
+
+    /// @notice Finalize a pending (delayed) kick after its effectiveAt. Permissionless.
+    /// @dev Re-checks that the config is still enabled AND the original kicker still wears the kicker hat
+    ///      (pending kicks die with the delegation) and that no governance ban was written during the
+    ///      delay. CEI + nonReentrant + whenNotPaused. Body in {EligibilityLogic}.
+    function finalizeKick(address wearer, uint256 hatId) external whenNotPaused nonReentrant {
+        EligibilityLogic.finalizeKick(wearer, hatId);
+    }
+
+    /// @notice Cancel a pending kick. The original kicker or the superAdmin (governance) may cancel.
+    /// @dev whenNotPaused. Body in {EligibilityLogic}.
+    function cancelKick(address wearer, uint256 hatId) external whenNotPaused {
+        EligibilityLogic.cancelKick(wearer, hatId);
+    }
+
+    /// @notice Reverse a delegated kick: restores (true,true|0x04) so the un-kicked wearer can re-mint via
+    ///         {claimHat}. Caller must wear the kicker hat. Requires the current rule to be EXACTLY a
+    ///         delegated-kick ban (flags == 0x04) — never a governance ban or a grant.
+    /// @dev Reverts NotDelegatedKick otherwise (delegates cannot lift governance bans). CEI +
+    ///      nonReentrant + whenNotPaused. Body in {EligibilityLogic}.
+    function unkickWearer(address wearer, uint256 hatId) external whenNotPaused nonReentrant {
+        EligibilityLogic.unkickWearer(wearer, hatId);
+    }
+
+    /// @notice The delegated-kick config for `hatId` (enabled == false => no delegation).
+    function getKickConfig(uint256 hatId) external view returns (KickConfig memory) {
+        return _layout().kickConfigs[hatId];
+    }
+
+    /// @notice The pending kick for (`hatId`, `wearer`) — effectiveAt == 0 means none.
+    function getPendingKick(uint256 hatId, address wearer) external view returns (uint64 effectiveAt, address kicker) {
+        PendingKick memory pk = _layout().pendingKicks[hatId][wearer];
+        return (pk.effectiveAt, pk.kicker);
+    }
+
+    /// @notice Raw explicit-rule flags for (`wearer`, `hatId`): bit0 eligible, bit1 standing, bit2 (0x04)
+    ///         DELEGATION_MANAGED provenance. `hasRule` is false when no explicit per-wearer rule exists
+    ///         (flags is then 0). Consumed by RoleManager for delegated-grant provenance checks.
+    function getWearerRuleFlags(address wearer, uint256 hatId) external view returns (bool hasRule, uint8 flags) {
         Layout storage l = _layout();
-
-        // Check if caller is eligible to claim this hat
-        (bool eligible, bool standing) = this.getWearerStatus(msg.sender, hatId);
-        require(eligible && standing, "Not eligible to claim hat");
-
-        // Check if already wearing the hat
-        require(!l.hats.isWearerOfHat(msg.sender, hatId), "Already wearing hat");
-
-        // State change BEFORE external call (CEI pattern)
-        delete l.roleApplications[hatId][msg.sender];
-
-        // Mint the hat to the caller using EligibilityModule's admin powers
-        bool success = l.hats.mintHat(hatId, msg.sender);
-        require(success, "Hat minting failed");
-
-        emit HatClaimed(msg.sender, hatId);
+        hasRule = l.hasSpecificWearerRules[wearer][hatId];
+        if (hasRule) flags = l.wearerRules[wearer][hatId].flags;
     }
 
     /*═══════════════════════════════════ ROLE APPLICATION SYSTEM ═══════════════════════════════════════*/
@@ -1040,60 +1207,12 @@ contract EligibilityModule is Initializable, IHatsEligibility {
 
     /*═══════════════════════════════════ ELIGIBILITY INTERFACE ═══════════════════════════════════════*/
 
+    /// @notice Resolve a wearer's effective eligibility + standing for `hatId` (IHatsEligibility). The
+    ///         resolution logic (hierarchy/vouch/email/derived combine) lives in {EligibilityLogic}
+    ///         (delegatecall lib) to keep the module under the EIP-170 limit. Additive: a hat with no
+    ///         derived config returns byte-identical results to the pre-derived logic.
     function getWearerStatus(address wearer, uint256 hatId) external view returns (bool eligible, bool standing) {
-        Layout storage l = _layout();
-        VouchConfig memory config = l.vouchConfigs[hatId];
-
-        bool hierarchyEligible;
-        bool hierarchyStanding;
-        bool vouchEligible;
-        bool vouchStanding;
-
-        // Check hierarchy path
-        WearerRules memory rules;
-        if (l.hasSpecificWearerRules[wearer][hatId]) {
-            rules = l.wearerRules[wearer][hatId];
-        } else {
-            rules = l.defaultRules[hatId];
-        }
-        (hierarchyEligible, hierarchyStanding) = _unpackWearerFlags(rules.flags);
-
-        // Check vouch path if enabled (only count vouches from current epoch)
-        uint32 effectiveVouchCount =
-            (l.wearerVouchEpoch[hatId][wearer] == l.vouchConfigEpoch[hatId]) ? l.currentVouchCount[hatId][wearer] : 0;
-        if (_isVouchingEnabled(config.flags) && effectiveVouchCount >= config.quorum) {
-            vouchEligible = true;
-            vouchStanding = true;
-        }
-
-        // Combine results
-        if (_isVouchingEnabled(config.flags)) {
-            if (_shouldCombineWithHierarchy(config.flags)) {
-                eligible = hierarchyEligible || vouchEligible;
-                standing = hierarchyStanding || vouchStanding;
-            } else {
-                eligible = vouchEligible;
-                standing = vouchStanding;
-            }
-        } else {
-            eligible = hierarchyEligible;
-            standing = hierarchyStanding;
-        }
-
-        // THIRD path: email-verified (set by the org's authorized claim contracts after a valid
-        // zk-email proof). An affirmative, org-sanctioned grant (allowlist + proof), so it confers
-        // eligibility AND standing — but ONLY when the org has no EXPLICIT per-wearer rule: an explicit
-        // rule (e.g. a kick/ban via `setWearerEligibility(wearer, hat, false, false)`) always wins over
-        // email verification via the standing check below.
-        if (l.emailVerified[hatId][wearer] && !l.hasSpecificWearerRules[wearer][hatId]) {
-            eligible = true;
-            standing = true;
-        }
-
-        // If standing is false, eligibility MUST also be false per IHatsEligibility interface
-        if (!standing) {
-            eligible = false;
-        }
+        return EligibilityLogic.getWearerStatus(wearer, hatId);
     }
 
     /*═════════════════════════════════════ VIEW FUNCTIONS ═════════════════════════════════════════*/

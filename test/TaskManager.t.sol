@@ -7,6 +7,7 @@ import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import "forge-std/console.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
 import {TaskManager} from "../src/TaskManager.sol";
 import {TaskManagerLens} from "../src/lens/TaskManagerLens.sol";
 import {TaskPerm} from "../src/libs/TaskPerm.sol";
@@ -102,6 +103,35 @@ contract MockToken is Test, IERC20 {
             TaskManagerLens lens;
             MockToken token;
             MockHats hats;
+            MockModuleAuthority moduleAuthority;
+
+            // Configure the authority fixture explicitly; production createProject no longer writes
+            // the obsolete per-hat maps. Keep task/cap/bounty scenarios on the real current module.
+            function _createProject(TaskManager.BootstrapProjectConfig memory p) internal returns (bytes32 id) {
+                uint256[][] memory ids = new uint256[][](4);
+                ids[0] = p.createHats;
+                ids[1] = p.claimHats;
+                ids[2] = p.reviewHats;
+                ids[3] = p.assignHats;
+                p.createHats = new uint256[](0);
+                p.claimHats = new uint256[](0);
+                p.reviewHats = new uint256[](0);
+                p.assignHats = new uint256[](0);
+                id = tm.createProject(p);
+                uint8[4] memory flags = [TaskPerm.CREATE, TaskPerm.CLAIM, TaskPerm.REVIEW, TaskPerm.ASSIGN];
+                // Merge repeated subjects' per-project flags, as the old fixture helper did.
+                for (uint256 i; i < ids.length; ++i) {
+                    for (uint256 j; j < ids[i].length; ++j) {
+                        uint256 mask;
+                        for (uint256 k; k < ids.length; ++k) {
+                            for (uint256 z; z < ids[k].length; ++z) {
+                                if (ids[k][z] == ids[i][j]) mask |= flags[k];
+                            }
+                        }
+                        moduleAuthority.setMask(ids[i][j], bytes32(uint256(id) + 1), mask);
+                    }
+                }
+            }
 
             function setHat(address who, uint256 hatId) internal {
                 hats.mintHat(hatId, who);
@@ -142,7 +172,7 @@ contract MockToken is Test, IERC20 {
                 ) = _defaultRoleHats();
 
                 vm.prank(creator1);
-                id = tm.createProject(
+                id = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: name,
                         metadataHash: bytes32(0),
@@ -172,7 +202,7 @@ contract MockToken is Test, IERC20 {
                 ) = _defaultRoleHats();
 
                 vm.prank(creator1);
-                id = tm.createProject(
+                id = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: name,
                         metadataHash: bytes32(0),
@@ -204,15 +234,16 @@ contract MockToken is Test, IERC20 {
                 uint256[] memory creatorHats = _hatArr(CREATOR_HAT);
 
                 vm.prank(creator1);
-                tm.initialize(address(token), address(hats), creatorHats, executor, address(0));
+                tm.initialize(address(token), creatorHats, executor, address(0));
+                moduleAuthority = new MockModuleAuthority(address(hats), executor);
+                vm.prank(executor);
+                tm.setMembershipAuthority(address(moduleAuthority));
+                moduleAuthority.setMask(CREATOR_HAT, bytes32(0), TaskPerm.CREATE);
 
                 vm.prank(executor);
-                tm.setConfig(
-                    TaskManager.ConfigKey.ROLE_PERM,
-                    abi.encode(PM_HAT, TaskPerm.CREATE | TaskPerm.REVIEW | TaskPerm.ASSIGN)
-                );
+                moduleAuthority.setMask(PM_HAT, bytes32(0), TaskPerm.CREATE | TaskPerm.REVIEW | TaskPerm.ASSIGN);
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(MEMBER_HAT, TaskPerm.CLAIM));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(0), TaskPerm.CLAIM);
             }
         }
 
@@ -267,7 +298,7 @@ contract MockToken is Test, IERC20 {
                 address[] memory managers = _addrArr(pm1);
 
                 vm.prank(creator1);
-                CAPPED_ID = tm.createProject(
+                CAPPED_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("CAPPED"),
                         metadataHash: bytes32(0),
@@ -306,7 +337,7 @@ contract MockToken is Test, IERC20 {
 
                 // Set up project with custom hat permissions
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("CUSTOM_HATS"),
                         metadataHash: bytes32(0),
@@ -349,11 +380,11 @@ contract MockToken is Test, IERC20 {
 
                 // Set global permissions
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(globalHat, TaskPerm.CREATE | TaskPerm.REVIEW));
+                moduleAuthority.setMask(globalHat, bytes32(0), TaskPerm.CREATE | TaskPerm.REVIEW);
 
                 // Create project with different permissions for the same hat
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("OVERRIDE"),
                         metadataHash: bytes32(0),
@@ -569,7 +600,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PERM_TEST"),
                         metadataHash: bytes32(0),
@@ -591,7 +622,7 @@ contract MockToken is Test, IERC20 {
 
                 // Set project-specific permissions
                 vm.prank(creator1);
-                tm.setProjectRolePerm(projectId, customHat, TaskPerm.CREATE | TaskPerm.REVIEW);
+                moduleAuthority.setMask(customHat, bytes32(uint256(projectId) + 1), TaskPerm.CREATE | TaskPerm.REVIEW);
 
                 // Custom user should be able to create tasks
                 vm.prank(customUser);
@@ -619,7 +650,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PERM_TEST"),
                         metadataHash: bytes32(0),
@@ -641,11 +672,11 @@ contract MockToken is Test, IERC20 {
 
                 // Set global permissions
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(globalHat, TaskPerm.CREATE | TaskPerm.REVIEW));
+                moduleAuthority.setMask(globalHat, bytes32(0), TaskPerm.CREATE | TaskPerm.REVIEW);
 
                 // Override in project
                 vm.prank(creator1);
-                tm.setProjectRolePerm(projectId, globalHat, TaskPerm.CREATE);
+                moduleAuthority.setMask(globalHat, bytes32(uint256(projectId) + 1), TaskPerm.CREATE);
 
                 // User should only have CREATE permission in this project
                 vm.prank(globalUser);
@@ -678,7 +709,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create three projects with different caps
                 vm.startPrank(creator1);
-                PROJECT_A_ID = tm.createProject(
+                PROJECT_A_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PROJECT_A"),
                         metadataHash: bytes32(0),
@@ -692,7 +723,7 @@ contract MockToken is Test, IERC20 {
                         bountyCaps: new uint256[](0)
                     })
                 );
-                PROJECT_B_ID = tm.createProject(
+                PROJECT_B_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PROJECT_B"),
                         metadataHash: bytes32(0),
@@ -706,7 +737,7 @@ contract MockToken is Test, IERC20 {
                         bountyCaps: new uint256[](0)
                     })
                 );
-                PROJECT_C_ID = tm.createProject(
+                PROJECT_C_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PROJECT_C"),
                         metadataHash: bytes32(0),
@@ -778,7 +809,7 @@ contract MockToken is Test, IERC20 {
 
                 // Initial setup
                 vm.prank(creator1);
-                GOV_TEST_ID = tm.createProject(
+                GOV_TEST_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("GOV_TEST"),
                         metadataHash: bytes32(0),
@@ -804,7 +835,7 @@ contract MockToken is Test, IERC20 {
 
                 // Test that new hat can create projects
                 vm.prank(newCreator);
-                NEW_PROJECT_ID = tm.createProject(
+                NEW_PROJECT_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("NEW_PROJECT"),
                         metadataHash: bytes32(0),
@@ -830,7 +861,7 @@ contract MockToken is Test, IERC20 {
                 // Verify the hat can no longer create projects
                 vm.prank(newCreator);
                 vm.expectRevert(TaskManager.NotCreator.selector);
-                tm.createProject(
+                _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("SHOULD_FAIL"),
                         metadataHash: bytes32(0),
@@ -865,7 +896,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                MULTI_PM_ID = tm.createProject(
+                MULTI_PM_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("MULTI_PM"),
                         metadataHash: bytes32(0),
@@ -936,7 +967,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                EDGE_ID = tm.createProject(
+                EDGE_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("EDGE"),
                         metadataHash: bytes32(0),
@@ -1015,7 +1046,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a large unlimited project
                 vm.prank(creator1);
-                MEGA_ID = tm.createProject(
+                MEGA_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("MEGA"),
                         metadataHash: bytes32(0),
@@ -1113,7 +1144,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a second project with a hard cap
                 vm.prank(creator1);
-                CAPPED_BIG_ID = tm.createProject(
+                CAPPED_BIG_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("CAPPED_BIG"),
                         metadataHash: bytes32(0),
@@ -1178,7 +1209,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a project that will be deleted
                 vm.prank(creator1);
-                TO_DELETE_ID = tm.createProject(
+                TO_DELETE_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("TO_DELETE"),
                         metadataHash: bytes32(0),
@@ -1230,7 +1261,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a zero-cap project
                 vm.prank(creator1);
-                ZERO_CAP_ID = tm.createProject(
+                ZERO_CAP_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("ZERO_CAP"),
                         metadataHash: bytes32(0),
@@ -1293,7 +1324,7 @@ contract MockToken is Test, IERC20 {
 
                 // Verify the new hat works for creating projects
                 vm.prank(testCreator);
-                EXECUTOR_TEST_ID = tm.createProject(
+                EXECUTOR_TEST_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("EXECUTOR_TEST"),
                         metadataHash: bytes32(0),
@@ -1315,7 +1346,7 @@ contract MockToken is Test, IERC20 {
                 // Hat should no longer work
                 vm.prank(testCreator);
                 vm.expectRevert(TaskManager.NotCreator.selector);
-                tm.createProject(
+                _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("SHOULD_FAIL"),
                         metadataHash: bytes32(0),
@@ -1344,7 +1375,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create project
                 vm.prank(creator1);
-                EXECUTOR_BYPASS_ID = tm.createProject(
+                EXECUTOR_BYPASS_ID = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("EXECUTOR_BYPASS"),
                         metadataHash: bytes32(0),
@@ -1396,12 +1427,12 @@ contract MockToken is Test, IERC20 {
 
                 // Set global permissions (CREATE | CLAIM)
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(MULTI_HAT, TaskPerm.CREATE | TaskPerm.CLAIM));
+                moduleAuthority.setMask(MULTI_HAT, bytes32(0), TaskPerm.CREATE | TaskPerm.CLAIM);
 
                 // Create project (use creator1 who has creator hat)
                 uint256[] memory emptyHats = new uint256[](0);
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("COMBINED_TEST"),
                         metadataHash: bytes32(0),
@@ -1444,7 +1475,7 @@ contract MockToken is Test, IERC20 {
                 // Create project
                 uint256[] memory emptyHats = new uint256[](0);
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("DYNAMIC_TEST"),
                         metadataHash: bytes32(0),
@@ -1466,7 +1497,7 @@ contract MockToken is Test, IERC20 {
 
                 // Grant CREATE permission at project level
                 vm.prank(creator1);
-                tm.setProjectRolePerm(projectId, DYNAMIC_HAT, TaskPerm.CREATE);
+                moduleAuthority.setMask(DYNAMIC_HAT, bytes32(uint256(projectId) + 1), TaskPerm.CREATE);
 
                 // Now user can create tasks
                 vm.prank(dynamicUser);
@@ -1486,7 +1517,7 @@ contract MockToken is Test, IERC20 {
 
                 // Add REVIEW permission
                 vm.prank(creator1);
-                tm.setProjectRolePerm(projectId, DYNAMIC_HAT, TaskPerm.CREATE | TaskPerm.REVIEW);
+                moduleAuthority.setMask(DYNAMIC_HAT, bytes32(uint256(projectId) + 1), TaskPerm.CREATE | TaskPerm.REVIEW);
 
                 // Now user can complete tasks
                 vm.prank(dynamicUser);
@@ -1501,15 +1532,14 @@ contract MockToken is Test, IERC20 {
 
                 // Set full permissions globally
                 vm.prank(executor);
-                tm.setConfig(
-                    TaskManager.ConfigKey.ROLE_PERM,
-                    abi.encode(OVERRIDE_HAT, TaskPerm.CREATE | TaskPerm.CLAIM | TaskPerm.REVIEW | TaskPerm.ASSIGN)
+                moduleAuthority.setMask(
+                    OVERRIDE_HAT, bytes32(0), TaskPerm.CREATE | TaskPerm.CLAIM | TaskPerm.REVIEW | TaskPerm.ASSIGN
                 );
 
                 // Create project
                 uint256[] memory emptyHats = new uint256[](0);
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("OVERRIDE_TEST"),
                         metadataHash: bytes32(0),
@@ -1526,7 +1556,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a second project to verify global perms still work there
                 vm.prank(creator1);
-                bytes32 projectId2 = tm.createProject(
+                bytes32 projectId2 = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("GLOBAL_TEST"),
                         metadataHash: bytes32(0),
@@ -1543,7 +1573,7 @@ contract MockToken is Test, IERC20 {
 
                 // Restrict permissions on the first project (only CREATE)
                 vm.prank(creator1);
-                tm.setProjectRolePerm(projectId, OVERRIDE_HAT, TaskPerm.CREATE);
+                moduleAuthority.setMask(OVERRIDE_HAT, bytes32(uint256(projectId) + 1), TaskPerm.CREATE);
 
                 // User can create tasks in both projects
                 vm.prank(overrideUser);
@@ -1589,11 +1619,11 @@ contract MockToken is Test, IERC20 {
 
                 // Give CREATE permission
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(TEMP_HAT, TaskPerm.CREATE));
+                moduleAuthority.setMask(TEMP_HAT, bytes32(0), TaskPerm.CREATE);
 
                 // Create project
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("TEMP"),
                         metadataHash: bytes32(0),
@@ -1614,7 +1644,7 @@ contract MockToken is Test, IERC20 {
 
                 // Revoke permission
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(TEMP_HAT, 0));
+                moduleAuthority.setMask(TEMP_HAT, bytes32(0), 0);
 
                 // User can't create tasks anymore
                 vm.prank(tempUser);
@@ -1642,15 +1672,15 @@ contract MockToken is Test, IERC20 {
 
                 // Set permissions
                 vm.startPrank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(CREATE_HAT, TaskPerm.CREATE));
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(CLAIM_HAT, TaskPerm.CLAIM));
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(REVIEW_HAT, TaskPerm.REVIEW));
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(ASSIGN_HAT, TaskPerm.ASSIGN));
+                moduleAuthority.setMask(CREATE_HAT, bytes32(0), TaskPerm.CREATE);
+                moduleAuthority.setMask(CLAIM_HAT, bytes32(0), TaskPerm.CLAIM);
+                moduleAuthority.setMask(REVIEW_HAT, bytes32(0), TaskPerm.REVIEW);
+                moduleAuthority.setMask(ASSIGN_HAT, bytes32(0), TaskPerm.ASSIGN);
                 vm.stopPrank();
 
                 // Create project
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PERM_FLAGS"),
                         metadataHash: bytes32(0),
@@ -1732,7 +1762,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("CREATE_ASSIGN_TEST"),
                         metadataHash: bytes32(0),
@@ -1787,7 +1817,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PERM_TEST"),
                         metadataHash: bytes32(0),
@@ -1808,7 +1838,7 @@ contract MockToken is Test, IERC20 {
                 setHat(createOnlyUser, CREATE_ONLY_HAT);
 
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(CREATE_ONLY_HAT, TaskPerm.CREATE));
+                moduleAuthority.setMask(CREATE_ONLY_HAT, bytes32(0), TaskPerm.CREATE);
 
                 vm.prank(createOnlyUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
@@ -1822,7 +1852,7 @@ contract MockToken is Test, IERC20 {
                 setHat(assignOnlyUser, ASSIGN_ONLY_HAT);
 
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(ASSIGN_ONLY_HAT, TaskPerm.ASSIGN));
+                moduleAuthority.setMask(ASSIGN_ONLY_HAT, bytes32(0), TaskPerm.ASSIGN);
 
                 vm.prank(assignOnlyUser);
                 vm.expectRevert(TaskManager.Unauthorized.selector);
@@ -1836,9 +1866,7 @@ contract MockToken is Test, IERC20 {
                 setHat(createAssignUser, CREATE_ASSIGN_HAT);
 
                 vm.prank(executor);
-                tm.setConfig(
-                    TaskManager.ConfigKey.ROLE_PERM, abi.encode(CREATE_ASSIGN_HAT, TaskPerm.CREATE | TaskPerm.ASSIGN)
-                );
+                moduleAuthority.setMask(CREATE_ASSIGN_HAT, bytes32(0), TaskPerm.CREATE | TaskPerm.ASSIGN);
 
                 vm.prank(createAssignUser);
                 uint256 taskId = tm.createAndAssignTask(
@@ -1874,7 +1902,7 @@ contract MockToken is Test, IERC20 {
                 managers[0] = pm1;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PM_TEST"),
                         metadataHash: bytes32(0),
@@ -1928,7 +1956,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("VALIDATION_TEST"),
                         metadataHash: bytes32(0),
@@ -1985,7 +2013,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("BUDGET_TEST"),
                         metadataHash: bytes32(0),
@@ -2041,7 +2069,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("EVENT_TEST"),
                         metadataHash: bytes32(0),
@@ -2081,7 +2109,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("LIFECYCLE_TEST"),
                         metadataHash: bytes32(0),
@@ -2141,7 +2169,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("GAS_TEST"),
                         metadataHash: bytes32(0),
@@ -2203,7 +2231,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("MULTI_USER_TEST"),
                         metadataHash: bytes32(0),
@@ -2260,7 +2288,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("EDGE_TEST"),
                         metadataHash: bytes32(0),
@@ -2298,7 +2326,7 @@ contract MockToken is Test, IERC20 {
 
                 // Test maximum payout - need to create a new project with higher cap
                 vm.prank(creator1);
-                bytes32 maxProjectId = tm.createProject(
+                bytes32 maxProjectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("MAX_PAYOUT_TEST"),
                         metadataHash: bytes32(0),
@@ -2331,12 +2359,12 @@ contract MockToken is Test, IERC20 {
 
                 // Set global permissions (CREATE only)
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(GLOBAL_HAT, TaskPerm.CREATE));
+                moduleAuthority.setMask(GLOBAL_HAT, bytes32(0), TaskPerm.CREATE);
 
                 // Create project
                 uint256[] memory emptyHats = new uint256[](0);
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PROJECT_SPECIFIC"),
                         metadataHash: bytes32(0),
@@ -2360,7 +2388,7 @@ contract MockToken is Test, IERC20 {
 
                 // Add ASSIGN permission at project level
                 vm.prank(creator1);
-                tm.setProjectRolePerm(projectId, GLOBAL_HAT, TaskPerm.CREATE | TaskPerm.ASSIGN);
+                moduleAuthority.setMask(GLOBAL_HAT, bytes32(uint256(projectId) + 1), TaskPerm.CREATE | TaskPerm.ASSIGN);
 
                 // Now user should be able to createAndAssignTask
                 vm.prank(globalUser);
@@ -2390,7 +2418,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("APPLICATION_TEST"),
                         metadataHash: bytes32(0),
@@ -2456,7 +2484,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PERM_TEST"),
                         metadataHash: bytes32(0),
@@ -2509,7 +2537,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("VALIDATION_TEST"),
                         metadataHash: bytes32(0),
@@ -2558,7 +2586,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("APPROVAL_TEST"),
                         metadataHash: bytes32(0),
@@ -2604,7 +2632,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PERM_TEST"),
                         metadataHash: bytes32(0),
@@ -2655,7 +2683,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("VALIDATION_TEST"),
                         metadataHash: bytes32(0),
@@ -2708,7 +2736,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("EVENT_TEST"),
                         metadataHash: bytes32(0),
@@ -2753,7 +2781,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("LIFECYCLE_TEST"),
                         metadataHash: bytes32(0),
@@ -2806,7 +2834,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("CANCEL_TEST"),
                         metadataHash: bytes32(0),
@@ -2855,7 +2883,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("MULTI_APP_TEST"),
                         metadataHash: bytes32(0),
@@ -2923,7 +2951,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PREVENT_TEST"),
                         metadataHash: bytes32(0),
@@ -2979,7 +3007,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("APP_REQ_TEST"),
                         metadataHash: bytes32(0),
@@ -3024,7 +3052,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("CLAIM_PREVENT_TEST"),
                         metadataHash: bytes32(0),
@@ -3077,7 +3105,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("REGULAR_TEST"),
                         metadataHash: bytes32(0),
@@ -3138,7 +3166,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("MULTI_APP_TEST"),
                         metadataHash: bytes32(0),
@@ -3242,7 +3270,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("APPROVE_TEST"),
                         metadataHash: bytes32(0),
@@ -3314,7 +3342,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("PERSISTENCE_TEST"),
                         metadataHash: bytes32(0),
@@ -3377,7 +3405,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("CANCEL_TEST"),
                         metadataHash: bytes32(0),
@@ -3461,7 +3489,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("DUPLICATE_TEST"),
                         metadataHash: bytes32(0),
@@ -3512,7 +3540,7 @@ contract MockToken is Test, IERC20 {
                 assignHats[0] = PM_HAT;
 
                 vm.prank(creator1);
-                bytes32 projectId = tm.createProject(
+                bytes32 projectId = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("EVENT_TEST"),
                         metadataHash: bytes32(0),
@@ -3744,7 +3772,7 @@ contract MockToken is Test, IERC20 {
                 // Create project WITHOUT default role hats — avoids project-overrides-global behavior
                 uint256[] memory empty = new uint256[](0);
                 vm.prank(creator1);
-                bytes32 pid = tm.createProject(
+                bytes32 pid = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("perm-test-1"),
                         metadataHash: bytes32(0),
@@ -3761,7 +3789,7 @@ contract MockToken is Test, IERC20 {
 
                 // Give MEMBER_HAT global CREATE permission
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(MEMBER_HAT, uint8(TaskPerm.CREATE)));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(0), uint8(TaskPerm.CREATE));
 
                 // member1 can create tasks (global perm, no project override)
                 vm.prank(member1);
@@ -3769,9 +3797,9 @@ contract MockToken is Test, IERC20 {
 
                 // Give MEMBER_HAT project-specific CREATE, then remove it
                 vm.prank(creator1);
-                tm.setProjectRolePerm(pid, MEMBER_HAT, uint8(TaskPerm.CREATE));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(uint256(pid) + 1), uint8(TaskPerm.CREATE));
                 vm.prank(creator1);
-                tm.setProjectRolePerm(pid, MEMBER_HAT, 0);
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(uint256(pid) + 1), 0);
 
                 // member1 should STILL be able to create tasks via global perm
                 vm.prank(member1);
@@ -3782,7 +3810,7 @@ contract MockToken is Test, IERC20 {
                 // Create project WITHOUT default role hats
                 uint256[] memory empty = new uint256[](0);
                 vm.prank(creator1);
-                bytes32 pid = tm.createProject(
+                bytes32 pid = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("perm-test-2"),
                         metadataHash: bytes32(0),
@@ -3799,15 +3827,15 @@ contract MockToken is Test, IERC20 {
 
                 // Give MEMBER_HAT global CREATE permission
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(MEMBER_HAT, uint8(TaskPerm.CREATE)));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(0), uint8(TaskPerm.CREATE));
 
                 // Also give MEMBER_HAT project-specific CREATE permission
                 vm.prank(creator1);
-                tm.setProjectRolePerm(pid, MEMBER_HAT, uint8(TaskPerm.CREATE));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(uint256(pid) + 1), uint8(TaskPerm.CREATE));
 
                 // Remove global permission
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(MEMBER_HAT, uint8(0)));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(0), uint8(0));
 
                 // member1 should STILL be able to create tasks via project-specific perm
                 vm.prank(member1);
@@ -3818,7 +3846,7 @@ contract MockToken is Test, IERC20 {
                 // Create project without default role hats
                 uint256[] memory empty = new uint256[](0);
                 vm.prank(creator1);
-                bytes32 pid = tm.createProject(
+                bytes32 pid = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("to-delete"),
                         metadataHash: bytes32(0),
@@ -3835,7 +3863,7 @@ contract MockToken is Test, IERC20 {
 
                 // Give MEMBER_HAT project-specific CREATE (no global perm)
                 vm.prank(creator1);
-                tm.setProjectRolePerm(pid, MEMBER_HAT, uint8(TaskPerm.CREATE));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(uint256(pid) + 1), uint8(TaskPerm.CREATE));
 
                 // member1 can create tasks via project perm
                 vm.prank(member1);
@@ -3847,7 +3875,7 @@ contract MockToken is Test, IERC20 {
 
                 // Create a second project without default role hats
                 vm.prank(creator1);
-                bytes32 pid2 = tm.createProject(
+                bytes32 pid2 = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("after-delete"),
                         metadataHash: bytes32(0),
@@ -4709,7 +4737,7 @@ contract MockToken is Test, IERC20 {
                 setHat(budgetEditor, BUDGET_HAT);
 
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+                moduleAuthority.setMask(BUDGET_HAT, bytes32(0), TaskPerm.BUDGET);
 
                 vm.prank(budgetEditor);
                 vm.expectEmit(true, false, false, true);
@@ -4723,7 +4751,7 @@ contract MockToken is Test, IERC20 {
                 setHat(budgetEditor, BUDGET_HAT);
 
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+                moduleAuthority.setMask(BUDGET_HAT, bytes32(0), TaskPerm.BUDGET);
 
                 vm.prank(budgetEditor);
                 vm.expectEmit(true, true, false, true);
@@ -4740,7 +4768,7 @@ contract MockToken is Test, IERC20 {
 
                 // Grant BUDGET only on BUDGET_PROJECT_ID (not on UNLIMITED_PROJECT_ID).
                 vm.prank(creator1);
-                tm.setProjectRolePerm(BUDGET_PROJECT_ID, BUDGET_HAT, TaskPerm.BUDGET);
+                moduleAuthority.setMask(BUDGET_HAT, bytes32(uint256(BUDGET_PROJECT_ID) + 1), TaskPerm.BUDGET);
 
                 vm.prank(budgetEditor);
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(BUDGET_PROJECT_ID, 20 ether));
@@ -4796,7 +4824,7 @@ contract MockToken is Test, IERC20 {
                 setHat(budgetEditor, BUDGET_HAT);
 
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+                moduleAuthority.setMask(BUDGET_HAT, bytes32(0), TaskPerm.BUDGET);
 
                 // Consume 2 ether of PT on BUDGET_PROJECT_ID (cap = 10 ether).
                 vm.prank(creator1);
@@ -4808,29 +4836,13 @@ contract MockToken is Test, IERC20 {
                 tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(BUDGET_PROJECT_ID, 1 ether));
             }
 
-            function test_SetConfigRolePerm_EmitsRolePermSet() public {
-                uint256 BUDGET_HAT = 50;
-
-                // Grant: executor sets BUDGET on hat -> event fires with mask=BUDGET.
-                vm.expectEmit(true, false, false, true, address(tm));
-                emit TaskManager.RolePermSet(BUDGET_HAT, TaskPerm.BUDGET);
-                vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
-
-                // Revoke: setting mask=0 fires the event with mask=0 so indexers see the clear.
-                vm.expectEmit(true, false, false, true, address(tm));
-                emit TaskManager.RolePermSet(BUDGET_HAT, 0);
-                vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, uint8(0)));
-            }
-
             function test_SetConfigOtherKeysStillExecutorOnly() public {
                 uint256 BUDGET_HAT = 50;
                 address budgetEditor = makeAddr("budgetEditor");
                 setHat(budgetEditor, BUDGET_HAT);
 
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+                moduleAuthority.setMask(BUDGET_HAT, bytes32(0), TaskPerm.BUDGET);
 
                 // EXECUTOR key — still executor-only.
                 vm.prank(budgetEditor);
@@ -4842,9 +4854,9 @@ contract MockToken is Test, IERC20 {
                 vm.expectRevert(TaskManager.NotExecutor.selector);
                 tm.setConfig(TaskManager.ConfigKey.CREATOR_HAT_ALLOWED, abi.encode(uint256(123), true));
 
-                // ROLE_PERM key — still executor-only (callers must not be able to grant themselves perms).
+                // ROLE_PERM key — retired; masks must be configured on the authority.
                 vm.prank(budgetEditor);
-                vm.expectRevert(TaskManager.NotExecutor.selector);
+                vm.expectRevert(TaskManager.LegacyConfigRemoved.selector);
                 tm.setConfig(
                     TaskManager.ConfigKey.ROLE_PERM, abi.encode(uint256(99), TaskPerm.CREATE | TaskPerm.BUDGET)
                 );
@@ -6293,6 +6305,7 @@ contract MockToken is Test, IERC20 {
             TaskManagerLens lens;
             MockToken token;
             MockHats hats;
+            MockModuleAuthority moduleAuthority;
             MockERC20 bountyToken;
 
             function setUp() public {
@@ -6312,16 +6325,17 @@ contract MockToken is Test, IERC20 {
                 creatorHats[0] = CREATOR_HAT;
 
                 // Initialize with deployer address
-                tm.initialize(address(token), address(hats), creatorHats, executor, deployer);
+                tm.initialize(address(token), creatorHats, executor, deployer);
+                moduleAuthority = new MockModuleAuthority(address(hats), executor);
+                vm.prank(executor);
+                tm.setMembershipAuthority(address(moduleAuthority));
+                moduleAuthority.setMask(CREATOR_HAT, bytes32(0), TaskPerm.CREATE);
 
                 // Set up permissions
                 vm.prank(executor);
-                tm.setConfig(
-                    TaskManager.ConfigKey.ROLE_PERM,
-                    abi.encode(PM_HAT, TaskPerm.CREATE | TaskPerm.REVIEW | TaskPerm.ASSIGN)
-                );
+                moduleAuthority.setMask(PM_HAT, bytes32(0), TaskPerm.CREATE | TaskPerm.REVIEW | TaskPerm.ASSIGN);
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(MEMBER_HAT, TaskPerm.CLAIM));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(0), TaskPerm.CLAIM);
             }
 
             /* ─────────────── Helper Functions ─────────────── */
@@ -6785,9 +6799,7 @@ contract MockToken is Test, IERC20 {
                 setHat(reviewer, REVIEWER_HAT);
                 // CLAIM | REVIEW but NOT SELF_REVIEW
                 vm.prank(executor);
-                tm.setConfig(
-                    TaskManager.ConfigKey.ROLE_PERM, abi.encode(REVIEWER_HAT, TaskPerm.CLAIM | TaskPerm.REVIEW)
-                );
+                moduleAuthority.setMask(REVIEWER_HAT, bytes32(0), TaskPerm.CLAIM | TaskPerm.REVIEW);
 
                 projectId = _createDefaultProject("SELF_REVIEW", 10 ether);
             }
@@ -6810,9 +6822,8 @@ contract MockToken is Test, IERC20 {
             function test_SelfReviewAllowedWithPermission() public {
                 // Grant SELF_REVIEW in addition to CLAIM | REVIEW
                 vm.prank(executor);
-                tm.setConfig(
-                    TaskManager.ConfigKey.ROLE_PERM,
-                    abi.encode(REVIEWER_HAT, TaskPerm.CLAIM | TaskPerm.REVIEW | TaskPerm.SELF_REVIEW)
+                moduleAuthority.setMask(
+                    REVIEWER_HAT, bytes32(0), TaskPerm.CLAIM | TaskPerm.REVIEW | TaskPerm.SELF_REVIEW
                 );
 
                 vm.prank(creator1);
@@ -6933,7 +6944,7 @@ contract MockToken is Test, IERC20 {
                     uint256[] memory reviewHats,
                     uint256[] memory assignHats
                 ) = _defaultRoleHats();
-                tm.createProject(
+                _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("events"),
                         metadataHash: bytes32(0),
@@ -6965,7 +6976,7 @@ contract MockToken is Test, IERC20 {
 
                 vm.prank(creator1);
                 vm.expectRevert(TaskManager.ArrayLengthMismatch.selector);
-                tm.createProject(
+                _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("mismatch"),
                         metadataHash: bytes32(0),
@@ -7105,7 +7116,7 @@ contract MockToken is Test, IERC20 {
                 address deployer = makeAddr("deployer");
 
                 vm.prank(deployer);
-                tmBootstrap.initialize(address(token), address(hats), _hatArr(CREATOR_HAT), executor, deployer);
+                tmBootstrap.initialize(address(token), _hatArr(CREATOR_HAT), executor, deployer);
 
                 address[] memory tokens = new address[](1);
                 tokens[0] = address(bountyToken);
@@ -7735,7 +7746,7 @@ contract MockToken is Test, IERC20 {
 
                 // Executor grants the BUDGET perm to its hat.
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(BUDGET_HAT, TaskPerm.BUDGET));
+                moduleAuthority.setMask(BUDGET_HAT, bytes32(0), TaskPerm.BUDGET);
 
                 // BUDGET-hat wearer CAN edit the project's PT cap.
                 vm.prank(budgetEditor);
@@ -7785,8 +7796,8 @@ contract MockToken is Test, IERC20 {
                 setHat(editorFull, EDIT_FULL_HAT);
 
                 vm.startPrank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(EDIT_META_HAT, TaskPerm.EDIT_META));
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(EDIT_FULL_HAT, TaskPerm.EDIT_FULL));
+                moduleAuthority.setMask(EDIT_META_HAT, bytes32(0), TaskPerm.EDIT_META);
+                moduleAuthority.setMask(EDIT_FULL_HAT, bytes32(0), TaskPerm.EDIT_FULL);
                 vm.stopPrank();
 
                 PID = _createDefaultProject("EDIT_PERMS", 100 ether);
@@ -8023,7 +8034,7 @@ contract MockToken is Test, IERC20 {
                 bytes32 otherPid = _createDefaultProject("OTHER", 100 ether);
 
                 vm.prank(creator1);
-                tm.setProjectRolePerm(PID, EDIT_FULL_HAT, TaskPerm.CLAIM);
+                moduleAuthority.setMask(EDIT_FULL_HAT, bytes32(uint256(PID) + 1), TaskPerm.CLAIM);
 
                 uint256 id = _createAndClaim(2 ether);
                 vm.prank(editorFull);
@@ -8116,6 +8127,34 @@ contract MockToken is Test, IERC20 {
 
         /*──────────────────── bootstrapGlobalPerms tests ────────────────────*/
         contract TaskManagerBootstrapGlobalPermsTest is Test {
+            // Configure the authority fixture explicitly; production createProject no longer writes
+            // the obsolete per-hat maps. Keep task/cap/bounty scenarios on the real current module.
+            function _createProject(TaskManager.BootstrapProjectConfig memory p) internal returns (bytes32 id) {
+                uint256[][] memory ids = new uint256[][](4);
+                ids[0] = p.createHats;
+                ids[1] = p.claimHats;
+                ids[2] = p.reviewHats;
+                ids[3] = p.assignHats;
+                p.createHats = new uint256[](0);
+                p.claimHats = new uint256[](0);
+                p.reviewHats = new uint256[](0);
+                p.assignHats = new uint256[](0);
+                id = tm.createProject(p);
+                uint8[4] memory flags = [TaskPerm.CREATE, TaskPerm.CLAIM, TaskPerm.REVIEW, TaskPerm.ASSIGN];
+                // Merge repeated subjects' per-project flags, as the old fixture helper did.
+                for (uint256 i; i < ids.length; ++i) {
+                    for (uint256 j; j < ids[i].length; ++j) {
+                        uint256 mask;
+                        for (uint256 k; k < ids.length; ++k) {
+                            for (uint256 z; z < ids[k].length; ++z) {
+                                if (ids[k][z] == ids[i][j]) mask |= flags[k];
+                            }
+                        }
+                        moduleAuthority.setMask(ids[i][j], bytes32(uint256(id) + 1), mask);
+                    }
+                }
+            }
+
             /* test actors */
             address deployer = makeAddr("deployer");
             address executor = makeAddr("executor");
@@ -8134,6 +8173,7 @@ contract MockToken is Test, IERC20 {
             TaskManagerLens lens;
             MockToken token;
             MockHats hats;
+            MockModuleAuthority moduleAuthority;
 
             function setUp() public {
                 token = new MockToken();
@@ -8155,290 +8195,36 @@ contract MockToken is Test, IERC20 {
                 // is needed because _setupProjectAndTask seeds CLAIM via the project's claimHats
                 // array — keeping the global permissionHatIds enumeration empty at baseline so the
                 // tests can assert exact counts.
-                tm.initialize(address(token), address(hats), creatorHats, executor, deployer);
+                tm.initialize(address(token), creatorHats, executor, deployer);
+                moduleAuthority = new MockModuleAuthority(address(hats), executor);
+                vm.prank(executor);
+                tm.setMembershipAuthority(address(moduleAuthority));
+                moduleAuthority.setMask(CREATOR_HAT, bytes32(0), TaskPerm.CREATE);
             }
 
             /* ---------- Edge case 1: happy path ---------- */
-            function test_BootstrapGlobalPerms_GrantsSetMaskAndAddToPermissionHats() public {
-                uint256[] memory hatIds = new uint256[](2);
-                uint8[] memory masks = new uint8[](2);
-                hatIds[0] = EDIT_FULL_HAT;
-                hatIds[1] = EDIT_META_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-                masks[1] = TaskPerm.EDIT_META;
-
-                vm.expectEmit(true, false, false, true);
-                emit TaskManager.RolePermSet(EDIT_FULL_HAT, TaskPerm.EDIT_FULL);
-                vm.expectEmit(true, false, false, true);
-                emit TaskManager.RolePermSet(EDIT_META_HAT, TaskPerm.EDIT_META);
-
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                uint256[] memory permHats =
-                    abi.decode(
-                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
-                );
-                assertEq(permHats.length, 2, "two hats now enumerated");
-                // Order is not guaranteed; check both are present.
-                bool foundFull;
-                bool foundMeta;
-                for (uint256 i; i < permHats.length; ++i) {
-                    if (permHats[i] == EDIT_FULL_HAT) foundFull = true;
-                    if (permHats[i] == EDIT_META_HAT) foundMeta = true;
-                }
-                assertTrue(foundFull && foundMeta, "both hats enumerated");
-            }
 
             /* ---------- Edge case 2: non-deployer reverts ---------- */
-            function test_BootstrapGlobalPerms_NotDeployerReverts() public {
-                uint256[] memory hatIds = new uint256[](1);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-
-                // Try every wrong sender: executor, creator, outsider — all should revert.
-                vm.prank(executor);
-                vm.expectRevert(TaskManager.NotDeployer.selector);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                vm.prank(creator1);
-                vm.expectRevert(TaskManager.NotDeployer.selector);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                vm.prank(outsider);
-                vm.expectRevert(TaskManager.NotDeployer.selector);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-            }
 
             /* ---------- Edge case 3: after clearDeployer ---------- */
-            function test_BootstrapGlobalPerms_AfterClearDeployerReverts() public {
-                vm.prank(deployer);
-                tm.clearDeployer();
-
-                uint256[] memory hatIds = new uint256[](1);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-
-                // Even the original deployer is now blocked — l.deployer is address(0).
-                vm.prank(deployer);
-                vm.expectRevert(TaskManager.NotDeployer.selector);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-            }
 
             /* ---------- Edge case 4: empty arrays = no-op (must not revert) ---------- */
-            function test_BootstrapGlobalPerms_EmptyArraysIsNoOp() public {
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(new uint256[](0), new uint8[](0));
-
-                uint256[] memory permHats =
-                    abi.decode(
-                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
-                );
-                assertEq(permHats.length, 0, "no hats enumerated");
-            }
 
             /* ---------- Edge case 5: length mismatch reverts ArrayLengthMismatch ---------- */
-            function test_BootstrapGlobalPerms_LengthMismatchReverts() public {
-                uint256[] memory hatIds = new uint256[](2);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                hatIds[1] = EDIT_META_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-
-                vm.prank(deployer);
-                vm.expectRevert(TaskManager.ArrayLengthMismatch.selector);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-            }
 
             /* ---------- Edge case 6: duplicate hat IDs — last write wins ---------- */
-            function test_BootstrapGlobalPerms_DuplicateHatLastWins() public {
-                uint256[] memory hatIds = new uint256[](2);
-                uint8[] memory masks = new uint8[](2);
-                hatIds[0] = EDIT_FULL_HAT;
-                hatIds[1] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-                masks[1] = TaskPerm.EDIT_META; // last write wins
-
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                // Grant a project, claim a task, then verify EDIT_FULL_HAT cannot edit payout (only meta).
-                bytes32 pid = _setupProjectAndTask();
-                vm.prank(member1);
-                tm.claimTask(0);
-
-                vm.prank(editorFull);
-                vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(0, 5 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0);
-
-                // But metadata-only succeeds because EDIT_META was the last-written mask.
-                vm.prank(editorFull);
-                tm.updateTaskMetadata(0, bytes("ok"), bytes32(uint256(0xaa)));
-                pid; // silence unused
-            }
 
             /* ---------- Edge case 7: mask = 0 removes hat from permissionHatIds ---------- */
-            function test_BootstrapGlobalPerms_ZeroMaskRemovesHat() public {
-                // First grant EDIT_FULL.
-                uint256[] memory hatIds = new uint256[](1);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                uint256[] memory permHatsBefore =
-                    abi.decode(
-                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
-                );
-                assertEq(permHatsBefore.length, 1, "hat enumerated after grant");
-
-                // Now zero it out — should be removed from permissionHatIds.
-                masks[0] = 0;
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                uint256[] memory permHatsAfter =
-                    abi.decode(
-                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
-                );
-                assertEq(permHatsAfter.length, 0, "hat de-enumerated after mask=0");
-            }
 
             /* ---------- Edge case 8: equivalence with setConfig(ROLE_PERM) ---------- */
-            function test_BootstrapGlobalPerms_EquivalentToSetConfig() public {
-                uint256[] memory hatIds = new uint256[](1);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                // Re-applying via setConfig must be a no-op (idempotent) and leave the same enumerated state.
-                vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(EDIT_FULL_HAT, TaskPerm.EDIT_FULL));
-
-                uint256[] memory permHats =
-                    abi.decode(
-                    lens.getStorage(address(tm), TaskManagerLens.StorageKey.PERMISSION_HATS, ""), (uint256[])
-                );
-                assertEq(permHats.length, 1, "no duplicate enumeration");
-                assertEq(permHats[0], EDIT_FULL_HAT);
-            }
 
             /* ---------- Edge case 9: end-to-end — bootstrapped EDIT_FULL hat can edit a CLAIMED task ---------- */
-            function test_BootstrapGlobalPerms_GrantedHatCanEditPostClaim() public {
-                uint256[] memory hatIds = new uint256[](1);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                _setupProjectAndTask();
-                vm.prank(member1);
-                tm.claimTask(0);
-
-                // The bootstrap-granted hat wearer can immediately edit.
-                vm.prank(editorFull);
-                tm.updateTask(0, 5 ether, bytes("bumped"), bytes32(0), address(0), 0, 0, 0);
-            }
 
             /* ---------- Edge case 10: multiple bits OR'd into one mask ---------- */
-            function test_BootstrapGlobalPerms_MultipleBitsInOneMask() public {
-                uint256[] memory hatIds = new uint256[](1);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL | TaskPerm.BUDGET; // combined grant
-
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                // Editor hat can now also resize budgets via setConfig(PROJECT_CAP, ...).
-                _setupProjectAndTask();
-                vm.prank(editorFull);
-                tm.setConfig(TaskManager.ConfigKey.PROJECT_CAP, abi.encode(bytes32(uint256(0)), uint256(20 ether)));
-            }
 
             /* ---------- Edge case 11: ordering — bootstrap perms before bootstrap projects works ---------- */
-            function test_BootstrapGlobalPerms_OrderingWithProjectBootstrap() public {
-                // Simulate the OrgDeployer ordering: bootstrapGlobalPerms first, then bootstrapProjectsAndTasks.
-                uint256[] memory hatIds = new uint256[](1);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                // Now bootstrap a project + task atomically via the deployer path.
-                TaskManager.BootstrapProjectConfig[] memory projects = new TaskManager.BootstrapProjectConfig[](1);
-                uint256[] memory cHats = new uint256[](1);
-                cHats[0] = CREATOR_HAT;
-                uint256[] memory clHats = new uint256[](1);
-                clHats[0] = MEMBER_HAT;
-                projects[0] = TaskManager.BootstrapProjectConfig({
-                    title: bytes("BP"),
-                    metadataHash: bytes32(0),
-                    cap: 100 ether,
-                    managers: new address[](0),
-                    createHats: cHats,
-                    claimHats: clHats,
-                    reviewHats: new uint256[](0),
-                    assignHats: new uint256[](0),
-                    bountyTokens: new address[](0),
-                    bountyCaps: new uint256[](0)
-                });
-
-                TaskManager.BootstrapTaskConfig[] memory btasks = new TaskManager.BootstrapTaskConfig[](1);
-                btasks[0] = TaskManager.BootstrapTaskConfig({
-                    projectIndex: 0,
-                    payout: 1 ether,
-                    title: bytes("bt"),
-                    metadataHash: bytes32(0),
-                    bountyToken: address(0),
-                    bountyPayout: 0,
-                    requiresApplication: false
-                });
-
-                vm.prank(deployer);
-                tm.bootstrapProjectsAndTasks(projects, btasks);
-
-                // Task 0 is unclaimed; claim it via the member.
-                vm.prank(member1);
-                tm.claimTask(0);
-
-                // Editor hat (bootstrapped) can edit the now-CLAIMED task.
-                vm.prank(editorFull);
-                tm.updateTask(0, 2 ether, bytes("post"), bytes32(0), address(0), 0, 0, 0);
-            }
 
             /* ---------- Edge case 12: per-project override still beats bootstrap-granted global ---------- */
-            function test_BootstrapGlobalPerms_ProjectOverrideStillWins() public {
-                uint256[] memory hatIds = new uint256[](1);
-                uint8[] memory masks = new uint8[](1);
-                hatIds[0] = EDIT_FULL_HAT;
-                masks[0] = TaskPerm.EDIT_FULL;
-                vm.prank(deployer);
-                tm.bootstrapGlobalPerms(hatIds, masks);
-
-                _setupProjectAndTask();
-
-                // Set a per-project override that does NOT include EDIT_FULL.
-                vm.prank(creator1);
-                tm.setProjectRolePerm(bytes32(uint256(0)), EDIT_FULL_HAT, TaskPerm.CLAIM);
-
-                vm.prank(member1);
-                tm.claimTask(0);
-
-                // Editor hat is denied on this project despite the global EDIT_FULL grant.
-                vm.prank(editorFull);
-                vm.expectRevert(TaskManager.Unauthorized.selector);
-                tm.updateTask(0, 5 ether, bytes("nope"), bytes32(0), address(0), 0, 0, 0);
-            }
 
             /* ---------- Helpers ---------- */
             function _setupProjectAndTask() internal returns (bytes32 pid) {
@@ -8448,7 +8234,7 @@ contract MockToken is Test, IERC20 {
                 clHats[0] = MEMBER_HAT;
 
                 vm.prank(creator1);
-                pid = tm.createProject(
+                pid = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: bytes("P"),
                         metadataHash: bytes32(0),
@@ -9425,9 +9211,9 @@ contract MockToken is Test, IERC20 {
 
                 // strip CLAIM from MEMBER_HAT, project override first then the global mask
                 vm.prank(creator1);
-                tm.setProjectRolePerm(UC_ID, MEMBER_HAT, 0);
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(uint256(UC_ID) + 1), 0);
                 vm.prank(executor);
-                tm.setConfig(TaskManager.ConfigKey.ROLE_PERM, abi.encode(MEMBER_HAT, uint8(0)));
+                moduleAuthority.setMask(MEMBER_HAT, bytes32(0), uint8(0));
 
                 uint256 fresh = _mkTask(0, WINDOW);
                 vm.prank(member1);
@@ -10098,7 +9884,7 @@ contract MockToken is Test, IERC20 {
                 address reviewer = makeAddr("reviewerOnly");
                 setHat(reviewer, reviewerHat);
                 vm.prank(creator1);
-                tm.setProjectRolePerm(UC_ID, reviewerHat, 0xFF & ~TaskPerm.ASSIGN);
+                moduleAuthority.setMask(reviewerHat, bytes32(uint256(UC_ID) + 1), 0xFF & ~TaskPerm.ASSIGN);
 
                 // proof the actor really wields REVIEW on this project
                 uint256 warmup = _mkTask(0, WINDOW);
@@ -10117,7 +9903,7 @@ contract MockToken is Test, IERC20 {
 
                 // grant exactly the missing bit -> the same call now succeeds
                 vm.prank(creator1);
-                tm.setProjectRolePerm(UC_ID, reviewerHat, 0xFF);
+                moduleAuthority.setMask(reviewerHat, bytes32(uint256(UC_ID) + 1), 0xFF);
                 vm.prank(reviewer);
                 tm.unclaimTask(id);
                 (, address claimer) = _status(id);
@@ -10156,7 +9942,7 @@ contract MockToken is Test, IERC20 {
             function test_ReleaseAuthorityIsScopedToTaskProject() public {
                 // A second project whose only manager is creator2.
                 vm.prank(creator2);
-                bytes32 p2 = tm.createProject(
+                bytes32 p2 = _createProject(
                     TaskManager.BootstrapProjectConfig({
                         title: "SECOND",
                         metadataHash: bytes32(0),
@@ -10192,7 +9978,7 @@ contract MockToken is Test, IERC20 {
             function test_ProjectOverrideWithoutAssignBlocksRelease() public {
                 // pm1 keeps the global CREATE|REVIEW|ASSIGN mask but loses ASSIGN on UC_ID only.
                 vm.prank(creator1);
-                tm.setProjectRolePerm(UC_ID, PM_HAT, TaskPerm.REVIEW);
+                moduleAuthority.setMask(PM_HAT, bytes32(uint256(UC_ID) + 1), TaskPerm.REVIEW);
 
                 uint256 id = _mkTask(0, WINDOW);
                 _claimAndExpire(id, member1);

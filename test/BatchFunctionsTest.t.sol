@@ -237,7 +237,7 @@ contract BatchFunctionsTest is Test {
         standings[0] = true;
 
         vm.prank(unauthorized);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         eligibility.batchSetDefaultEligibility(hatIds, eligibles, standings);
     }
 
@@ -335,7 +335,7 @@ contract BatchFunctionsTest is Test {
         wearers[0] = user1;
 
         vm.prank(unauthorized);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         eligibility.batchMintHats(hatIds, wearers);
     }
 
@@ -530,7 +530,7 @@ contract BatchFunctionsTest is Test {
         combineFlags[0] = false;
 
         vm.prank(unauthorized);
-        vm.expectRevert(EligibilityModule.NotSuperAdmin.selector);
+        vm.expectRevert(EligibilityModule.NotSuperAdminOrRoleManager.selector);
         eligibility.batchConfigureVouching(hatIds, quorums, membershipHatIds, combineFlags);
     }
 

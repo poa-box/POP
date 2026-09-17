@@ -1,0 +1,638 @@
+{
+  "schemaVersion": 1,
+  "release": "Wave G authority-only protocol",
+  "verifiedAt": "2026-09-17T17:19:49.908428+00:00",
+  "status": "deployed-and-verified",
+  "scope": "Point-in-time verification on 2026-09-17; no live transactions sent by verifier. Fork smoke writes were local only.",
+  "broadcastCommit": "7b401724f131c90fadb8eb04c8e2b7db2d4d69b7",
+  "script": {
+    "path": "script/accessv2/UpgradeWaveG.s.sol",
+    "sha256": "c17b66b10f3cd39aff628881f2cb05449fce80312b2be7eed47fd6418537f1ee",
+    "rerunAgainstCurrentProduction": false
+  },
+  "build": {
+    "profile": "production",
+    "compiler": "0.8.33+commit.64118f21",
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "viaIR": true,
+    "evmVersion": "cancun",
+    "matchingArtifactSourceHashes": 86,
+    "runtimeComparison": "Exact equality after reviewed library linking and library self-address immutable substitution; all 14 runtimes match on each chain."
+  },
+  "contractsOnBothChains": [
+    {
+      "name": "DirectDemocracyVoting",
+      "kind": "implementation",
+      "version": "v14",
+      "address": "0x9c8985294ee32455d7b6c41381da40431039f011",
+      "runtimeBytes": 11344,
+      "runtimeSha256": "9db6a8cbf3cc4998796ab55358c753108de40f3ca1d70fce6748a7ae0b3f8edf"
+    },
+    {
+      "name": "HybridVoting",
+      "kind": "implementation",
+      "version": "v14",
+      "address": "0x4c679183ef00d0a3da41aef789b320e687bdea1a",
+      "runtimeBytes": 7622,
+      "runtimeSha256": "31da3b6d12b73e66fd2364990fd548ecb950aadec23e71b5ec88492713e2cdb0"
+    },
+    {
+      "name": "TaskManager",
+      "kind": "implementation",
+      "version": "v9",
+      "address": "0x0e16fce45ef776326e5bb3d2103d786540874fd6",
+      "runtimeBytes": 17475,
+      "runtimeSha256": "44ff26394475f9b3778c7f8b81552f62a8850d3285d822c26482c99759bf0878"
+    },
+    {
+      "name": "ParticipationToken",
+      "kind": "implementation",
+      "version": "v9",
+      "address": "0x24cbd81e5306b8a4feb8fb0426468073a97bd1dc",
+      "runtimeBytes": 12227,
+      "runtimeSha256": "da0a660c56c6089d5c84bda470165cd7ee6985975d743753924d577ce9008b4e"
+    },
+    {
+      "name": "EducationHub",
+      "kind": "implementation",
+      "version": "v5",
+      "address": "0x986bc3c36eba0a049fefe73fa1c252180e17eb2d",
+      "runtimeBytes": 5595,
+      "runtimeSha256": "5e1c90730652d9ab5868f7e4c493dbf6c02c7b0167894c4e2e8c33a2ae4250aa"
+    },
+    {
+      "name": "QuickJoin",
+      "kind": "implementation",
+      "version": "v10",
+      "address": "0xec622521734c2f4f04a90c52e2f80833a619cf28",
+      "runtimeBytes": 7223,
+      "runtimeSha256": "d75b3098c2612230364e678f66dd128d68abfe20e697329a29e04beb2fc14408"
+    },
+    {
+      "name": "Executor",
+      "kind": "implementation",
+      "version": "v6",
+      "address": "0xf731bc1019c7518077e490842b14400fa8ff1791",
+      "runtimeBytes": 6033,
+      "runtimeSha256": "cfc1c8cd433036ddcd042469a1f7dde6b6d3d8df28bbd1b0e32f106c716bb5ff"
+    },
+    {
+      "name": "OrgDeployer",
+      "kind": "implementation",
+      "version": "v21",
+      "address": "0x5e326a325a3e2c2874b80edd586416ce8e0b4845",
+      "runtimeBytes": 23862,
+      "runtimeSha256": "8a80dd72445aa20f7728f0f747a7b0063c290da9bbec5b3d46b906a3c247e2fc"
+    },
+    {
+      "name": "GovernanceFactory",
+      "kind": "factory",
+      "address": "0x6e246fb5393f066467db8095e9b7a3813d456246",
+      "runtimeBytes": 11106,
+      "runtimeSha256": "dbcec96483805bb81fb5058abe088943ab532f1451ae57c1708da7a8f0a2ec2d"
+    },
+    {
+      "name": "AccessFactory",
+      "kind": "factory",
+      "address": "0xf8444000df1d7f2d22a17ca6b569449067689cc1",
+      "runtimeBytes": 15341,
+      "runtimeSha256": "40fe58745af2c0f4a62acbde3a7faf1f037acdd0fe2cd50404e481845c4bddfc"
+    },
+    {
+      "name": "ModulesFactory",
+      "kind": "factory",
+      "address": "0x00d15641a66a1ae1ada3492f3c8a7b2367b83077",
+      "runtimeBytes": 10294,
+      "runtimeSha256": "1ad9d180e2486be81bf32f468ea03456b4c9db4298bf3365709747dfe3f691d1"
+    },
+    {
+      "name": "HybridVotingConfig",
+      "kind": "library",
+      "address": "0x0e2c74f0f142e31dc227d9f8dfad6edbdef28953",
+      "runtimeBytes": 3381,
+      "runtimeSha256": "88b9a405d0ff505e43fa66e92fcbff7afb0144a6f7929201e8db0c3e09fb8028"
+    },
+    {
+      "name": "HybridVotingCore",
+      "kind": "library",
+      "address": "0xa4518008432338fdf26871c0bca0681ee5b95a83",
+      "runtimeBytes": 5386,
+      "runtimeSha256": "6bb384a73e45b3690492d0b0066354f9f82e20969cd0668f9038dacc68283085"
+    },
+    {
+      "name": "HybridVotingProposals",
+      "kind": "library",
+      "address": "0xc6681438451d37bddeeb3c4b0139680d3982ebb6",
+      "runtimeBytes": 6893,
+      "runtimeSha256": "624608305badf9faff59bfde4726daa1e2f02734b69e851fc5c5aa756fe38d26"
+    }
+  ],
+  "chains": [
+    {
+      "name": "gnosis",
+      "chainId": 100,
+      "broadcast": {
+        "firstBlock": 48285463,
+        "lastBlock": 48285487,
+        "completedAt": "2026-09-16T20:52:25+00:00",
+        "successfulReceipts": 25,
+        "allReceiptsVerified": true,
+        "receiptChecks": [
+          "mined success",
+          "admin sender",
+          "calldata",
+          "nonce",
+          "target",
+          "block hash",
+          "block number"
+        ],
+        "receipts": [
+          {
+            "hash": "0xc5228c470a031ffd0928e7b3bd0c8967e93f910880b08a3ff78770f1b982dfe4",
+            "block": 48285463,
+            "blockHash": "0x3886eb2c853f1061132c6c886b3dd7bf39cc12273e0bd7ee4a00ebe4f8ca8c1c"
+          },
+          {
+            "hash": "0x6828baeb68439660406878cb6fe0d283e2000008d743660971209c5735c199d7",
+            "block": 48285464,
+            "blockHash": "0x1a7c3facc9a7ca9cdbd39c1232d81faeecf7c1adeb5fdb7cfe96ff7f3acdd485"
+          },
+          {
+            "hash": "0xdd328a8afa7893e99f0f5eaa1796e53f0cf3b1b26f7d844ff1ce76baac0389a3",
+            "block": 48285465,
+            "blockHash": "0x85c264d4a2f6e6bdc11158d3e32b8f1a569af87c3c29ae82eee25b10070e4695"
+          },
+          {
+            "hash": "0xdf260876fa70735d263559bb0f4e054e885dd1c6a2b0a3f3f3a13b23f12587fa",
+            "block": 48285466,
+            "blockHash": "0x7294923f8b7ae44d4ad76661d7f2abfa75be4100d76990e562f22d05f6402844"
+          },
+          {
+            "hash": "0x21eaec04433499727530e268734abba11292290d6f65569bf2724ee9033486c5",
+            "block": 48285467,
+            "blockHash": "0xf7358e5d578acdc4f40c577e891fd99a3b1dc9e500eae48876d5d4d69cb5c73a"
+          },
+          {
+            "hash": "0x8591dc56f74cca527d04b3c91aaa422a82fde1f5cb68cb3a2bc892eb43459bb4",
+            "block": 48285468,
+            "blockHash": "0xad72a96b406968496860047df3f32667d13d38cc3171c50f7baeef669a8ac7b6"
+          },
+          {
+            "hash": "0x2653762dffe321ad7a21a2144ab80efd21bfc80988ab3f5ee10f27d0b28ad8f6",
+            "block": 48285469,
+            "blockHash": "0x30583c4ea6f2b120b83dcf2ea0645701686351b7aa4f5427f97aa4afa8438747"
+          },
+          {
+            "hash": "0x7cf1d511c0d221bd3f716cf93a1faa14f4a07cd01e9d67d77f270d6d288fa4ef",
+            "block": 48285470,
+            "blockHash": "0xd80b31ef44384f5cb34aaae409d07cbb54e6f565333c6174844b03b550cba5a6"
+          },
+          {
+            "hash": "0x81a03db7b3c1d7ff35d1bbab39a87e845b3f504c363dee06ded641988de20c3c",
+            "block": 48285471,
+            "blockHash": "0xdb5da97d50c552a4b81f89662c798dc127337fc4623220a5d1085a61dde55f5b"
+          },
+          {
+            "hash": "0x405b54aa8673979542a4b3a248ac390e9f413a6bd50111315b07e1da2b8378f2",
+            "block": 48285472,
+            "blockHash": "0xd5e927c2e5842d12b191d44f86c0db48280d3909e574faa96ad536f3b0d3e4a3"
+          },
+          {
+            "hash": "0x66fc91ac007173bd7faf6816d7c9fa5ee7d65f3d7113a97520b1e7910b3cbe13",
+            "block": 48285473,
+            "blockHash": "0x4df6d02bd707eba7eab851569fdf6b373e32b8302c3344b7b183e9ee10cdeca8"
+          },
+          {
+            "hash": "0x45ed8a1dad569f7c4028d6d575b655063c832c8dfc92cec77b681258de90809c",
+            "block": 48285474,
+            "blockHash": "0x0c45f05ffaa1d3739e4637e4ba8d07b31c70b21e83b6b836dc1c768afb7908ea"
+          },
+          {
+            "hash": "0x9f33c57fecb0d3adebd602cfcdfea6c23e11398761c7ff004da3e7fb9d8ffd65",
+            "block": 48285475,
+            "blockHash": "0x3f417490ee478f5c8617a0393d80ef83b74c55e9fda9d10cf9460551bd465e2a"
+          },
+          {
+            "hash": "0xa3257b98d119094b32b3e44ac3560f1a8076ac623afde6c1bedab4382a36216e",
+            "block": 48285476,
+            "blockHash": "0x722eea43ed416446d592d4134fc47548935d45d86b38762ce1095a2e99d2b806"
+          },
+          {
+            "hash": "0x9e0805f827e5eea59870c8df4152952a2875c2ad61bac3504aac3cc4960c553e",
+            "block": 48285477,
+            "blockHash": "0x3ee59984ee0172d5ab09d8a70fe9de08b758c7d55eaefc652f40e7527e7c7f78"
+          },
+          {
+            "hash": "0x3fb8ee196af0524fbea2aa6a19f94182fa2dc0339787b1175045b709d7784736",
+            "block": 48285478,
+            "blockHash": "0x256207ca207731c2469898191157a54d28c42b08a804e9941f73911cf6ae1cdf"
+          },
+          {
+            "hash": "0x880e1852f9af742811e65f48b0c849ad4e9eafc6d24a781dd683ac0badc1da59",
+            "block": 48285479,
+            "blockHash": "0xa10db58584a641d27cd173962990b2eb62781f26d344b2789be9d1abfbc89a7c"
+          },
+          {
+            "hash": "0xa0c20bb1adb2ecd41f379d792c4e62e19662243346b9b8a87b9ff92c2ed0de2f",
+            "block": 48285480,
+            "blockHash": "0x8f8b679ec6dc0ae45a056a2a0497ab3c7433605943ed584cd3dabee74094cf5c"
+          },
+          {
+            "hash": "0x2a291463ff452909fd241ffc4c7202ac662484b10cfda4cb58fbc387bc159744",
+            "block": 48285481,
+            "blockHash": "0x94c462b67a945c4fc70c6e62b32c7bd50ca8e406333ae0b8e696fbf79868dc6c"
+          },
+          {
+            "hash": "0x2a7dc1cc8fb2d2586dcd5aa7d87bcc691d57305157493648e666cf35cac90140",
+            "block": 48285482,
+            "blockHash": "0x4c40e37ac3f42817f6b407ef1542294548faee3af54ef06895071e650653a105"
+          },
+          {
+            "hash": "0x4cdb6e872c8bee62f7cf5796ccb3ad710ae9eb1556a9e7d2cafc840eb193f20b",
+            "block": 48285483,
+            "blockHash": "0x9c4abc7b41ed830568014e3bc4c9d2954cd76af39f4ba9e819419d436fb2c15e"
+          },
+          {
+            "hash": "0xf84f7cbabbb930f3d3b9c4d6b5af9141e853f0c79860635269a0ff5aad603dba",
+            "block": 48285484,
+            "blockHash": "0xdd59e2048ca6670d59f1fe877bb575b2a34c2610f7d1650f66e1e9bf110494ca"
+          },
+          {
+            "hash": "0x9d9481ddd8004e8b9b77110f2edd8f51111fe059f5bf91411ed49e415cc13942",
+            "block": 48285485,
+            "blockHash": "0x913d1cd656ab31a3d4d2584b5848c6b901dbcdf905762cdccbce68a74f9887d1"
+          },
+          {
+            "hash": "0x9e88a28db02659142eefe308947749eec54345b0873620577e03705cc967fd3b",
+            "block": 48285486,
+            "blockHash": "0xf0161552c62b868833612174b5d4804bbdb33c823633c06d9c5d836fb6b058ec"
+          },
+          {
+            "hash": "0x28cc7c7bf3a6be3ad4ff7a94534779efa9b091c4f6c28c75fefb05ab58c207a1",
+            "block": 48285487,
+            "blockHash": "0x09a089e9375ad9891fae3fc00d04028b8b38bd90edfbec9b42e8db63f53a2b78"
+          }
+        ]
+      },
+      "runtimeVerification": {
+        "block": 48299831,
+        "blockHash": "0x16eab812e7ecaf1aeee5128f43a341e21b9dd2ac4775fb15a60416601a058f06",
+        "all14ContractsMatch": true
+      },
+      "stateVerification": {
+        "block": 48299809,
+        "assertions": 188,
+        "allPass": true,
+        "organizations": 9,
+        "physicalProxyBeacons": 64,
+        "allPhysicalBeaconChecksPass": true,
+        "ruleBaselineBlock": 48285462,
+        "retainedRuleStructsUnchanged": 56,
+        "retainedAllowed": 10,
+        "retainedUnsetOrDisabled": 46,
+        "retiredSelectorsDisabledWithZeroGasHint": 11
+      },
+      "nativeOrgAndAuthorizedEducationWriteForkSmoke": {
+        "block": 48299831,
+        "productionProfile": true,
+        "pass": true,
+        "usedInstalledContracts": true,
+        "upgradeCeremonyRerun": false,
+        "broadcast": false,
+        "scriptSha256": "d6c2e145b64dd7dd48f393da74aa4802ce92338fa857fc54713b951e8cde7a7b",
+        "logSha256": "6b703c026a894d7ba0188547d994f70ba1ac2f99b2b8facdcbbe2d56f4bebb4d"
+      },
+      "productionSubgraph": {
+        "deployment": "QmVW25xLhHraWkJjWGUnv3fvbVxiGFvGoRADtN32UwFWiE",
+        "indexedBlock": 48299852,
+        "hasIndexingErrors": false,
+        "indexedPastFinalUpgrade": true,
+        "originalSourcesAndStartBlocksPreserved": true,
+        "removedTemplates": [],
+        "voteIdsMissing": 0
+      }
+    },
+    {
+      "name": "arbitrum",
+      "chainId": 42161,
+      "broadcast": {
+        "firstBlock": 505999602,
+        "lastBlock": 505999798,
+        "completedAt": "2026-09-17T05:46:25+00:00",
+        "successfulReceipts": 25,
+        "allReceiptsVerified": true,
+        "receiptChecks": [
+          "mined success",
+          "admin sender",
+          "calldata",
+          "nonce",
+          "target",
+          "block hash",
+          "block number"
+        ],
+        "receipts": [
+          {
+            "hash": "0x45fdc8a2915bdc9481a1bf0909a39b0b3f9c43ae5bfe84b1b16695843f5452e6",
+            "block": 505999602,
+            "blockHash": "0x6c15b9702bb9a2ffa317e31e9887964bcb1910dd418ede6c8f515ae429077e6a"
+          },
+          {
+            "hash": "0xa06eb74da90b29289906fdb0440f435e6e5668d6b9a9b41e3f678bf711a119d7",
+            "block": 505999610,
+            "blockHash": "0x1e5813481d3a20ac365a1fd6c985e81193c43a08f90e12bad662eacae64da0d6"
+          },
+          {
+            "hash": "0x3ff986e5c9b77a58aca7b615badd390bcbe1588c23bace09831ff3cf3b40815a",
+            "block": 505999619,
+            "blockHash": "0x754dfa45d85eef8fb9109f84b8cc0292bc0bc8e1df9ccadd62fc4b42935c22e2"
+          },
+          {
+            "hash": "0x4539edb80c4410b342b23d8c8bf32c9c1e99b5e07cff003f037ebb0dfd9d8d9c",
+            "block": 505999626,
+            "blockHash": "0x1992750e519469d599644df67c7a6257031d3d55b8793cca1e99f24476711d1a"
+          },
+          {
+            "hash": "0x370edf849c586044d5aae4baf85b3732b32249938fe0b13cc2c642b303fee6e1",
+            "block": 505999636,
+            "blockHash": "0x1352730d037469b4f116e1e8199cdde9fe7d9aa114ea10a19013bd1768ece292"
+          },
+          {
+            "hash": "0x975328c12c2d5261b503c300364e59f548bdbcec9f4aed9fea97c2d5c4e81f81",
+            "block": 505999641,
+            "blockHash": "0x31840af750c2586f459bb03511dec64c52960b9e88713f20f747b02bead4f2a1"
+          },
+          {
+            "hash": "0x591779b6d138d43d75222189ee7a674d3ee7a73428b1792bcc1defb63290a29b",
+            "block": 505999647,
+            "blockHash": "0x4ad2a4deeb875f401b284abc1e4cf11936b1846298e6b8a094b35f44b5a95ed8"
+          },
+          {
+            "hash": "0xf629208bf3be726bdc2e9c200240fcd5c20f76d4a0669dcd1787df9832c92936",
+            "block": 505999656,
+            "blockHash": "0x3d37c1b1d84a7b3372da20941cd6a70db4f5bb2f4229918623f87213149bb93f"
+          },
+          {
+            "hash": "0x9c8f8e488f11aa9a17ac05028728b094b1cde8d90cdd1b1d56b04bb2811e5fe0",
+            "block": 505999681,
+            "blockHash": "0x3d99b11c9bdb08659ee6e3794cf78dfcd789a8a1df6f86a5631d5ae1709a8a28"
+          },
+          {
+            "hash": "0xf5474e1bb57c9813d872987645bb505fd9cdc5a89731c1d9c953eac48617bea1",
+            "block": 505999690,
+            "blockHash": "0xe88ab95c88d7159f4c0b4628411e48a97256a8417d3c59fa0277507284059bf2"
+          },
+          {
+            "hash": "0xd634ff29b3378aa05aaccff10b86689949e33ef4d13e3c8620f331c958085afc",
+            "block": 505999698,
+            "blockHash": "0x279cb8ce46b7b04b7648f59f2eabbab4e32747e57a273bb4d20399b1018b7a6d"
+          },
+          {
+            "hash": "0xb6a9c6ac883e22e62197d57c1aa898169b3bb22f21ef0709b3ece8c7de38c082",
+            "block": 505999705,
+            "blockHash": "0x7b4ce7cbcd479c8d682dae96ff54442bff41dd4711491923bace8b54943cd0aa"
+          },
+          {
+            "hash": "0x2d1cc1c7fe6bde3a25ce06fc9ddee18eeeb250adce992d645965f9de8166ee79",
+            "block": 505999712,
+            "blockHash": "0x5d907867e4e2bb8f46b38474bb86bf53be93f735d1623aa147d04ee41856972b"
+          },
+          {
+            "hash": "0x8846080b7141892536c0e4169bd9d77a11999914fccb48bc12239339aa26726a",
+            "block": 505999720,
+            "blockHash": "0xad7212d6e5b283f4fbbc79cb8d1788bf293b39081f4e5360474d7d4a11004880"
+          },
+          {
+            "hash": "0x4b42cdf123336a4ee593ecca4145c091fa12ec49ff206c311bcb6d86efd0a45b",
+            "block": 505999727,
+            "blockHash": "0x2b72fc4988c9982bc419c781241c2b5adb0e7e223ed0af09b287a0edb8efaa9f"
+          },
+          {
+            "hash": "0xdea4e28db89b7908950ba31466bd53c81203fde89abd6be310a483a7708559d2",
+            "block": 505999734,
+            "blockHash": "0x2c6eda60a87e6be0e775d2640dc0767700a0e4da26cd7739b19a3bce2115eb33"
+          },
+          {
+            "hash": "0x3ab525751f7396002b3f913d9cba07a78ea2983753ddf38ec5a186d496adfcc9",
+            "block": 505999741,
+            "blockHash": "0xe8ad34568a8c267bf189c50928f42e6c56393bcb61b3edee0c538d04db192692"
+          },
+          {
+            "hash": "0x9b1b9e1c7bd12a27010cd99c27065326b62c05d3cdce7c934ffdd59a8fcc48ec",
+            "block": 505999748,
+            "blockHash": "0x9c502de43c8af62593f4f50c62a1dbab169c325c3718b0e9a17947784401f027"
+          },
+          {
+            "hash": "0x44457b83102b6e149fc795cc2a95adac250ae8fbf06d63256cda518ad6a32f5b",
+            "block": 505999756,
+            "blockHash": "0x2096399d414c717700a0ed141b015bba2bfaf72550c50ff90e091761dfcb2fb6"
+          },
+          {
+            "hash": "0x06d997a54f188e16fba9a9f35a5a3842d342eeb2aa98b63233f68a07a91d20ca",
+            "block": 505999763,
+            "blockHash": "0x6b6fcc03cf81930182d41eb7e7db6c66c797434f333751fa947dd1315c3b59a5"
+          },
+          {
+            "hash": "0xa75a9a103080ea5949e704cc436be3c4c4f8e2c65f8556497cae051c11242327",
+            "block": 505999770,
+            "blockHash": "0xd9c2a7125b893053d40dc166103fc97ec4fe3be0003be290b438cf87965dd6dc"
+          },
+          {
+            "hash": "0x64d288f21770021b3fb6fa3a514602e20b633aceb5b040dc3269280ab5ad2635",
+            "block": 505999777,
+            "blockHash": "0x779ca93a324899b7fbbb89da0a9c764d91e8a4f350efc637fb000a7b3c16c581"
+          },
+          {
+            "hash": "0x1ec678dd14a8582cf7e00ba0159846b02499e4cb928b7a2641ffce2b7df36b5b",
+            "block": 505999784,
+            "blockHash": "0x1097f20216710bede0d19755ab735910eda2c56c246065bd4978311373a37758"
+          },
+          {
+            "hash": "0xe2e69d9e5a0059c8a4b06a87ae210cdd30cd675b2cde3f0270133f766795d821",
+            "block": 505999792,
+            "blockHash": "0xbe305aa3204847e4ffcf9a670a7dc3366e0421366cd5d95a56d39dab386f9c4c"
+          },
+          {
+            "hash": "0x90859fe103432fdd6a6b8b555fac89c455e0d516a2c57a81239a8b67d4d81c50",
+            "block": 505999798,
+            "blockHash": "0xab8bb03d97ad360646f81d7ccf133cd23ffce64997566b8b2ba3a5d2ef16267b"
+          }
+        ]
+      },
+      "runtimeVerification": {
+        "block": 506162819,
+        "blockHash": "0x6ae321b78b90ef189cb344ed1b7173afe4164fb5aeb1e8a1690d20548b2ad8f7",
+        "all14ContractsMatch": true
+      },
+      "stateVerification": {
+        "block": 506162398,
+        "assertions": 106,
+        "allPass": true,
+        "organizations": 1,
+        "physicalProxyBeacons": 8,
+        "allPhysicalBeaconChecksPass": true,
+        "ruleBaselineBlock": 505999601,
+        "retainedRuleStructsUnchanged": 56,
+        "retainedAllowed": 10,
+        "retainedUnsetOrDisabled": 46,
+        "retiredSelectorsDisabledWithZeroGasHint": 11
+      },
+      "nativeOrgAndAuthorizedEducationWriteForkSmoke": {
+        "block": 506162819,
+        "productionProfile": true,
+        "pass": true,
+        "usedInstalledContracts": true,
+        "upgradeCeremonyRerun": false,
+        "broadcast": false,
+        "scriptSha256": "d6c2e145b64dd7dd48f393da74aa4802ce92338fa857fc54713b951e8cde7a7b",
+        "logSha256": "79efd9b50410a632849b255c0e6e32c268748f03a00179674f94113b9ef11502"
+      },
+      "productionSubgraph": {
+        "deployment": "QmQcLdGjEncKFzUQSjc7tyroUkVerBtLtVBgK8JhLNTy1U",
+        "indexedBlock": 506163251,
+        "hasIndexingErrors": false,
+        "indexedPastFinalUpgrade": true,
+        "originalSourcesAndStartBlocksPreserved": true,
+        "removedTemplates": [],
+        "voteIdsMissing": 0
+      }
+    }
+  ],
+  "history": {
+    "organizationsCompared": 10,
+    "comparisonDates": [
+      "2026-09-06",
+      "2026-09-16"
+    ],
+    "categories": [
+      "users",
+      "HV/DDV proposals",
+      "tasks",
+      "projects"
+    ],
+    "missingIds": 0,
+    "voteComparison": "Current production vote IDs also compared to still-serving previous deployment 4342271; no missing ids.",
+    "survivors": [
+      {
+        "chain": "gnosis",
+        "name": "Test6",
+        "orgId": "0x263b2b29f392647f0fb8ddbb26f099e812ab4ba2777e5e07b906277164181f6b",
+        "authority": "0x11a6a93ca42ae9c9f74af492362d1d7a8b2b0449",
+        "counts": {
+          "users": 11,
+          "proposals": 65,
+          "tasks": 33,
+          "projects": 16
+        },
+        "beforeCutover": {
+          "users": 11,
+          "proposals": 55,
+          "tasks": 33,
+          "projects": 7
+        }
+      },
+      {
+        "chain": "gnosis",
+        "name": "Decentral Park",
+        "orgId": "0x3721271eb827a52a5adf676136d302efe19c34e72f08e080b07b225eecf27d78",
+        "authority": "0xfaa657f9efcd6e663d067a0d1e84567958201fe0",
+        "counts": {
+          "users": 4,
+          "proposals": 13,
+          "tasks": 15,
+          "projects": 5
+        },
+        "beforeCutover": {
+          "users": 4,
+          "proposals": 13,
+          "tasks": 9,
+          "projects": 2
+        }
+      },
+      {
+        "chain": "gnosis",
+        "name": "Kansas Blockchain",
+        "orgId": "0xc0f2765d555e21bfad5c6b05accef86a5758e0dee3e9a5b4ee3c3f3069c2102e",
+        "authority": "0x340fa3b15b4f66734200c56c78de7eec240c462b",
+        "counts": {
+          "users": 24,
+          "proposals": 34,
+          "tasks": 40,
+          "projects": 10
+        },
+        "beforeCutover": {
+          "users": 24,
+          "proposals": 34,
+          "tasks": 40,
+          "projects": 10
+        }
+      },
+      {
+        "chain": "arbitrum",
+        "name": "Poa",
+        "orgId": "0xa71879ef0e38b15fe7080196c0102f859e0ca8e7b8c0703ec8df03c66befd069",
+        "authority": "0x348584d47327502e23a372fea32aaae9d8d0b55d",
+        "counts": {
+          "users": 10,
+          "proposals": 7,
+          "tasks": 15,
+          "projects": 5
+        },
+        "beforeCutover": {
+          "users": 10,
+          "proposals": 7,
+          "tasks": 15,
+          "projects": 5
+        }
+      }
+    ]
+  },
+  "frontend": {
+    "production": "https://poa.box",
+    "mergedCommit": "bd831cf63f3e47982c77df2f267a43646e1975ef",
+    "deploymentCid": "bafybeic33rym2ofa5gc4axtpuv4cnpb4tvm7t346t2vrabffvc72mnbhfq",
+    "publicDirectory": [
+      "Poa",
+      "Kansas Blockchain",
+      "Decentral Park"
+    ],
+    "survivorDirectRoutesLoad": [
+      "Poa",
+      "Kansas Blockchain",
+      "Decentral Park",
+      "Test6"
+    ],
+    "retiredDirectRoutesHidden": [
+      "Argus",
+      "Test3",
+      "Test2",
+      "Test",
+      "Test5",
+      "tkrjehbcuebc"
+    ],
+    "argusDirectIdHidden": true,
+    "noPageErrors": true,
+    "noSigningOrWrites": true
+  },
+  "remainingSeparateRelease": {
+    "scope": "authority-only CLI/packages; no further Wave G protocol broadcast",
+    "npmVersionsAtVerification": {
+      "@poa-box/core": "0.1.0",
+      "@poa-box/cli": "0.1.0",
+      "@poa-box/agent": "0.1.0"
+    }
+  },
+  "sourceEvidenceSha256": {
+    "verification-summary.json": "1c889d4d74b20eab4a0c0ec985370a30ee6a6cf396a29e36facbec4de4afe363",
+    "bytecode-artifact-provenance.json": "633a585f30d779c533f4008e9cb0d2a8f8d8ae4538d3b03e2238c96d73c11dfd",
+    "bytecode-gnosis.json": "6f791f5c05401f719a7829305a665902f0ffad0c771a5a626761cc7dd192eac4",
+    "bytecode-arbitrum.json": "bff5ef3bd0a44bfba3b6c3b4b759403c5958b7f6883159f323adad3e77f53f4b",
+    "state-summary.json": "a5679bd3b95d77ff7d5e043badf3556d36a1aa3cf94c0ec3b607eef8267c04a1",
+    "upgrade-physical-beacons.json": "2aa2b183d455cb2277cf785e457846ec336c67f732521f31188bab260c5c652e",
+    "post-upgrade-native-summary.json": "0382280c4a97558a5d6021321515e16a9994397dc7742e7e636c232cd7599e92",
+    "subgraph-status.json": "3793af0389b30c173d1872422b4de17559bcd1012bf8dddf2ec19b62b6979070",
+    "frontend-summary.json": "6b768be0e1be8de0eb7e6e6461da4a7e934999d4cc09d8924603ef71dd2abb08"
+  }
+}

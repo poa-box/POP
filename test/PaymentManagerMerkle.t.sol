@@ -61,7 +61,7 @@ contract PaymentManagerMerkleTest is Test {
         uint256[] memory approverHats = new uint256[](1);
         approverHats[0] = approverHatId;
 
-        participationToken.initialize(executor, "Participation Token", "PART", address(hats), memberHats, approverHats);
+        participationToken.initialize(executor, "Participation Token", "PART");
 
         // Deploy payment manager
         PaymentManager _pmImpl = new PaymentManager();

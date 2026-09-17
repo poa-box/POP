@@ -1,39 +1,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
 
-import "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
-import "@openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
+import {Initializable} from "@openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {IHats} from "@hats-protocol/src/Interfaces/IHats.sol";
 
-import "./OrgRegistry.sol";
+import {OrgRegistry} from "./OrgRegistry.sol";
 import {IHybridVotingInit} from "./libs/ModuleDeploymentLib.sol";
-import {GovernanceFactory, IHatsTreeSetup} from "./factories/GovernanceFactory.sol";
+import {GovernanceFactory} from "./factories/GovernanceFactory.sol";
 import {AccessFactory} from "./factories/AccessFactory.sol";
 import {ModulesFactory} from "./factories/ModulesFactory.sol";
 import {RoleConfigStructs} from "./libs/RoleConfigStructs.sol";
+import {OrgAccessSeedLib} from "./libs/OrgAccessSeedLib.sol";
+import {AccessV2Types} from "./libs/AccessV2Types.sol";
 import {ModuleTypes} from "./libs/ModuleTypes.sol";
+import {ITaskManagerBootstrap} from "./interfaces/ITaskManagerBootstrap.sol";
 
 /*────────────────────── Module‑specific hooks ──────────────────────────*/
 interface IExecutorAdmin {
     function setCaller(address) external;
     function setHatMinterAuthorization(address minter, bool authorized) external;
+    function setMembershipAuthority(address authority) external;
+    function configureModule(address target, bytes calldata data) external returns (bytes memory);
     function acceptBeaconOwnership(address beacon) external;
     function configureParticipationToken(address token, address taskManager, address educationHub) external;
-    function configureVouching(
-        address eligibilityModule,
-        uint256 hatId,
-        uint32 quorum,
-        uint256 membershipHatId,
-        bool combineWithHierarchy
-    ) external;
-    function batchConfigureVouching(
-        address eligibilityModule,
-        uint256[] calldata hatIds,
-        uint32[] calldata quorums,
-        uint256[] calldata membershipHatIds,
-        bool[] calldata combineWithHierarchyFlags
-    ) external;
-    function setDefaultEligibility(address eligibilityModule, uint256 hatId, bool eligible, bool standing) external;
 }
 
 interface IPaymasterHub {
@@ -62,53 +52,60 @@ interface IPaymasterHub {
     function depositForOrg(bytes32 orgId) external payable;
 }
 
-interface ITaskManagerBootstrap {
-    struct BootstrapProjectConfig {
-        bytes title;
-        bytes32 metadataHash;
-        uint256 cap;
-        address[] managers;
-        uint256[] createHats;
-        uint256[] claimHats;
-        uint256[] reviewHats;
-        uint256[] assignHats;
-        address[] bountyTokens;
-        uint256[] bountyCaps;
-    }
-
-    struct BootstrapTaskConfig {
-        uint8 projectIndex;
-        uint256 payout;
-        bytes title;
-        bytes32 metadataHash;
-        address bountyToken;
-        uint256 bountyPayout;
-        bool requiresApplication;
-    }
-
-    function bootstrapProjectsAndTasks(BootstrapProjectConfig[] calldata projects, BootstrapTaskConfig[] calldata tasks)
-        external
-        returns (bytes32[] memory projectIds);
-
-    function bootstrapGlobalPerms(uint256[] calldata hatIds, uint8[] calldata masks) external;
-
-    function clearDeployer() external;
+/*────────────────────── MembershipAuthority seed hooks ─────────────────*/
+/// @dev Executor-gated authority calls made during the deploy window, relayed through
+///      {IExecutorAdmin.configureModule} (the OrgDeployer owns the Executor until step 14).
+interface IAuthoritySeed {
+    function renameSubject(uint256 subjectId, string calldata name, bytes32 metadataCID, string calldata imageURI)
+        external;
+    function seedRules(
+        uint256[] calldata subjects,
+        address[] calldata users,
+        AccessV2Types.RuleKind[] calldata kinds,
+        bool[] calldata delegable
+    ) external;
+    function seedMemberships(uint256[] calldata subjects, address[] calldata users) external;
+    function seedPerms(
+        uint256[] calldata subjects,
+        bytes32[] calldata permKeys,
+        bytes32[] calldata ctxs,
+        uint256[] calldata words
+    ) external;
+    function setPaused(bool paused) external;
 }
 
 /**
  * @title OrgDeployer
  * @notice Thin orchestrator for deploying complete organizations using factory pattern
- * @dev Coordinates GovernanceFactory, AccessFactory, and ModulesFactory
+ * @dev Coordinates GovernanceFactory, AccessFactory, and ModulesFactory. Access v2: an org's
+ *      membership and permissions live in ONE per-org MembershipAuthority — there is no Hats tree,
+ *      no EligibilityModule and no ToggleModule. Every `uint256` role id below is an authority
+ *      SUBJECT id; modules are wired to the authority inside the deploy transaction.
  */
 contract OrgDeployer is Initializable {
     /// @notice Contract version for tracking deployments
-    string public constant VERSION = "1.0.1";
+    string public constant VERSION = "2.0.0";
+
+    /// @notice Caps mirroring the authority's own limits (PermFanoutLimit = 16 subjects per
+    ///         permission key, GroupsPerRoleLimit = 8, GroupSizeLimit = 16 member roles).
+    uint256 private constant MAX_ROLES = 16;
+    uint256 private constant MAX_GROUPS = 8;
+    uint256 private constant MAX_GROUP_MEMBERS = 16;
 
     /*────────────────────────────  Errors  ───────────────────────────────*/
     error InvalidAddress();
     error OrgExistsMismatch();
     error Reentrant();
     error InvalidRoleConfiguration();
+    /// @notice `quickJoinRolesBitmap` addresses a role that is not default-ALLOW, which would make
+    ///         every QuickJoin call revert at runtime.
+    error QuickJoinRoleNotOpen(uint256 roleIndex);
+    /// @notice A group lists the same role twice — the authority rejects the second add.
+    error DuplicateGroupMemberRole(uint256 groupIndex, uint256 roleIndex);
+    /// @notice A role's `maxMembers` cap is smaller than the wearers its genesis seed would mint.
+    error RoleCapacityBelowGenesisSeed(uint256 roleIndex, uint256 maxMembers, uint256 seededWearers);
+    /// @notice A factory tried to register after the org left bootstrap mode.
+    error DeploymentComplete();
 
     /*────────────────────────────  Events  ───────────────────────────────*/
     event OrgDeployed(
@@ -121,19 +118,26 @@ contract OrgDeployer is Initializable {
         address taskManager,
         address educationHub,
         address paymentManager,
-        address eligibilityModule,
-        address toggleModule,
-        uint256 topHatId,
-        uint256[] roleHatIds
+        address membershipAuthority,
+        uint256 adminSubjectId,
+        uint256[] roleSubjectIds
     );
 
     event RolesCreated(
-        bytes32 indexed orgId, uint256[] hatIds, string[] names, string[] images, bytes32[] metadataCIDs, bool[] canVote
+        bytes32 indexed orgId,
+        uint256[] subjectIds,
+        string[] names,
+        string[] images,
+        bytes32[] metadataCIDs,
+        bool[] canVote
     );
+
+    /// @notice Group subjects created at genesis, with the role subjects each one derives from.
+    event GroupsCreated(bytes32 indexed orgId, uint256[] subjectIds, string[] names, uint256[][] memberSubjectIds);
 
     /// @notice Emitted after OrgDeployed to provide initial wearer assignments for subgraph indexing
     event InitialWearersAssigned(
-        bytes32 indexed orgId, address indexed eligibilityModule, address[] wearers, uint256[] hatIds
+        bytes32 indexed orgId, address indexed membershipAuthority, address[] wearers, uint256[] subjectIds
     );
 
     /*───────────── ERC-7201 Storage ───────────*/
@@ -144,7 +148,7 @@ contract OrgDeployer is Initializable {
         ModulesFactory modulesFactory;
         OrgRegistry orgRegistry;
         address poaManager;
-        address hatsTreeSetup;
+        address hatsTreeSetup; // DEAD (Access v2 has no Hats tree); slot retained for upgrade safety
         address paymasterHub; // Shared PaymasterHub for all orgs
         address universalPasskeyFactory; // Universal PasskeyAccountFactory for all orgs
         uint256 _status; // manual reentrancy guard
@@ -170,7 +174,9 @@ contract OrgDeployer is Initializable {
     }
 
     /// @dev Returns the Hats instance, preferring the ERC-7201 slot (hatsV2) with
-    ///      fallback to the legacy slot-0 variable for pre-migration proxies.
+    ///      fallback to the legacy slot-0 variable for pre-migration proxies. Hats itself is no
+    ///      longer an access source for new orgs; the address is still written to the Executor as
+    ///      its `l.hats` seed value and rollback target.
     function _getHats() internal view returns (IHats) {
         IHats h = _layout().hatsV2;
         if (address(h) != address(0)) return h;
@@ -191,24 +197,25 @@ contract OrgDeployer is Initializable {
         address _poaManager,
         address _orgRegistry,
         address _hats,
-        address _hatsTreeSetup,
         address _paymasterHub
     ) public initializer {
         if (
             _governanceFactory == address(0) || _accessFactory == address(0) || _modulesFactory == address(0)
                 || _poaManager == address(0) || _orgRegistry == address(0) || _hats == address(0)
-                || _hatsTreeSetup == address(0) || _paymasterHub == address(0)
+                || _paymasterHub == address(0)
         ) {
             revert InvalidAddress();
         }
 
         Layout storage l = _layout();
         l.governanceFactory = GovernanceFactory(_governanceFactory);
+        emit GovernanceFactoryUpdated(_governanceFactory);
         l.accessFactory = AccessFactory(_accessFactory);
+        emit AccessFactoryUpdated(_accessFactory);
         l.modulesFactory = ModulesFactory(_modulesFactory);
+        emit ModulesFactoryUpdated(_modulesFactory);
         l.orgRegistry = OrgRegistry(_orgRegistry);
         l.poaManager = _poaManager;
-        l.hatsTreeSetup = _hatsTreeSetup;
         l.paymasterHub = _paymasterHub;
         l._status = 1; // Initialize manual reentrancy guard
         l.hatsV2 = IHats(_hats); // ERC-7201 namespace (upgrade-safe)
@@ -242,13 +249,23 @@ contract OrgDeployer is Initializable {
     /// @notice Re-point the deployer at a freshly-deployed ModulesFactory.
     /// @dev ModulesFactory is a plain (non-proxy) contract referenced by address, so a beacon
     ///      upgrade of this OrgDeployer keeps the OLD factory in storage. After deploying a new
-    ///      ModulesFactory (e.g. to add the ZkEmailInvites deploy path), call this to switch.
-    ///      Only callable by PoaManager (via Hub/Satellite adminCall).
+    ///      ModulesFactory, call this to switch. Only callable by PoaManager (via Hub/Satellite adminCall).
+    event ModulesFactoryUpdated(address indexed factory);
+    event GovernanceFactoryUpdated(address indexed factory);
+    event AccessFactoryUpdated(address indexed factory);
+
+    /// @notice Current deployment factories, for upgrade verification and integrations.
+    function factories() external view returns (address governance, address access, address modules) {
+        Layout storage l = _layout();
+        return (address(l.governanceFactory), address(l.accessFactory), address(l.modulesFactory));
+    }
+
     function setModulesFactory(address _modulesFactory) external {
         Layout storage l = _layout();
         if (msg.sender != l.poaManager) revert InvalidAddress();
         if (_modulesFactory == address(0)) revert InvalidAddress();
         l.modulesFactory = ModulesFactory(_modulesFactory);
+        emit ModulesFactoryUpdated(_modulesFactory);
     }
 
     /// @notice Re-point the deployer at freshly-deployed Governance/Access factories.
@@ -258,6 +275,7 @@ contract OrgDeployer is Initializable {
         if (msg.sender != l.poaManager) revert InvalidAddress();
         if (_governanceFactory == address(0)) revert InvalidAddress();
         l.governanceFactory = GovernanceFactory(_governanceFactory);
+        emit GovernanceFactoryUpdated(_governanceFactory);
     }
 
     function setAccessFactory(address _accessFactory) external {
@@ -265,6 +283,7 @@ contract OrgDeployer is Initializable {
         if (msg.sender != l.poaManager) revert InvalidAddress();
         if (_accessFactory == address(0)) revert InvalidAddress();
         l.accessFactory = AccessFactory(_accessFactory);
+        emit AccessFactoryUpdated(_accessFactory);
     }
 
     /*════════════════  DEPLOYMENT STRUCTS  ════════════════*/
@@ -278,22 +297,22 @@ contract OrgDeployer is Initializable {
         address taskManager;
         address educationHub;
         address paymentManager;
-        address eligibilityModule;
+        address membershipAuthority;
         // address(0) on chains where ZK Email protocol infra (verifier + DKIM registry)
         // has not been wired into the OrgDeployer yet — the module is skipped.
         address zkEmailInvites;
     }
 
     struct RoleAssignments {
-        uint256 quickJoinRolesBitmap; // Bit N set = Role N assigned on join
-        uint256 tokenMemberRolesBitmap; // Bit N set = Role N can hold tokens
-        uint256 tokenApproverRolesBitmap; // Bit N set = Role N can approve transfers
-        uint256 taskCreatorRolesBitmap; // Bit N set = Role N can create tasks
-        uint256 educationCreatorRolesBitmap; // Bit N set = Role N can create education
-        uint256 educationMemberRolesBitmap; // Bit N set = Role N can access education
-        uint256 hybridProposalCreatorRolesBitmap; // Bit N set = Role N can create proposals
-        uint256 ddVotingRolesBitmap; // Bit N set = Role N can vote in polls
-        uint256 ddCreatorRolesBitmap; // Bit N set = Role N can create polls
+        uint256 quickJoinRolesBitmap; // Bit N set = Role N auto-joins (QJ_AUTOJOIN + default-ALLOW)
+        uint256 tokenMemberRolesBitmap; // Bit N set = Role N can hold tokens (PT_MEMBER)
+        uint256 tokenApproverRolesBitmap; // Bit N set = Role N can approve transfers (PT_APPROVE)
+        uint256 taskCreatorRolesBitmap; // Bit N set = Role N is a TaskManager organizer
+        uint256 educationCreatorRolesBitmap; // Bit N set = Role N can create education (EDU_CREATE)
+        uint256 educationMemberRolesBitmap; // Bit N set = Role N can access education (EDU_MEMBER)
+        uint256 hybridProposalCreatorRolesBitmap; // Bit N set = Role N can create proposals (HV_CREATE)
+        uint256 ddVotingRolesBitmap; // Bit N set = Role N can vote in polls (DD_VOTE)
+        uint256 ddCreatorRolesBitmap; // Bit N set = Role N can create polls (DD_CREATE)
     }
 
     struct BootstrapConfig {
@@ -301,39 +320,27 @@ contract OrgDeployer is Initializable {
         ITaskManagerBootstrap.BootstrapTaskConfig[] tasks;
     }
 
-    /// @notice Optional org-wide TaskManager role-permission grants applied during bootstrap.
-    /// @dev    Each `roleIndices[i]` is resolved against `params.roles[]` to a hat ID and assigned
-    ///         the corresponding `masks[i]` (a bitwise OR of `TaskPerm` bits). Equivalent to the
-    ///         executor calling `setConfig(ROLE_PERM, abi.encode(hatId, mask))` post-deployment,
-    ///         but baked into the atomic deploy. Empty arrays = skip (no grants). `roleIndices.length`
-    ///         must equal `masks.length`. Duplicate role indices: last write wins.
-    ///         Use this for org-wide grants of `TaskPerm.EDIT_META`, `EDIT_FULL`, `BUDGET`,
-    ///         `SELF_REVIEW`, or any future TaskPerm bit. Per-project grants still go through
-    ///         `BootstrapProjectConfig.{create,claim,review,assign}Hats`.
-    ///
-    ///         CAVEAT — per-project overrides shadow global grants. `TaskManager._permMask` returns
-    ///         the per-project mask for a hat IF non-zero, otherwise the global mask. If a bootstrap
-    ///         project sets per-project perms for the same hat (e.g. `createHats: [executiveRole]`),
-    ///         the global mask granted here is silently ignored on that project. To grant EDIT_FULL
-    ///         on a bootstrap project, either (a) call `setProjectRolePerm(pid, hat, existing | EDIT_FULL)`
-    ///         post-deploy via governance, or (b) create the project post-deploy without per-project
-    ///         perms for that hat. Fresh post-deploy projects inherit the global grant correctly.
+    /// @notice Org-wide TaskManager permission grants, seeded as TM_PERMS rows at the global context.
+    /// @dev Each `roleIndices[i]` is resolved against `params.roles[]` and given `masks[i]` (an OR of
+    ///      `TaskPerm` bits). Empty arrays = skip. Duplicate role indices: last write wins.
+    ///      Bootstrap projects add per-project rows that INHERIT this global row (the authority ORs
+    ///      the two), so a global grant is never silently shadowed by a project grant.
     struct TaskManagerPermConfig {
         uint256[] roleIndices;
         uint8[] masks;
     }
 
     struct PaymasterConfig {
-        uint256 operatorRoleIndex; // Role index for paymaster operator hat; type(uint256).max = skip (topHat-only)
-        bool autoWhitelistContracts; // If true, auto-whitelist deployed org contracts
+        uint256 operatorRoleIndex; // Role index for the paymaster operator subject; >= roles.length = skip
+        bool autoWhitelistContracts; // If true, map deployed org contracts to their module typeIds
         uint256 maxFeePerGas;
         uint256 maxPriorityFeePerGas;
         uint32 maxCallGas;
         uint32 maxVerificationGas;
         uint32 maxPreVerificationGas;
         // Budget config (all zeros = skip)
-        uint128 defaultBudgetCapPerEpoch; // Default spending cap per epoch for each role hat (0 = no budget)
-        uint32 defaultBudgetEpochLen; // Default epoch length in seconds for each role hat (0 = no budget)
+        uint128 defaultBudgetCapPerEpoch; // Default spending cap per epoch for each role subject (0 = no budget)
+        uint32 defaultBudgetEpochLen; // Default epoch length in seconds for each role subject (0 = no budget)
     }
 
     struct DeploymentParams {
@@ -341,7 +348,7 @@ contract OrgDeployer is Initializable {
         string orgName;
         bytes32 metadataHash; // IPFS CID sha256 digest (optional, bytes32(0) is valid)
         address registryAddr;
-        address deployerAddress; // Address to receive ADMIN hat
+        address deployerAddress; // Founder address (seeded into every mintToDeployer role)
         string deployerUsername; // Optional username for deployer (empty string = skip registration)
         uint256 regDeadline; // EIP-712 signature deadline (0 = skip registration)
         uint256 regNonce; // User's current nonce on the registry
@@ -351,14 +358,15 @@ contract OrgDeployer is Initializable {
         uint8 ddThresholdPct;
         IHybridVotingInit.ClassConfig[] hybridClasses;
         address[] ddInitialTargets;
-        RoleConfigStructs.RoleConfig[] roles; // Complete role configuration (replaces roleNames, roleImages, roleCanVote)
+        RoleConfigStructs.RoleConfig[] roles; // ROLE subjects
+        RoleConfigStructs.GroupConfig[] groups; // GROUP subjects (derived membership over roles)
         RoleAssignments roleAssignments;
-        uint256 metadataAdminRoleIndex; // Explicit role index whose hat gets metadata-admin; type(uint256).max = skip (topHat fallback)
+        uint256 metadataAdminRoleIndex; // Role index granted SUBJECT_RENAME; >= roles.length = skip
         bool passkeyEnabled; // Whether passkey support is enabled (uses universal factory)
         ModulesFactory.EducationHubConfig educationHubConfig; // EducationHub deployment configuration
         BootstrapConfig bootstrap; // Optional: initial projects and tasks to create
         PaymasterConfig paymasterConfig; // Optional: paymaster configuration (funding via msg.value)
-        TaskManagerPermConfig taskManagerPerms; // Optional: org-wide TaskManager ROLE_PERM grants
+        TaskManagerPermConfig taskManagerPerms; // Optional: org-wide TaskManager TM_PERMS grants
         uint32 hybridQuorum; // Min voter count for HybridVoting proposals (0 = disabled)
         uint32 ddQuorum; // Min voter count for DirectDemocracyVoting polls (0 = disabled)
         string tokenName; // ParticipationToken name (empty = "<orgName> Token")
@@ -367,59 +375,71 @@ contract OrgDeployer is Initializable {
 
     /*════════════════  VALIDATION  ════════════════*/
 
-    /// @notice Validates role configurations for correctness
-    /// @dev Checks indices, prevents cycles, validates vouching configs
-    /// @param roles Array of role configurations to validate
-    function _validateRoleConfigs(RoleConfigStructs.RoleConfig[] calldata roles) internal pure {
-        uint256 len = roles.length;
+    /// @notice Validates the org's role/group shape against the authority's structural limits.
+    function _validateRoleConfigs(DeploymentParams calldata params) internal pure {
+        uint256 len = params.roles.length;
+        if (len == 0 || len > MAX_ROLES) revert InvalidRoleConfiguration();
 
-        // Must have at least one role
-        if (len == 0) revert InvalidRoleConfiguration();
-
-        // Practical limit to prevent gas issues
-        if (len > 32) revert InvalidRoleConfiguration();
-
+        uint256 quickJoinBitmap = params.roleAssignments.quickJoinRolesBitmap;
         for (uint256 i = 0; i < len; i++) {
-            RoleConfigStructs.RoleConfig calldata role = roles[i];
-
-            // Validate vouching configuration
-            if (role.vouching.enabled) {
-                // Quorum must be positive
-                if (role.vouching.quorum == 0) revert InvalidRoleConfiguration();
-
-                // Voucher role index must be valid
-                if (role.vouching.voucherRoleIndex >= len) {
-                    revert InvalidRoleConfiguration();
-                }
-            }
-
-            // Validate hierarchy configuration
-            if (role.hierarchy.adminRoleIndex != type(uint256).max) {
-                // Admin role index must be valid
-                if (role.hierarchy.adminRoleIndex >= len) {
-                    revert InvalidRoleConfiguration();
-                }
-
-                // Prevent simple self-referential cycles
-                if (role.hierarchy.adminRoleIndex == i) {
-                    revert InvalidRoleConfiguration();
-                }
-            }
-
-            // Validate name is not empty
+            RoleConfigStructs.RoleConfig calldata role = params.roles[i];
             if (bytes(role.name).length == 0) revert InvalidRoleConfiguration();
+            if (role.vouching.enabled) {
+                if (role.vouching.quorum == 0) revert InvalidRoleConfiguration();
+                if (role.vouching.voucherRoleIndex >= len) revert InvalidRoleConfiguration();
+            }
+            // QJ_AUTOJOIN is only reachable for a default-ALLOW (open) role: QuickJoin enumerates the
+            // subjects carrying the perm without any eligibility filter, and the authority rejects a
+            // non-eligible stranger — so a closed role in the bitmap bricks EVERY join at runtime.
+            if (!role.open && quickJoinBitmap & (1 << i) != 0) revert QuickJoinRoleNotOpen(i);
+            // The genesis seed flips each wearer on one by one; over-cap would revert deep inside the
+            // authority's constructor (SubjectFull) as an opaque deploy failure.
+            uint256 seeded = role.distribution.additionalWearers.length + (role.distribution.mintToDeployer ? 1 : 0);
+            if (role.maxMembers != 0 && seeded > role.maxMembers) {
+                revert RoleCapacityBelowGenesisSeed(i, role.maxMembers, seeded);
+            }
         }
 
-        // Note: Full cycle detection would require graph traversal
-        // The Hats contract itself will revert if actual cycles exist during tree creation
+        uint256 groupCount = params.groups.length;
+        if (groupCount > MAX_GROUPS) revert InvalidRoleConfiguration();
+        for (uint256 j = 0; j < groupCount; j++) {
+            RoleConfigStructs.GroupConfig calldata group = params.groups[j];
+            if (bytes(group.name).length == 0) revert InvalidRoleConfiguration();
+            uint256 m = group.memberRoleIndices.length;
+            if (m == 0 || m > MAX_GROUP_MEMBERS) revert InvalidRoleConfiguration();
+            // `len <= MAX_ROLES (16)`, so a uint256 bitmap covers every valid member index.
+            uint256 seenRoles;
+            for (uint256 x = 0; x < m; x++) {
+                uint256 roleIndex = group.memberRoleIndices[x];
+                if (roleIndex >= len) revert InvalidRoleConfiguration();
+                // A repeat would revert SubjectExists inside the authority's constructor.
+                if (seenRoles & (1 << roleIndex) != 0) revert DuplicateGroupMemberRole(j, roleIndex);
+                seenRoles |= 1 << roleIndex;
+            }
+        }
+
+        // Every role bitmap addresses ROLE indices only — a bit past the role count would produce a
+        // permission row with no subject behind it.
+        uint256 mask = len == 256 ? type(uint256).max : (1 << len) - 1;
+        RoleAssignments calldata ra = params.roleAssignments;
+        uint256 union = ra.quickJoinRolesBitmap | ra.tokenMemberRolesBitmap | ra.tokenApproverRolesBitmap
+            | ra.taskCreatorRolesBitmap | ra.educationCreatorRolesBitmap | ra.educationMemberRolesBitmap
+            | ra.hybridProposalCreatorRolesBitmap | ra.ddVotingRolesBitmap | ra.ddCreatorRolesBitmap;
+        if (union & ~mask != 0) revert InvalidRoleConfiguration();
+
+        if (params.taskManagerPerms.roleIndices.length != params.taskManagerPerms.masks.length) {
+            revert InvalidRoleConfiguration();
+        }
+        for (uint256 i = 0; i < params.taskManagerPerms.roleIndices.length; i++) {
+            if (params.taskManagerPerms.roleIndices[i] >= len) revert InvalidRoleConfiguration();
+        }
     }
 
     /*════════════════  MAIN DEPLOYMENT FUNCTION  ════════════════*/
 
-    /// @notice Deploy a full org without ZK Email invites (backwards-compatible entrypoint).
+    /// @notice Deploy a full org without ZK Email invites.
     function deployFullOrg(DeploymentParams calldata params) external payable returns (DeploymentResult memory result) {
-        // Empty (disabled) ZK Email config — module is skipped.
-        ModulesFactory.ZkEmailConfig memory emptyZk;
+        ModulesFactory.ZkEmailConfig memory emptyZk; // disabled — the module is skipped
         result = _deployFullOrgGuarded(params, emptyZk);
     }
 
@@ -427,7 +447,7 @@ contract OrgDeployer is Initializable {
     /// @dev The ZkEmailInvites module deploys only if `zkConfig.enabled` AND the chain has the ZK
     ///      Email infra wired (verifier + DKIM registry via setZkEmailInfrastructure) AND the
     ///      ZkEmailInvites beacon is registered. Domain/email rules use role-index bitmaps,
-    ///      resolved to hat IDs at deploy. Rules are applied atomically before ownership renounce.
+    ///      resolved to subject ids at deploy. Rules are applied atomically before ownership renounce.
     function deployFullOrgWithZkEmail(DeploymentParams calldata params, ModulesFactory.ZkEmailConfig calldata zkConfig)
         external
         payable
@@ -461,127 +481,45 @@ contract OrgDeployer is Initializable {
     {
         Layout storage l = _layout();
 
-        /* 1. Validate role configurations */
-        _validateRoleConfigs(params.roles);
+        /* 1. Validate configuration */
+        _validateRoleConfigs(params);
+        if (params.deployerAddress == address(0)) revert InvalidAddress();
 
-        /* 2. Validate deployer address */
-        if (params.deployerAddress == address(0)) {
-            revert InvalidAddress();
-        }
+        /* 2. Create Org in bootstrap mode */
+        if (_orgExists(params.orgId)) revert OrgExistsMismatch();
+        l.orgRegistry.createOrgBootstrap(params.orgId, bytes(params.orgName), params.metadataHash);
 
-        /* 3. Create Org in bootstrap mode */
-        if (!_orgExists(params.orgId)) {
-            l.orgRegistry.createOrgBootstrap(params.orgId, bytes(params.orgName), params.metadataHash);
-        } else {
-            revert OrgExistsMismatch();
-        }
-
-        /* 2. Deploy Governance Infrastructure (Executor, Hats modules, Hats tree) */
+        /* 3. Deploy the Executor and take ownership of its beacon */
         GovernanceFactory.GovernanceResult memory gov = _deployGovernanceInfrastructure(params);
         result.executor = gov.executor;
-        result.eligibilityModule = gov.eligibilityModule;
-
-        /* 2b. Accept executor beacon ownership (two-step transfer initiated by GovernanceFactory) */
         IExecutorAdmin(result.executor).acceptBeaconOwnership(gov.execBeacon);
-
-        /* 3. Set the executor for the org */
         l.orgRegistry.setOrgExecutor(params.orgId, result.executor);
 
-        /* 4. Register Hats tree in OrgRegistry */
-        l.orgRegistry.registerHatsTree(params.orgId, gov.topHatId, gov.roleHatIds);
-
-        /* 4b. Set metadata admin hat (explicit role index; type(uint256).max = skip → topHat fallback) */
+        /* 4. Deploy the MembershipAuthority (born initialized + paused) and publish its subject ids */
+        AccessFactory.AuthorityResult memory auth = _deployAuthority(l, params, result.executor);
+        result.membershipAuthority = auth.authority;
+        l.orgRegistry
+            .registerHatsTree(params.orgId, auth.adminSubjectId, _concat(auth.roleSubjectIds, auth.groupSubjectIds));
         if (params.metadataAdminRoleIndex < params.roles.length) {
-            l.orgRegistry.setOrgMetadataAdminHat(params.orgId, gov.roleHatIds[params.metadataAdminRoleIndex]);
+            l.orgRegistry.setOrgMetadataAdminHat(params.orgId, auth.roleSubjectIds[params.metadataAdminRoleIndex]);
         }
 
         /* 5. Deploy Access Infrastructure (QuickJoin, Token) */
-        AccessFactory.AccessResult memory access;
-        {
-            AccessFactory.RoleAssignments memory accessRoles = AccessFactory.RoleAssignments({
-                quickJoinRolesBitmap: params.roleAssignments.quickJoinRolesBitmap,
-                tokenMemberRolesBitmap: params.roleAssignments.tokenMemberRolesBitmap,
-                tokenApproverRolesBitmap: params.roleAssignments.tokenApproverRolesBitmap
-            });
+        _deployAccess(l, params, result, auth.roleSubjectIds);
 
-            // Use universal factory if passkey is enabled
-            AccessFactory.PasskeyConfig memory passkeyConfig = AccessFactory.PasskeyConfig({
-                enabled: params.passkeyEnabled,
-                universalFactory: params.passkeyEnabled ? l.universalPasskeyFactory : address(0)
-            });
-
-            AccessFactory.AccessParams memory accessParams = AccessFactory.AccessParams({
-                orgId: params.orgId,
-                orgName: params.orgName,
-                poaManager: l.poaManager,
-                orgRegistry: address(l.orgRegistry),
-                hats: address(_getHats()),
-                executor: result.executor,
-                deployer: address(this), // For registration callbacks
-                registryAddr: params.registryAddr,
-                roleHatIds: gov.roleHatIds,
-                autoUpgrade: params.autoUpgrade,
-                roleAssignments: accessRoles,
-                passkeyConfig: passkeyConfig,
-                tokenName: params.tokenName,
-                tokenSymbol: params.tokenSymbol
-            });
-
-            access = l.accessFactory.deployAccess(accessParams);
-            result.quickJoin = access.quickJoin;
-            result.participationToken = access.participationToken;
-        }
-
-        /* 6. Deploy Functional Modules (TaskManager, Education, Payment) */
-        ModulesFactory.ModulesResult memory modules;
-        {
-            ModulesFactory.RoleAssignments memory moduleRoles = ModulesFactory.RoleAssignments({
-                taskCreatorRolesBitmap: params.roleAssignments.taskCreatorRolesBitmap,
-                educationCreatorRolesBitmap: params.roleAssignments.educationCreatorRolesBitmap,
-                educationMemberRolesBitmap: params.roleAssignments.educationMemberRolesBitmap
-            });
-
-            ModulesFactory.ModulesParams memory moduleParams = ModulesFactory.ModulesParams({
-                orgId: params.orgId,
-                orgName: params.orgName,
-                poaManager: l.poaManager,
-                orgRegistry: address(l.orgRegistry),
-                hats: address(_getHats()),
-                executor: result.executor,
-                deployer: address(this), // For registration callbacks
-                participationToken: result.participationToken,
-                roleHatIds: gov.roleHatIds,
-                autoUpgrade: params.autoUpgrade,
-                roleAssignments: moduleRoles,
-                educationHubConfig: params.educationHubConfig,
-                zkEmailDomainVerifier: l.zkEmailDomainVerifier,
-                zkEmailEmailVerifier: l.zkEmailEmailVerifier,
-                zkEmailDkimRegistry: l.zkEmailDkimRegistry,
-                accountRegistry: params.registryAddr,
-                universalFactory: l.universalPasskeyFactory,
-                zkEmailConfig: zkConfig
-            });
-
-            modules = l.modulesFactory.deployModules(moduleParams);
-            result.taskManager = modules.taskManager;
-            result.educationHub = modules.educationHub;
-            result.paymentManager = modules.paymentManager;
-            result.zkEmailInvites = modules.zkEmailInvites;
-        }
+        /* 6. Deploy Functional Modules (TaskManager, Education, Payment, ZkEmailInvites) */
+        _deployModules(l, params, result, auth.roleSubjectIds, zkConfig);
 
         /* 7. Deploy Voting Mechanisms (HybridVoting, DirectDemocracyVoting) */
         (result.hybridVoting, result.directDemocracyVoting) =
-            _deployVotingMechanisms(params, result.executor, result.participationToken, gov.roleHatIds);
+            _deployVotingMechanisms(params, result.executor, result.participationToken, auth.roleSubjectIds);
 
-        /* 7b. Register and configure org with PaymasterHub (after all modules deployed) */
-        _configurePaymaster(l, params, result, gov.topHatId, gov.roleHatIds);
+        /* 8. Register and configure the org with PaymasterHub (after all modules exist) */
+        _configurePaymaster(l, params, result, auth.adminSubjectId, auth.roleSubjectIds);
 
-        /* 8. Wire up cross-module connections.
-              C-01 fix: the token's setTaskManager/setEducationHub are now executor-only.
-              Route the wiring through the Executor (whose owner is still this OrgDeployer at
-              this point — ownership is renounced in step 11) so msg.sender to the token is the
-              executor and the new gate passes. educationHub == 0 when disabled → skipped inside
-              configureParticipationToken. */
+        /* 9. Wire cross-module connections. The token's setTaskManager/setEducationHub are
+              executor-only, so the wiring is relayed through the Executor (owned by this deployer
+              until step 14). educationHub == 0 when disabled → skipped inside the helper. */
         IExecutorAdmin(result.executor)
             .configureParticipationToken(
                 result.participationToken,
@@ -589,119 +527,37 @@ contract OrgDeployer is Initializable {
                 params.educationHubConfig.enabled ? result.educationHub : address(0)
             );
 
-        /* 8.5a. Bootstrap org-wide TaskManager ROLE_PERM grants (EDIT_META/EDIT_FULL/BUDGET/etc).
-                 Runs BEFORE project bootstrap so per-project hat masks can override the global
-                 mask (project mask != 0 takes precedence in _permMask).
-                 Enter the block whenever EITHER array is non-empty so the length-mismatch check
-                 inside `bootstrapGlobalPerms` fires for malformed configs (e.g. empty roleIndices
-                 + non-empty masks would otherwise be silently dropped). */
-        if (params.taskManagerPerms.roleIndices.length > 0 || params.taskManagerPerms.masks.length > 0) {
-            uint256[] memory permHatIds =
-                _resolveRoleIndicesToHatIds(params.taskManagerPerms.roleIndices, gov.roleHatIds);
-            ITaskManagerBootstrap(result.taskManager).bootstrapGlobalPerms(permHatIds, params.taskManagerPerms.masks);
-        }
-
-        /* 8.5. Bootstrap initial projects and tasks if configured */
+        /* 10. Bootstrap initial projects and tasks, mirroring their role permissions into the
+               authority's per-project TM_PERMS rows (the module reads permissions there). */
         if (params.bootstrap.projects.length > 0) {
-            // Resolve role indices to hat IDs in bootstrap config
-            ITaskManagerBootstrap.BootstrapProjectConfig[] memory resolvedProjects =
-                _resolveBootstrapRoles(params.bootstrap.projects, gov.roleHatIds);
-            ITaskManagerBootstrap(result.taskManager)
-                .bootstrapProjectsAndTasks(resolvedProjects, params.bootstrap.tasks);
+            bytes32[] memory projectIds = ITaskManagerBootstrap(result.taskManager)
+                .bootstrapProjectsAndTasks(
+                    _resolveBootstrapRoles(params.bootstrap.projects, auth.roleSubjectIds), params.bootstrap.tasks
+                );
+            _seedProjectPerms(result, auth.roleSubjectIds, params.bootstrap.projects, projectIds);
         }
 
-        /* 8.6. Clear deployer address to prevent future bootstrap calls (defense-in-depth) */
+        /* 10b. Clear deployer address to prevent future bootstrap calls (defense-in-depth) */
         ITaskManagerBootstrap(result.taskManager).clearDeployer();
 
-        /* 9. Authorize QuickJoin to mint hats */
+        /* 11. Authorize the hat-minting modules (they mint through Executor.mintHatsForUser, which
+               resolves against the authority once step 12 repoints it) */
         IExecutorAdmin(result.executor).setHatMinterAuthorization(result.quickJoin, true);
-
-        /* 9b. Authorize ZkEmailInvites to mint hats (only if the module was deployed) */
         if (result.zkEmailInvites != address(0)) {
             IExecutorAdmin(result.executor).setHatMinterAuthorization(result.zkEmailInvites, true);
         }
 
-        /* 10. Link executor to governor */
+        /* 12. Point every module at the authority, seed the genesis memberships, unpause */
+        _activateAuthority(params, result, auth);
+
+        /* 13. Link executor to governor */
         IExecutorAdmin(result.executor).setCaller(result.hybridVoting);
 
-        /* 10.5. Configure vouching system from role configurations (batch optimized) */
-        {
-            // Count roles with vouching enabled
-            uint256 vouchCount = 0;
-            for (uint256 i = 0; i < params.roles.length; i++) {
-                if (params.roles[i].vouching.enabled) vouchCount++;
-            }
-
-            if (vouchCount > 0) {
-                uint256[] memory hatIds = new uint256[](vouchCount);
-                uint32[] memory quorums = new uint32[](vouchCount);
-                uint256[] memory membershipHatIds = new uint256[](vouchCount);
-                bool[] memory combineFlags = new bool[](vouchCount);
-                uint256 vouchIndex = 0;
-
-                for (uint256 i = 0; i < params.roles.length; i++) {
-                    RoleConfigStructs.RoleConfig calldata role = params.roles[i];
-                    if (role.vouching.enabled) {
-                        hatIds[vouchIndex] = gov.roleHatIds[i];
-                        quorums[vouchIndex] = role.vouching.quorum;
-                        membershipHatIds[vouchIndex] = gov.roleHatIds[role.vouching.voucherRoleIndex];
-                        combineFlags[vouchIndex] = role.vouching.combineWithHierarchy;
-                        vouchIndex++;
-                    }
-                }
-
-                IExecutorAdmin(result.executor)
-                    .batchConfigureVouching(gov.eligibilityModule, hatIds, quorums, membershipHatIds, combineFlags);
-            }
-        }
-
-        /* 11. Renounce executor ownership - now only governed by voting */
+        /* 14. Renounce executor ownership - now only governed by voting */
         OwnableUpgradeable(result.executor).renounceOwnership();
 
-        /* 12. Emit event for subgraph indexing */
-        emit OrgDeployed(
-            params.orgId,
-            result.executor,
-            result.hybridVoting,
-            result.directDemocracyVoting,
-            result.quickJoin,
-            result.participationToken,
-            result.taskManager,
-            result.educationHub,
-            result.paymentManager,
-            gov.eligibilityModule,
-            gov.toggleModule,
-            gov.topHatId,
-            gov.roleHatIds
-        );
-
-        /* 12b. Emit initial wearer assignments for subgraph User creation */
-        {
-            (address[] memory wearers, uint256[] memory hatIds) =
-                _collectInitialWearers(params.roles, gov.roleHatIds, params.deployerAddress);
-
-            if (wearers.length > 0) {
-                emit InitialWearersAssigned(params.orgId, gov.eligibilityModule, wearers, hatIds);
-            }
-        }
-
-        /* 13. Emit role metadata for subgraph indexing */
-        {
-            uint256 roleCount = params.roles.length;
-            string[] memory names = new string[](roleCount);
-            string[] memory images = new string[](roleCount);
-            bytes32[] memory metadataCIDs = new bytes32[](roleCount);
-            bool[] memory canVoteFlags = new bool[](roleCount);
-
-            for (uint256 i = 0; i < roleCount; i++) {
-                names[i] = params.roles[i].name;
-                images[i] = params.roles[i].image;
-                metadataCIDs[i] = params.roles[i].metadataCID;
-                canVoteFlags[i] = params.roles[i].canVote;
-            }
-
-            emit RolesCreated(params.orgId, gov.roleHatIds, names, images, metadataCIDs, canVoteFlags);
-        }
+        /* 15. Emit events for subgraph indexing */
+        _emitDeploymentEvents(params, result, auth);
 
         return result;
     }
@@ -713,43 +569,200 @@ contract OrgDeployer is Initializable {
         return exists;
     }
 
+    function _concat(uint256[] memory a, uint256[] memory b) internal pure returns (uint256[] memory out) {
+        out = new uint256[](a.length + b.length);
+        for (uint256 i; i < a.length; ++i) {
+            out[i] = a[i];
+        }
+        for (uint256 j; j < b.length; ++j) {
+            out[a.length + j] = b[j];
+        }
+    }
+
+    /// @dev Deploys QuickJoin + ParticipationToken. Split out of the orchestration body so the
+    ///      params struct does not have to live on the stack alongside it (production via-IR).
+    function _deployAccess(
+        Layout storage l,
+        DeploymentParams calldata params,
+        DeploymentResult memory result,
+        uint256[] memory roleSubjectIds
+    ) internal {
+        AccessFactory.AccessParams memory p;
+        p.orgId = params.orgId;
+        p.orgName = params.orgName;
+        p.poaManager = l.poaManager;
+        p.orgRegistry = address(l.orgRegistry);
+        p.hats = address(_getHats());
+        p.executor = result.executor;
+        p.deployer = address(this); // For registration callbacks
+        p.registryAddr = params.registryAddr;
+        p.roleSubjectIds = roleSubjectIds;
+        p.autoUpgrade = params.autoUpgrade;
+        p.roleAssignments = AccessFactory.RoleAssignments({
+            quickJoinRolesBitmap: params.roleAssignments.quickJoinRolesBitmap,
+            tokenMemberRolesBitmap: params.roleAssignments.tokenMemberRolesBitmap,
+            tokenApproverRolesBitmap: params.roleAssignments.tokenApproverRolesBitmap
+        });
+        p.passkeyConfig = AccessFactory.PasskeyConfig({
+            enabled: params.passkeyEnabled,
+            universalFactory: params.passkeyEnabled ? l.universalPasskeyFactory : address(0)
+        });
+        p.tokenName = params.tokenName;
+        p.tokenSymbol = params.tokenSymbol;
+
+        AccessFactory.AccessResult memory access = l.accessFactory.deployAccess(p);
+        result.quickJoin = access.quickJoin;
+        result.participationToken = access.participationToken;
+    }
+
+    /// @dev Deploys TaskManager, EducationHub, PaymentManager and (optionally) ZkEmailInvites.
+    function _deployModules(
+        Layout storage l,
+        DeploymentParams calldata params,
+        DeploymentResult memory result,
+        uint256[] memory roleSubjectIds,
+        ModulesFactory.ZkEmailConfig memory zkConfig
+    ) internal {
+        ModulesFactory.ModulesParams memory p;
+        p.orgId = params.orgId;
+        p.orgName = params.orgName;
+        p.poaManager = l.poaManager;
+        p.orgRegistry = address(l.orgRegistry);
+        p.hats = address(_getHats());
+        p.executor = result.executor;
+        p.deployer = address(this); // For registration callbacks
+        p.participationToken = result.participationToken;
+        p.roleSubjectIds = roleSubjectIds;
+        p.autoUpgrade = params.autoUpgrade;
+        p.roleAssignments = ModulesFactory.RoleAssignments({
+            taskCreatorRolesBitmap: params.roleAssignments.taskCreatorRolesBitmap,
+            educationCreatorRolesBitmap: params.roleAssignments.educationCreatorRolesBitmap,
+            educationMemberRolesBitmap: params.roleAssignments.educationMemberRolesBitmap
+        });
+        p.educationHubConfig = params.educationHubConfig;
+        p.zkEmailDomainVerifier = l.zkEmailDomainVerifier;
+        p.zkEmailEmailVerifier = l.zkEmailEmailVerifier;
+        p.zkEmailDkimRegistry = l.zkEmailDkimRegistry;
+        p.accountRegistry = params.registryAddr;
+        p.universalFactory = l.universalPasskeyFactory;
+        p.zkEmailConfig = zkConfig;
+
+        ModulesFactory.ModulesResult memory modules = l.modulesFactory.deployModules(p);
+        result.taskManager = modules.taskManager;
+        result.educationHub = modules.educationHub;
+        result.paymentManager = modules.paymentManager;
+        result.zkEmailInvites = modules.zkEmailInvites;
+    }
+
+    /// @notice Deploy the org's MembershipAuthority with its genesis seed.
+    function _deployAuthority(Layout storage l, DeploymentParams calldata params, address executor)
+        internal
+        returns (AccessFactory.AuthorityResult memory)
+    {
+        AccessFactory.AuthorityParams memory p;
+        p.orgId = params.orgId;
+        p.poaManager = l.poaManager;
+        p.executor = executor;
+        p.deployer = address(this);
+        p.paymasterHub = l.paymasterHub;
+        p.autoUpgrade = params.autoUpgrade;
+        p.roles = params.roles;
+        p.groups = params.groups;
+        p.perms = OrgAccessSeedLib.PermConfig({
+            quickJoinRolesBitmap: params.roleAssignments.quickJoinRolesBitmap,
+            tokenMemberRolesBitmap: params.roleAssignments.tokenMemberRolesBitmap,
+            tokenApproverRolesBitmap: params.roleAssignments.tokenApproverRolesBitmap,
+            educationCreatorRolesBitmap: params.roleAssignments.educationCreatorRolesBitmap,
+            educationMemberRolesBitmap: params.roleAssignments.educationMemberRolesBitmap,
+            hybridProposalCreatorRolesBitmap: params.roleAssignments.hybridProposalCreatorRolesBitmap,
+            ddVotingRolesBitmap: params.roleAssignments.ddVotingRolesBitmap,
+            ddCreatorRolesBitmap: params.roleAssignments.ddCreatorRolesBitmap,
+            tmRoleIndices: params.taskManagerPerms.roleIndices,
+            tmMasks: _widen(params.taskManagerPerms.masks),
+            metadataAdminRoleIndex: params.metadataAdminRoleIndex
+        });
+        return l.accessFactory.deployAuthority(p);
+    }
+
+    function _widen(uint8[] calldata masks) internal pure returns (uint256[] memory out) {
+        out = new uint256[](masks.length);
+        for (uint256 i; i < masks.length; ++i) {
+            out[i] = masks[i];
+        }
+    }
+
     /**
-     * @notice Collects all initial wearers from role configurations
-     * @dev Used to emit InitialWearersAssigned event for subgraph indexing
+     * @notice Repoint every module at the authority, seed genesis memberships, and unpause it.
+     * @dev The authority is born paused (writes disabled, reads live). Seeding runs while paused so
+     *      genesis members carry `acceptedAt = 1` — in-flight proposals do not exist yet, and the
+     *      anti-packing activation gate stays meaningful for everyone who joins afterwards. Each
+     *      seeded membership is paired with a delegable governance GRANT so it carries an
+     *      eligibility source; open (default-ALLOW) roles get one too, which is what lets governance
+     *      or a delegate later revoke a seat on an otherwise open role.
      */
-    function _collectInitialWearers(
-        RoleConfigStructs.RoleConfig[] calldata roles,
-        uint256[] memory roleHatIds,
-        address deployerAddress
-    ) internal pure returns (address[] memory wearers, uint256[] memory hatIds) {
-        // First pass: count total wearers
-        uint256 totalCount = 0;
-        for (uint256 i = 0; i < roles.length; i++) {
-            if (!roles[i].canVote) continue;
-            if (roles[i].distribution.mintToDeployer) totalCount++;
-            totalCount += roles[i].distribution.additionalWearers.length;
+    function _activateAuthority(
+        DeploymentParams calldata params,
+        DeploymentResult memory result,
+        AccessFactory.AuthorityResult memory auth
+    ) internal {
+        IExecutorAdmin exec = IExecutorAdmin(result.executor);
+        bytes memory setAuth = abi.encodeCall(IExecutorAdmin.setMembershipAuthority, (auth.authority));
+
+        exec.configureModule(result.quickJoin, setAuth);
+        exec.configureModule(result.participationToken, setAuth);
+        exec.configureModule(result.taskManager, setAuth);
+        exec.configureModule(result.directDemocracyVoting, setAuth);
+        exec.configureModule(result.hybridVoting, setAuth);
+        if (result.educationHub != address(0)) {
+            exec.configureModule(result.educationHub, setAuth);
+        }
+        // On the Executor the setter repoints `l.hats` itself, so every hats() consumer
+        // (mintHatsForUser, ZkEmailInvites) follows automatically.
+        exec.setMembershipAuthority(auth.authority);
+
+        // OrgAccessSeedLib deliberately keeps the deployed initialize/seedSubjects ABI stable, and
+        // that seed shape carries names/caps but not CID/image metadata. Persist the remaining role
+        // metadata through the authority's existing executor path while it is still paused. This also
+        // emits SubjectRenamed, so authority storage and the RolesCreated summary event cannot diverge.
+        for (uint256 i; i < params.roles.length; ++i) {
+            RoleConfigStructs.RoleConfig calldata role = params.roles[i];
+            if (role.metadataCID == bytes32(0) && bytes(role.image).length == 0) continue;
+            exec.configureModule(
+                auth.authority,
+                abi.encodeCall(
+                    IAuthoritySeed.renameSubject, (auth.roleSubjectIds[i], role.name, role.metadataCID, role.image)
+                )
+            );
         }
 
-        // Second pass: populate arrays
-        wearers = new address[](totalCount);
-        hatIds = new uint256[](totalCount);
-        uint256 idx = 0;
-
-        for (uint256 i = 0; i < roles.length; i++) {
-            if (!roles[i].canVote) continue;
-            uint256 hatId = roleHatIds[i];
-
-            if (roles[i].distribution.mintToDeployer) {
-                wearers[idx] = deployerAddress;
-                hatIds[idx] = hatId;
-                idx++;
+        (uint256[] memory subjects, address[] memory users) = _genesisMemberships(params, result.executor, auth);
+        if (subjects.length > 0) {
+            AccessV2Types.RuleKind[] memory kinds = new AccessV2Types.RuleKind[](subjects.length);
+            bool[] memory delegable = new bool[](subjects.length);
+            for (uint256 i; i < subjects.length; ++i) {
+                kinds[i] = AccessV2Types.RuleKind.Grant;
+                delegable[i] = true;
             }
-            for (uint256 j = 0; j < roles[i].distribution.additionalWearers.length; j++) {
-                wearers[idx] = roles[i].distribution.additionalWearers[j];
-                hatIds[idx] = hatId;
-                idx++;
-            }
+            exec.configureModule(
+                auth.authority, abi.encodeCall(IAuthoritySeed.seedRules, (subjects, users, kinds, delegable))
+            );
+            exec.configureModule(auth.authority, abi.encodeCall(IAuthoritySeed.seedMemberships, (subjects, users)));
         }
+
+        exec.configureModule(auth.authority, abi.encodeCall(IAuthoritySeed.setPaused, (false)));
+    }
+
+    /// @dev Genesis membership set (Executor on ADMIN + every seeded role wearer). Built in
+    ///      AccessFactory to keep OrgDeployer under the EIP-170 limit.
+    function _genesisMemberships(
+        DeploymentParams calldata params,
+        address executor,
+        AccessFactory.AuthorityResult memory auth
+    ) internal view returns (uint256[] memory, address[] memory) {
+        return _layout().accessFactory
+            .buildGenesisMemberships(
+                params.roles, params.deployerAddress, executor, auth.adminSubjectId, auth.roleSubjectIds
+            );
     }
 
     /**
@@ -768,9 +781,8 @@ contract OrgDeployer is Initializable {
         govParams.poaManager = l.poaManager;
         govParams.orgRegistry = address(l.orgRegistry);
         govParams.hats = address(_getHats());
-        govParams.hatsTreeSetup = l.hatsTreeSetup;
         govParams.deployer = address(this);
-        govParams.deployerAddress = params.deployerAddress; // Pass deployer address for ADMIN hat
+        govParams.deployerAddress = params.deployerAddress;
         govParams.accountRegistry = params.registryAddr; // UniversalAccountRegistry for username registration
         govParams.participationToken = address(0);
         govParams.deployerUsername = params.deployerUsername; // Optional username (empty = skip)
@@ -778,14 +790,6 @@ contract OrgDeployer is Initializable {
         govParams.regNonce = params.regNonce;
         govParams.regSignature = params.regSignature;
         govParams.autoUpgrade = params.autoUpgrade;
-        govParams.hybridThresholdPct = params.hybridThresholdPct;
-        govParams.ddThresholdPct = params.ddThresholdPct;
-        govParams.hybridClasses = params.hybridClasses;
-        govParams.hybridProposalCreatorRolesBitmap = params.roleAssignments.hybridProposalCreatorRolesBitmap;
-        govParams.ddVotingRolesBitmap = params.roleAssignments.ddVotingRolesBitmap;
-        govParams.ddCreatorRolesBitmap = params.roleAssignments.ddCreatorRolesBitmap;
-        govParams.ddInitialTargets = params.ddInitialTargets;
-        govParams.roles = params.roles;
 
         return l.governanceFactory.deployInfrastructure(govParams);
     }
@@ -798,7 +802,7 @@ contract OrgDeployer is Initializable {
         DeploymentParams calldata params,
         address executor,
         address participationToken,
-        uint256[] memory roleHatIds
+        uint256[] memory roleSubjectIds
     ) internal returns (address hybridVoting, address directDemocracyVoting) {
         Layout storage l = _layout();
 
@@ -808,7 +812,6 @@ contract OrgDeployer is Initializable {
         votingParams.poaManager = l.poaManager;
         votingParams.orgRegistry = address(l.orgRegistry);
         votingParams.hats = address(_getHats());
-        votingParams.hatsTreeSetup = l.hatsTreeSetup;
         votingParams.deployer = address(this);
         votingParams.deployerAddress = params.deployerAddress;
         votingParams.participationToken = participationToken;
@@ -824,38 +827,7 @@ contract OrgDeployer is Initializable {
         votingParams.hybridQuorum = params.hybridQuorum;
         votingParams.ddQuorum = params.ddQuorum;
 
-        return l.governanceFactory.deployVoting(votingParams, executor, roleHatIds);
-    }
-
-    /**
-     * @notice Allows factories to register contracts via OrgDeployer's ownership
-     * @dev Only callable by approved factory contracts during deployment
-     */
-    function registerContract(
-        bytes32 orgId,
-        bytes32 typeId,
-        address proxy,
-        address beacon,
-        bool autoUpgrade,
-        address moduleOwner,
-        bool lastRegister
-    ) external {
-        Layout storage l = _layout();
-
-        // Only allow factory contracts to call this
-        if (
-            msg.sender != address(l.governanceFactory) && msg.sender != address(l.accessFactory)
-                && msg.sender != address(l.modulesFactory)
-        ) {
-            revert InvalidAddress();
-        }
-
-        // Only allow during bootstrap (deployment phase)
-        (,, bool bootstrap,) = l.orgRegistry.orgOf(orgId);
-        if (!bootstrap) revert("Deployment complete");
-
-        // Forward registration to OrgRegistry (we are the owner)
-        l.orgRegistry.registerOrgContract(orgId, typeId, proxy, beacon, autoUpgrade, moduleOwner, lastRegister);
+        return l.governanceFactory.deployVoting(votingParams, executor, roleSubjectIds);
     }
 
     /**
@@ -883,19 +855,18 @@ contract OrgDeployer is Initializable {
 
         // Only allow during bootstrap (deployment phase)
         (,, bool bootstrap,) = l.orgRegistry.orgOf(orgId);
-        if (!bootstrap) revert("Deployment complete");
+        if (!bootstrap) revert DeploymentComplete();
 
         // Forward batch registration to OrgRegistry (we are the owner)
         l.orgRegistry.batchRegisterOrgContracts(orgId, registrations, autoUpgrade, lastRegister);
     }
 
     /**
-     * @notice Resolve role indices to hat IDs in bootstrap project configs
-     * @dev Role indices in config are converted to actual hat IDs using roleHatIds array
+     * @notice Resolve role indices to subject ids in bootstrap project configs
      */
     function _resolveBootstrapRoles(
         ITaskManagerBootstrap.BootstrapProjectConfig[] calldata projects,
-        uint256[] memory roleHatIds
+        uint256[] memory roleSubjectIds
     ) internal pure returns (ITaskManagerBootstrap.BootstrapProjectConfig[] memory resolved) {
         resolved = new ITaskManagerBootstrap.BootstrapProjectConfig[](projects.length);
 
@@ -905,10 +876,10 @@ contract OrgDeployer is Initializable {
                 metadataHash: projects[i].metadataHash,
                 cap: projects[i].cap,
                 managers: projects[i].managers,
-                createHats: _resolveRoleIndicesToHatIds(projects[i].createHats, roleHatIds),
-                claimHats: _resolveRoleIndicesToHatIds(projects[i].claimHats, roleHatIds),
-                reviewHats: _resolveRoleIndicesToHatIds(projects[i].reviewHats, roleHatIds),
-                assignHats: _resolveRoleIndicesToHatIds(projects[i].assignHats, roleHatIds),
+                createHats: _resolveRoleIndices(projects[i].createHats, roleSubjectIds),
+                claimHats: _resolveRoleIndices(projects[i].claimHats, roleSubjectIds),
+                reviewHats: _resolveRoleIndices(projects[i].reviewHats, roleSubjectIds),
+                assignHats: _resolveRoleIndices(projects[i].assignHats, roleSubjectIds),
                 bountyTokens: projects[i].bountyTokens,
                 bountyCaps: projects[i].bountyCaps
             });
@@ -918,40 +889,120 @@ contract OrgDeployer is Initializable {
     }
 
     /**
-     * @notice Convert array of role indices to array of hat IDs
+     * @notice Convert an array of role indices to authority subject ids
      */
-    function _resolveRoleIndicesToHatIds(uint256[] calldata roleIndices, uint256[] memory roleHatIds)
+    function _resolveRoleIndices(uint256[] calldata roleIndices, uint256[] memory roleSubjectIds)
         internal
         pure
-        returns (uint256[] memory hatIds)
+        returns (uint256[] memory subjectIds)
     {
-        hatIds = new uint256[](roleIndices.length);
+        subjectIds = new uint256[](roleIndices.length);
         for (uint256 i = 0; i < roleIndices.length; i++) {
-            require(roleIndices[i] < roleHatIds.length, "Invalid role index in bootstrap config");
-            hatIds[i] = roleHatIds[roleIndices[i]];
+            if (roleIndices[i] >= roleSubjectIds.length) revert InvalidRoleConfiguration();
+            subjectIds[i] = roleSubjectIds[roleIndices[i]];
         }
-        return hatIds;
+        return subjectIds;
+    }
+
+    /// @dev Mirror each bootstrap project's role lists into the authority's per-project TM_PERMS
+    ///      rows (AccessFactory builds them; see `buildProjectPermRows` for the inherit semantics).
+    function _seedProjectPerms(
+        DeploymentResult memory result,
+        uint256[] memory roleSubjectIds,
+        ITaskManagerBootstrap.BootstrapProjectConfig[] calldata projects,
+        bytes32[] memory projectIds
+    ) internal {
+        AccessFactory factory = _layout().accessFactory;
+        for (uint256 p = 0; p < projects.length; p++) {
+            (uint256[] memory subjects, bytes32[] memory keys, bytes32[] memory ctxs, uint256[] memory words) =
+                factory.buildProjectPermRows(projects[p], roleSubjectIds, projectIds[p]);
+            if (subjects.length == 0) continue;
+            IExecutorAdmin(result.executor)
+                .configureModule(
+                    result.membershipAuthority, abi.encodeCall(IAuthoritySeed.seedPerms, (subjects, keys, ctxs, words))
+                );
+        }
+    }
+
+    /*══════════════  SUBGRAPH EVENTS  ═════════════=*/
+
+    function _emitDeploymentEvents(
+        DeploymentParams calldata params,
+        DeploymentResult memory result,
+        AccessFactory.AuthorityResult memory auth
+    ) internal {
+        emit OrgDeployed(
+            params.orgId,
+            result.executor,
+            result.hybridVoting,
+            result.directDemocracyVoting,
+            result.quickJoin,
+            result.participationToken,
+            result.taskManager,
+            result.educationHub,
+            result.paymentManager,
+            auth.authority,
+            auth.adminSubjectId,
+            auth.roleSubjectIds
+        );
+
+        {
+            uint256 roleCount = params.roles.length;
+            string[] memory names = new string[](roleCount);
+            string[] memory images = new string[](roleCount);
+            bytes32[] memory metadataCIDs = new bytes32[](roleCount);
+            bool[] memory canVoteFlags = new bool[](roleCount);
+            for (uint256 i = 0; i < roleCount; i++) {
+                names[i] = params.roles[i].name;
+                images[i] = params.roles[i].image;
+                metadataCIDs[i] = params.roles[i].metadataCID;
+                canVoteFlags[i] = params.roles[i].canVote;
+            }
+            emit RolesCreated(params.orgId, auth.roleSubjectIds, names, images, metadataCIDs, canVoteFlags);
+        }
+
+        if (params.groups.length > 0) {
+            uint256 groupCount = params.groups.length;
+            string[] memory names = new string[](groupCount);
+            uint256[][] memory members = new uint256[][](groupCount);
+            for (uint256 j = 0; j < groupCount; j++) {
+                names[j] = params.groups[j].name;
+                uint256 m = params.groups[j].memberRoleIndices.length;
+                uint256[] memory ids = new uint256[](m);
+                for (uint256 x = 0; x < m; x++) {
+                    ids[x] = auth.roleSubjectIds[params.groups[j].memberRoleIndices[x]];
+                }
+                members[j] = ids;
+            }
+            emit GroupsCreated(params.orgId, auth.groupSubjectIds, names, members);
+        }
+
+        {
+            (uint256[] memory subjects, address[] memory users) = _genesisMemberships(params, result.executor, auth);
+            emit InitialWearersAssigned(params.orgId, auth.authority, users, subjects);
+        }
     }
 
     /*══════════════  PAYMASTER CONFIGURATION  ═════════════=*/
 
     /**
      * @notice Register and optionally configure the org's PaymasterHub entry
-     * @dev Moved after all modules deployed so we know contract addresses for auto-whitelisting
+     * @dev Runs after all modules are deployed so their addresses can be type-mapped. The org's
+     *      admin/operator "hat" ids are authority SUBJECT ids, which the hub resolves through the
+     *      protocol AuthorityRouter (new-style ids self-route to their owning authority).
      */
     function _configurePaymaster(
         Layout storage l,
         DeploymentParams calldata params,
         DeploymentResult memory result,
-        uint256 topHatId,
-        uint256[] memory roleHatIds
+        uint256 adminSubjectId,
+        uint256[] memory roleSubjectIds
     ) internal {
         PaymasterConfig calldata pmCfg = params.paymasterConfig;
 
-        // Resolve operator hat from role index (type(uint256).max = skip → operatorHatId stays 0)
-        uint256 operatorHatId = 0;
+        uint256 operatorSubjectId = 0;
         if (pmCfg.operatorRoleIndex < params.roles.length) {
-            operatorHatId = roleHatIds[pmCfg.operatorRoleIndex];
+            operatorSubjectId = roleSubjectIds[pmCfg.operatorRoleIndex];
         }
 
         bool hasFeeCaps = pmCfg.maxFeePerGas != 0 || pmCfg.maxPriorityFeePerGas != 0 || pmCfg.maxCallGas != 0
@@ -961,47 +1012,42 @@ contract OrgDeployer is Initializable {
 
         if (hasConfig) {
             // Map deployed org contracts (+ shared registries) to module typeIds so the org's
-            // sponsorship rules resolve through the PaymasterHub's type-keyed GLOBAL RULEBOOK.
-            // Replaces the former hardcoded per-selector whitelist (_buildDefaultPaymasterRules):
-            // new/changed functions are now added once to the rulebook by Poa instead of
-            // requiring an OrgDeployer redeploy plus a vote in every org.
+            // sponsorship rules resolve through the PaymasterHub's type-keyed GLOBAL RULEBOOK
+            // (script/helpers/DefaultGlobalRules.sol is the canonical selector list).
             (address[] memory typeTargets, bytes32[] memory typeIds) = pmCfg.autoWhitelistContracts
                 ? _buildTargetTypes(result, params.registryAddr, address(l.orgRegistry))
                 : (new address[](0), new bytes32[](0));
 
-            // Build per-role-hat budgets if configured (+ the zk-email CLAIM budget when the module deploys)
+            // Per-role-subject budgets if configured (+ the zk-email CLAIM budget when the module deploys)
             (bytes32[] memory budgetKeys, uint128[] memory budgetCaps, uint32[] memory budgetEpochLens) = hasBudgets
                 ? _buildDefaultBudgets(
-                    roleHatIds, result.zkEmailInvites, pmCfg.defaultBudgetCapPerEpoch, pmCfg.defaultBudgetEpochLen
+                    roleSubjectIds, result.zkEmailInvites, pmCfg.defaultBudgetCapPerEpoch, pmCfg.defaultBudgetEpochLen
                 )
                 : (new bytes32[](0), new uint128[](0), new uint32[](0));
 
-            IPaymasterHub.DeployConfig memory config = IPaymasterHub.DeployConfig({
-                operatorHatId: operatorHatId,
-                maxFeePerGas: pmCfg.maxFeePerGas,
-                maxPriorityFeePerGas: pmCfg.maxPriorityFeePerGas,
-                maxCallGas: pmCfg.maxCallGas,
-                maxVerificationGas: pmCfg.maxVerificationGas,
-                maxPreVerificationGas: pmCfg.maxPreVerificationGas,
-                ruleTargets: new address[](0),
-                ruleSelectors: new bytes4[](0),
-                ruleAllowed: new bool[](0),
-                ruleMaxCallGasHints: new uint32[](0),
-                budgetSubjectKeys: budgetKeys,
-                budgetCapsPerEpoch: budgetCaps,
-                budgetEpochLens: budgetEpochLens,
-                typeTargets: typeTargets,
-                typeIds: typeIds,
-                // autoUpgrade orgs mirror the global rulebook; pinned orgs get a Static local
-                // snapshot of it and vote changes in afterwards (bootstrap currently requires
-                // autoUpgrade=true, so Static-at-deploy is future-proofing).
-                rulesMode: params.autoUpgrade ? 0 : 1
-            });
+            IPaymasterHub.DeployConfig memory config;
+            config.operatorHatId = operatorSubjectId;
+            config.maxFeePerGas = pmCfg.maxFeePerGas;
+            config.maxPriorityFeePerGas = pmCfg.maxPriorityFeePerGas;
+            config.maxCallGas = pmCfg.maxCallGas;
+            config.maxVerificationGas = pmCfg.maxVerificationGas;
+            config.maxPreVerificationGas = pmCfg.maxPreVerificationGas;
+            config.budgetSubjectKeys = budgetKeys;
+            config.budgetCapsPerEpoch = budgetCaps;
+            config.budgetEpochLens = budgetEpochLens;
+            config.typeTargets = typeTargets;
+            config.typeIds = typeIds;
+            // autoUpgrade orgs mirror the global rulebook; pinned orgs get a Static local snapshot of
+            // it and vote changes in afterwards (bootstrap currently requires autoUpgrade=true, so
+            // Static-at-deploy is future-proofing). Per-selector local rules stay empty.
+            config.rulesMode = params.autoUpgrade ? 0 : 1;
 
-            IPaymasterHub(l.paymasterHub).registerAndConfigureOrg{value: msg.value}(params.orgId, topHatId, config);
+            IPaymasterHub(l.paymasterHub).registerAndConfigureOrg{value: msg.value}(
+                params.orgId, adminSubjectId, config
+            );
         } else {
-            // Simple registration only (backwards compatible)
-            IPaymasterHub(l.paymasterHub).registerOrg(params.orgId, topHatId, operatorHatId);
+            // Simple registration only
+            IPaymasterHub(l.paymasterHub).registerOrg(params.orgId, adminSubjectId, operatorSubjectId);
         }
     }
 
@@ -1038,8 +1084,10 @@ contract OrgDeployer is Initializable {
         typeIds[3] = ModuleTypes.DIRECT_DEMOCRACY_VOTING_ID;
         typeTargets[4] = result.paymentManager;
         typeIds[4] = ModuleTypes.PAYMENT_MANAGER_ID;
-        typeTargets[5] = result.eligibilityModule;
-        typeIds[5] = ModuleTypes.ELIGIBILITY_MODULE_ID;
+        // The authority carries the user-facing access selectors (claim/renounce/vouch + the
+        // manager-delegate verbs) — the v2 successor of the EligibilityModule row.
+        typeTargets[5] = result.membershipAuthority;
+        typeIds[5] = ModuleTypes.MEMBERSHIP_AUTHORITY_ID;
         typeTargets[6] = result.participationToken;
         typeIds[6] = ModuleTypes.PARTICIPATION_TOKEN_ID;
         typeTargets[7] = registryAddr;
@@ -1060,31 +1108,31 @@ contract OrgDeployer is Initializable {
     }
 
     /**
-     * @notice Build default per-role-hat budget entries (+ the zk-email CLAIM budget when enabled)
-     * @dev Creates a budget for each role hat using SUBJECT_TYPE_HAT (0x01). When the org deploys with
+     * @notice Build default per-role-subject budget entries (+ the zk-email CLAIM budget when enabled)
+     * @dev Creates a budget for each role subject using SUBJECT_TYPE_HAT (0x01). When the org deploys with
      *      ZkEmailInvites, also appends a SUBJECT_TYPE_CLAIM (0x05) budget keyed to the module address —
      *      without it, gasless self-service email claims revert BudgetExceeded (the CLAIM subject has no
      *      eligibility pre-check, so the budget is the org's spend backstop and MUST exist).
-     * @param roleHatIds Array of hat IDs for each role
+     * @param roleSubjectIds Authority subject id for each role
      * @param zkEmailInvites The org's ZkEmailInvites proxy (0 = module not enabled, no claim budget)
      * @param capPerEpoch Default spending cap per epoch for each subject
      * @param epochLen Default epoch length in seconds
      */
     function _buildDefaultBudgets(
-        uint256[] memory roleHatIds,
+        uint256[] memory roleSubjectIds,
         address zkEmailInvites,
         uint128 capPerEpoch,
         uint32 epochLen
     ) internal pure returns (bytes32[] memory subjectKeys, uint128[] memory caps, uint32[] memory epochLens) {
         bool hasClaimBudget = zkEmailInvites != address(0);
-        uint256 count = roleHatIds.length + (hasClaimBudget ? 1 : 0);
+        uint256 count = roleSubjectIds.length + (hasClaimBudget ? 1 : 0);
         subjectKeys = new bytes32[](count);
         caps = new uint128[](count);
         epochLens = new uint32[](count);
 
-        for (uint256 i = 0; i < roleHatIds.length; i++) {
-            // SUBJECT_TYPE_HAT = 0x01, subjectId = bytes32(hatId)
-            subjectKeys[i] = keccak256(abi.encodePacked(uint8(0x01), bytes32(roleHatIds[i])));
+        for (uint256 i = 0; i < roleSubjectIds.length; i++) {
+            // SUBJECT_TYPE_HAT = 0x01, subjectId = bytes32(subject id)
+            subjectKeys[i] = keccak256(abi.encodePacked(uint8(0x01), bytes32(roleSubjectIds[i])));
             caps[i] = capPerEpoch;
             epochLens[i] = epochLen;
         }

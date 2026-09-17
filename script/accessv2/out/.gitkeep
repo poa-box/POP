@@ -1,0 +1,2 @@
+# Regenerated per MIGRATION-RUNBOOK.md (ruling R6). Contents are sim-ephemeral and gitignored;
+# GenerateBatches / SimMigrate* rewrite these. Never commit *.json here.

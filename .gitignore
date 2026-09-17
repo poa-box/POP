@@ -27,3 +27,5 @@ script/logs/deploy-*.log
 _frontend/
 cache-zkr/
 out-zkr/
+out-production/
+cache-production/

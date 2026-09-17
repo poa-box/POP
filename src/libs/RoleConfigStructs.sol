@@ -3,58 +3,45 @@ pragma solidity ^0.8.20;
 
 /**
  * @title RoleConfigStructs
- * @notice Shared struct definitions for role configuration
- * @dev Used across OrgDeployer, GovernanceFactory, and HatsTreeSetup to avoid duplication
- *      and eliminate the need for type conversion functions
+ * @notice Deploy-time description of an org's access shape, shared by OrgDeployer and the factories.
+ * @dev Access v2: a role is a ROLE SUBJECT on the org's MembershipAuthority — there is no Hats tree,
+ *      so the v1 hierarchy / eligibility-default / Hats-native (maxSupply, mutable) knobs are gone.
+ *      What survives is what the authority actually stores: name/metadata, the per-subject default
+ *      verdict, the member cap, and the vouch attestor.
  */
 library RoleConfigStructs {
-    /// @notice Vouching configuration for a role
-    /// @dev Allows roles to require vouches before claiming/minting
+    /// @notice Vouch attestor for a role subject: `quorum` vouches from members of `voucherRoleIndex`
+    ///         make a user eligible (ALLOW at the attestor tier; an explicit BAN still wins).
     struct RoleVouchingConfig {
-        bool enabled; // Enable vouching for this role
-        uint32 quorum; // Number of vouches required
-        uint256 voucherRoleIndex; // Index of role that can vouch (in roles array)
-        bool combineWithHierarchy; // Allow child hats to vouch too
+        bool enabled;
+        uint32 quorum;
+        uint256 voucherRoleIndex; // index into the roles array
     }
 
-    /// @notice Default eligibility settings for a role
-    /// @dev Controls whether new wearers are eligible/in good standing by default
-    struct RoleEligibilityDefaults {
-        bool eligible; // Default eligibility status
-        bool standing; // Default standing status
-    }
-
-    /// @notice Hierarchy configuration for a role
-    /// @dev Controls the parent-child relationship in the Hats tree
-    struct RoleHierarchyConfig {
-        uint256 adminRoleIndex; // Index of parent/admin role (type(uint256).max = use ELIGIBILITY_ADMIN or auto)
-    }
-
-    /// @notice Initial distribution configuration for a role
-    /// @dev Controls who gets the role minted to them initially
+    /// @notice Deploy-time membership. Seeded members get a governance GRANT rule in the same batch,
+    ///         so every seeded membership carries an eligibility source.
     struct RoleDistributionConfig {
-        bool mintToDeployer; // Mint to deployer address
-        address[] additionalWearers; // Additional addresses to mint to
+        bool mintToDeployer;
+        address[] additionalWearers;
     }
 
-    /// @notice Hat-specific configuration from Hats Protocol
-    /// @dev Controls Hats Protocol native features
-    struct HatConfig {
-        uint32 maxSupply; // Maximum number of wearers (0 = unlimited, default: type(uint32).max)
-        bool mutableHat; // Whether hat properties can be changed after creation (default: true)
-    }
-
-    /// @notice Complete configuration for a single role
-    /// @dev Encompasses all aspects of role setup: metadata, hierarchy, vouching, distribution
+    /// @notice One ROLE subject.
     struct RoleConfig {
-        string name; // Role name (e.g., "MEMBER", "ADMIN")
-        string image; // IPFS hash or URI for role image
-        bytes32 metadataCID; // IPFS CID for extended role metadata JSON
-        bool canVote; // Whether this role can participate in voting
-        RoleVouchingConfig vouching; // Vouching configuration
-        RoleEligibilityDefaults defaults; // Default eligibility settings
-        RoleHierarchyConfig hierarchy; // Parent-child relationship
-        RoleDistributionConfig distribution; // Initial hat distribution
-        HatConfig hatConfig; // Hats Protocol configuration
+        string name;
+        string image; // IPFS hash or URI (subgraph metadata)
+        bytes32 metadataCID; // IPFS CID of the extended role metadata JSON
+        bool canVote; // included in the HybridVoting default class electorate
+        bool open; // true = default-ALLOW (anyone may claim); false = deny-by-default (titled role)
+        uint32 maxMembers; // 0 = unlimited
+        RoleVouchingConfig vouching;
+        RoleDistributionConfig distribution;
+    }
+
+    /// @notice One GROUP subject: membership is derived from its member roles (no acceptance of its
+    ///         own, no cap). Groups are what restricted polls and manager delegation point at
+    ///         ("Only Executives" = the Executives group subject).
+    struct GroupConfig {
+        string name;
+        uint256[] memberRoleIndices; // indices into the roles array
     }
 }

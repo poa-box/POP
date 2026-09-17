@@ -14,7 +14,9 @@ import {ValidationLib} from "./libs/ValidationLib.sol";
 
 /*────────── External Hats interface ──────────*/
 import {IHats} from "lib/hats-protocol/src/Interfaces/IHats.sol";
-import {HatManager} from "./libs/HatManager.sol";
+import {SubjectSet} from "./libs/SubjectSet.sol";
+import {IMembershipAuthority} from "./interfaces/IMembershipAuthority.sol";
+import {AccessV2PermKeys} from "./libs/AccessV2PermKeys.sol";
 
 /*────────── External Interfaces ──────────*/
 interface IParticipationToken is IERC20 {
@@ -35,6 +37,7 @@ contract TaskManager is Initializable, ContextUpgradeable {
     error BadStatus();
     /// @notice Caller does not wear any creator hat and is not the executor.
     error NotCreator();
+    error LegacyConfigRemoved();
     /// @notice Caller is not the task's current claimer.
     error NotClaimer();
     /// @notice Caller is not the configured executor.
@@ -176,6 +179,11 @@ contract TaskManager is Initializable, ContextUpgradeable {
         // Only the root hash is on-chain; reorganization = swap the hash via setFolders.
         bytes32 foldersRoot;
         uint256[] organizerHatIds; // hats authorized to reorganize the folder tree
+        // ─── Role customization (configAdmin) ───
+        // Reserved historical config-admin slot; no longer grants any permission.
+        address configAdmin;
+        // Required MembershipAuthority; zero means an inactive, unmigrated module.
+        address membershipAuthority;
     }
 
     bytes32 private constant _STORAGE_SLOT = keccak256("poa.taskmanager.storage");
@@ -188,6 +196,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /*──────── Events ───────*/
+    /// @notice The org's nonzero MembershipAuthority pointer changed.
+    event MembershipAuthoritySet(address indexed authority);
     /// @notice A role hat of `hatType` was added or removed from its enumeration array.
     event HatSet(HatType hatType, uint256 hat, bool allowed);
     /// @notice A project was created. `metadataHash` is an IPFS CID — not stored on-chain.
@@ -212,6 +222,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
     event FoldersUpdated(bytes32 indexed newRoot, bytes32 indexed oldRoot, address indexed sender);
     /// @notice A hat was added to or removed from the organizer-hat array.
     event OrganizerHatAllowed(uint256 indexed hatId, bool allowed);
+    /// @notice The secondary config admin (may set global ROLE_PERM masks) changed.
+    event ConfigAdminSet(address indexed admin);
 
     /// @notice A new task was created under `project`.
     event TaskCreated(
@@ -270,36 +282,32 @@ contract TaskManager is Initializable, ContextUpgradeable {
 
     /*──────── Initialiser ───────*/
     /**
-     * @notice One-time proxy initializer. Wires the org's PT, Hats, executor, and
+     * @notice One-time proxy initializer. Wires the org's PT, authority subjects, executor, and
      *         (optional) bootstrap deployer; seeds the creator-hat array.
      * @param tokenAddress    Participation token (must implement `mint`).
-     * @param hatsAddress     Hats Protocol contract.
      * @param creatorHats     Initial hat IDs allowed to create projects.
      * @param executorAddress Executor address (DAO execution layer).
      * @param deployerAddress OrgDeployer address for `bootstrapProjectsAndTasks`; may be zero.
      */
     function initialize(
         address tokenAddress,
-        address hatsAddress,
         uint256[] calldata creatorHats,
         address executorAddress,
         address deployerAddress
     ) external initializer {
         tokenAddress.requireNonZeroAddress();
-        hatsAddress.requireNonZeroAddress();
         executorAddress.requireNonZeroAddress();
 
         __Context_init();
 
         Layout storage l = _layout();
         l.token = IParticipationToken(tokenAddress);
-        l.hats = IHats(hatsAddress);
         l.executor = executorAddress;
         l.deployer = deployerAddress; // Can be address(0) if bootstrap not needed
 
-        // Initialize creator hat arrays using HatManager
+        // Initialize creator subject IDs; authority wiring follows in the deployment transaction.
         for (uint256 i; i < creatorHats.length;) {
-            HatManager.setHatInArray(l.creatorHatIds, creatorHats[i], true);
+            SubjectSet.set(l.creatorHatIds, creatorHats[i], true);
             emit HatSet(HatType.CREATOR, creatorHats[i], true);
             unchecked {
                 ++i;
@@ -332,7 +340,8 @@ contract TaskManager is Initializable, ContextUpgradeable {
         Layout storage l = _layout();
         address s = _msgSender();
         if (s == l.executor) return;
-        if (!HatManager.hasAnyHat(l.hats, l.organizerHatIds, s)) revert NotOrganizer();
+        address a = l.membershipAuthority;
+        if (!_authorityHoldsAny(a, l.organizerHatIds, s)) revert NotOrganizer();
     }
 
     /// @dev Caller must hold CREATE permission on `pid` (or be a project manager / executor).
@@ -360,6 +369,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
      */
     function createProject(BootstrapProjectConfig calldata p) external returns (bytes32 projectId) {
         _requireCreator();
+        // Governance sets TM_PERMS on the authority. Never accept an ineffective legacy mask.
+        if (p.createHats.length + p.claimHats.length + p.reviewHats.length + p.assignHats.length != 0) {
+            revert LegacyConfigRemoved();
+        }
         projectId = _createProjectCore(
             p.title,
             p.metadataHash,
@@ -409,12 +422,6 @@ contract TaskManager is Initializable, ContextUpgradeable {
                 ++i;
             }
         }
-
-        /* hat-permission matrix */
-        _setBatchHatPerm(projectId, createHats, TaskPerm.CREATE);
-        _setBatchHatPerm(projectId, claimHats, TaskPerm.CLAIM);
-        _setBatchHatPerm(projectId, reviewHats, TaskPerm.REVIEW);
-        _setBatchHatPerm(projectId, assignHats, TaskPerm.ASSIGN);
     }
 
     function _initBountyBudgets(bytes32 projectId, address[] calldata bountyTokens, uint256[] calldata bountyCaps)
@@ -446,28 +453,6 @@ contract TaskManager is Initializable, ContextUpgradeable {
         Layout storage l = _layout();
         Project storage p = l._projects[pid];
         if (!p.exists) revert NotFound();
-
-        // Decrement ref counts for hats that had project-specific permissions.
-        // Iterate a snapshot of permissionHatIds since _syncPermissionHat may modify it.
-        uint256 len = l.permissionHatIds.length;
-        uint256[] memory snapshot = new uint256[](len);
-        for (uint256 i; i < len;) {
-            snapshot[i] = l.permissionHatIds[i];
-            unchecked {
-                ++i;
-            }
-        }
-        for (uint256 i; i < len;) {
-            uint256 hatId = snapshot[i];
-            if (l.rolePermProj[pid][hatId] != 0) {
-                _updateProjectPermRefCount(l, hatId, l.rolePermProj[pid][hatId], 0);
-                delete l.rolePermProj[pid][hatId];
-                _syncPermissionHat(hatId);
-            }
-            unchecked {
-                ++i;
-            }
-        }
 
         delete l._projects[pid];
         emit ProjectDeleted(pid);
@@ -536,37 +521,6 @@ contract TaskManager is Initializable, ContextUpgradeable {
         Layout storage l = _layout();
         if (_msgSender() != l.deployer) revert NotDeployer();
         l.deployer = address(0);
-    }
-
-    /**
-     * @notice Bulk-grant org-wide `rolePermGlobal` masks during the bootstrap window.
-     * @dev Deployer-only escape hatch, identical access pattern to {bootstrapProjectsAndTasks}.
-     *      Reverts {NotDeployer} once {clearDeployer} has been called. Effects per pair:
-     *        - Writes `rolePermGlobal[hatId] = mask` (last write wins for duplicate hat IDs).
-     *        - Calls `_syncPermissionHat(hatId)` so the enumeration array stays consistent
-     *          (a `mask == 0` write removes the hat unless it still has any project-specific mask).
-     *        - Emits {RolePermSet} per hat — the same event `setConfig(ROLE_PERM, ...)` emits, so
-     *          subgraph consumers index these grants exactly the same way as runtime grants.
-     *      Empty `hatIds` is a no-op (does not revert) — lets the caller pass zero grants without
-     *      branching at the call site.
-     * @param hatIds Hat IDs to grant masks to.
-     * @param masks  TaskPerm bitmasks (bitwise-OR of {TaskPerm} constants). Length must match `hatIds`.
-     */
-    function bootstrapGlobalPerms(uint256[] calldata hatIds, uint8[] calldata masks) external {
-        Layout storage l = _layout();
-        if (_msgSender() != l.deployer) revert NotDeployer();
-        if (hatIds.length != masks.length) revert ArrayLengthMismatch();
-
-        for (uint256 i; i < hatIds.length;) {
-            uint256 hatId = hatIds[i];
-            uint8 mask = masks[i];
-            l.rolePermGlobal[hatId] = mask;
-            _syncPermissionHat(hatId);
-            emit RolePermSet(hatId, mask);
-            unchecked {
-                ++i;
-            }
-        }
     }
 
     /*──────── Task Logic ───────*/
@@ -1266,12 +1220,12 @@ contract TaskManager is Initializable, ContextUpgradeable {
      *      lists who may call each variant:
      *      - `EXECUTOR` (executor): `abi.encode(address newExecutor)` — rotate the executor.
      *      - `CREATOR_HAT_ALLOWED` (executor): `abi.encode(uint256 hatId, bool allowed)` — add/remove creator hat.
-     *      - `ROLE_PERM` (executor): `abi.encode(uint256 hatId, uint8 mask)` — set global permission mask.
+     *      - `ROLE_PERM` and `PROJECT_ROLE_PERM` are retired and always revert.
      *      - `ORGANIZER_HAT_ALLOWED` (executor): `abi.encode(uint256 hatId, bool allowed)` — add/remove folder organizer hat.
      *      - `BOUNTY_CAP` (executor OR `TaskPerm.BUDGET` hat): `abi.encode(bytes32 pid, address token, uint256 newCap)` — set per-project bounty cap.
      *      - `PROJECT_MANAGER` (executor): `abi.encode(bytes32 pid, address mgr, bool isManager)` — toggle PM.
      *      - `PROJECT_CAP` (executor OR `TaskPerm.BUDGET` hat): `abi.encode(bytes32 pid, uint256 newCap)` — change PT cap.
-     *      `PROJECT_ROLE_PERM` is intentionally not handled here; use {setProjectRolePerm}.
+     *      Global and project permissions are configured on MembershipAuthority via TM_PERMS.
      * @param key   Which configuration field to mutate.
      * @param value ABI-encoded payload matching the variant above.
      */
@@ -1290,24 +1244,17 @@ contract TaskManager is Initializable, ContextUpgradeable {
         if (key == ConfigKey.CREATOR_HAT_ALLOWED) {
             _requireExecutor();
             (uint256 hat, bool allowed) = abi.decode(value, (uint256, bool));
-            HatManager.setHatInArray(l.creatorHatIds, hat, allowed);
+            SubjectSet.set(l.creatorHatIds, hat, allowed);
             emit HatSet(HatType.CREATOR, hat, allowed);
             return;
         }
 
-        if (key == ConfigKey.ROLE_PERM) {
-            _requireExecutor();
-            (uint256 hatId, uint8 mask) = abi.decode(value, (uint256, uint8));
-            l.rolePermGlobal[hatId] = mask;
-            _syncPermissionHat(hatId);
-            emit RolePermSet(hatId, mask);
-            return;
-        }
+        if (key == ConfigKey.ROLE_PERM || key == ConfigKey.PROJECT_ROLE_PERM) revert LegacyConfigRemoved();
 
         if (key == ConfigKey.ORGANIZER_HAT_ALLOWED) {
             _requireExecutor();
             (uint256 hat, bool allowed) = abi.decode(value, (uint256, bool));
-            HatManager.setHatInArray(l.organizerHatIds, hat, allowed);
+            SubjectSet.set(l.organizerHatIds, hat, allowed);
             emit OrganizerHatAllowed(hat, allowed);
             return;
         }
@@ -1347,25 +1294,12 @@ contract TaskManager is Initializable, ContextUpgradeable {
         }
     }
 
-    /**
-     * @notice Replace a hat's permission mask on a specific project (overrides global).
-     * @dev Permission: creator hat or executor. Setting `mask` to zero removes the override
-     *      and falls back to the hat's global mask (if any).
-     * @param pid   Project ID.
-     * @param hatId Hat whose mask to set.
-     * @param mask  Bitwise OR of `TaskPerm.CREATE|CLAIM|REVIEW|ASSIGN|SELF_REVIEW`.
-     */
-    function setProjectRolePerm(bytes32 pid, uint256 hatId, uint8 mask) external {
-        _requireCreator();
-        _requireProjectExists(pid);
-        Layout storage l = _layout();
-        uint8 oldMask = l.rolePermProj[pid][hatId];
-        l.rolePermProj[pid][hatId] = mask;
-        _updateProjectPermRefCount(l, hatId, oldMask, mask);
-
-        _syncPermissionHat(hatId);
-
-        emit ProjectRolePermSet(pid, hatId, mask);
+    /// @notice Set the org's nonzero MembershipAuthority. Governance-only; no legacy rollback.
+    function setMembershipAuthority(address authority) external {
+        _requireExecutor();
+        if (authority == address(0)) revert ValidationLib.ZeroAddress();
+        _layout().membershipAuthority = authority;
+        emit MembershipAuthoritySet(authority);
     }
 
     /*──────── Folders ─────────*/
@@ -1396,37 +1330,12 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
     /*──────── Internal Perm helpers ─────*/
 
-    function _permMask(address user, bytes32 pid) internal view returns (uint8 m) {
-        Layout storage l = _layout();
-        uint256 len = l.permissionHatIds.length;
-        if (len == 0) return 0;
-
-        // one call instead of N
-        address[] memory wearers = new address[](len);
-        uint256[] memory hats_ = new uint256[](len);
-        for (uint256 i; i < len;) {
-            wearers[i] = user;
-            hats_[i] = l.permissionHatIds[i];
-            unchecked {
-                ++i;
-            }
-        }
-        uint256[] memory bal = l.hats.balanceOfBatch(wearers, hats_);
-
-        for (uint256 i; i < len;) {
-            if (bal[i] == 0) {
-                unchecked {
-                    ++i;
-                }
-                continue; // user doesn't wear it
-            }
-            uint256 h = hats_[i];
-            uint8 mask = l.rolePermProj[pid][h];
-            m |= mask == 0 ? l.rolePermGlobal[h] : mask; // project overrides global
-            unchecked {
-                ++i;
-            }
-        }
+    function _permMask(address user, bytes32 pid) internal view returns (uint8) {
+        // Project zero is context one; context zero remains the authority's global row.
+        return uint8(
+            IMembershipAuthority(_layout().membershipAuthority)
+                .hasPerm(user, AccessV2PermKeys.TM_PERMS, bytes32(uint256(pid) + 1))
+        );
     }
 
     function _isPM(bytes32 pid, address who) internal view returns (bool) {
@@ -1440,95 +1349,36 @@ contract TaskManager is Initializable, ContextUpgradeable {
     }
 
     /// @dev Stricter than `_checkPerm`: no project-manager bypass. Only Executor
-    /// or a wearer of a hat granted `TaskPerm.BUDGET` (globally via `ROLE_PERM`
-    /// or per-project via `setProjectRolePerm`) may resize a project's caps.
+    /// or a member granted `TaskPerm.BUDGET` by the authority may resize project caps.
     function _requireBudgetEditor(bytes32 pid) internal view {
         address s = _msgSender();
         if (s == _layout().executor) return;
         if (!TaskPerm.has(_permMask(s, pid), TaskPerm.BUDGET)) revert Unauthorized();
     }
 
-    function _setBatchHatPerm(bytes32 pid, uint256[] calldata hatIds, uint8 flag) internal {
-        Layout storage l = _layout();
-        for (uint256 i; i < hatIds.length;) {
-            uint256 hatId = hatIds[i];
-            uint8 oldMask = l.rolePermProj[pid][hatId];
-            uint8 newMask = l.rolePermProj[pid][hatId] | flag;
-            l.rolePermProj[pid][hatId] = newMask;
-            _updateProjectPermRefCount(l, hatId, oldMask, newMask);
-
-            _syncPermissionHat(hatId);
-
-            emit ProjectRolePermSet(pid, hatId, newMask);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /**
-     * @dev Keep `permissionHatIds` consistent with effective permissions.
-     * A hat should remain tracked if it has any non-zero global or project mask.
-     */
-    function _syncPermissionHat(uint256 hatId) internal {
-        Layout storage l = _layout();
-        bool hasGlobalPerm = l.rolePermGlobal[hatId] != 0;
-        bool hasProjectPerm = l.projectPermHatRefCount[hatId] != 0;
-
-        // Upgrade-safe fallback: if refcount wasn't initialized for existing data,
-        // rebuild it lazily only when we would otherwise remove the hat.
-        if (!hasProjectPerm && _hasAnyProjectPermissionLegacy(l, hatId)) {
-            l.projectPermHatRefCount[hatId] = _rebuildProjectPermRefCount(l, hatId);
-            hasProjectPerm = l.projectPermHatRefCount[hatId] != 0;
-        }
-
-        HatManager.setHatInArray(l.permissionHatIds, hatId, hasGlobalPerm || hasProjectPerm);
-    }
-
-    function _updateProjectPermRefCount(Layout storage l, uint256 hatId, uint8 oldMask, uint8 newMask) internal {
-        if (oldMask == 0 && newMask != 0) {
-            l.projectPermHatRefCount[hatId]++;
-        } else if (oldMask != 0 && newMask == 0) {
-            uint256 count = l.projectPermHatRefCount[hatId];
-            if (count > 0) {
-                l.projectPermHatRefCount[hatId] = count - 1;
-            }
-        }
-    }
-
-    function _hasAnyProjectPermissionLegacy(Layout storage l, uint256 hatId) internal view returns (bool) {
-        uint48 nextProjectId = l.nextProjectId;
-        for (uint48 i; i < nextProjectId;) {
-            bytes32 pid = bytes32(uint256(i));
-            if (l._projects[pid].exists && l.rolePermProj[pid][hatId] != 0) {
-                return true;
-            }
-            unchecked {
-                ++i;
-            }
-        }
-
-        return false;
-    }
-
-    function _rebuildProjectPermRefCount(Layout storage l, uint256 hatId) internal view returns (uint256 count) {
-        uint48 nextProjectId = l.nextProjectId;
-        for (uint48 i; i < nextProjectId;) {
-            bytes32 pid = bytes32(uint256(i));
-            if (l._projects[pid].exists && l.rolePermProj[pid][hatId] != 0) {
-                count++;
-            }
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
     /*──────── Internal Helper Functions ─────────── */
-    /// @dev Returns true if `user` wears *any* creator hat.
+    /// @dev Creator IDs are authority subjects, including adopted historical IDs.
     function _hasCreatorHat(address user) internal view returns (bool) {
         Layout storage l = _layout();
-        return HatManager.hasAnyHat(l.hats, l.creatorHatIds, user);
+        address a = l.membershipAuthority;
+        return _authorityHoldsAny(a, l.creatorHatIds, user);
+    }
+
+    /// @dev True iff `user` is an active member of any subject ID
+    ///      in `subjectIds` per the authority. Membership = accepted && eligible (authority-computed).
+    function _authorityHoldsAny(address authority, uint256[] storage subjectIds, address user)
+        internal
+        view
+        returns (bool)
+    {
+        uint256 len = subjectIds.length;
+        for (uint256 i; i < len;) {
+            if (IMembershipAuthority(authority).isMember(subjectIds[i], user)) return true;
+            unchecked {
+                ++i;
+            }
+        }
+        return false;
     }
 
     /*──────── Utils / View ────*/
@@ -1554,6 +1404,7 @@ contract TaskManager is Initializable, ContextUpgradeable {
      *      - `9` → Bounty budget: `d = abi.encode(bytes32 pid, address token)` → `(uint128 cap, uint128 spent)`.
      *      - `10` → Folders root: `d = ""` → `(bytes32 foldersRoot)`.
      *      - `11` → Organizer hats: `d = ""` → `(uint256[] hatIds)`.
+     *      - `12` → MembershipAuthority pointer: `d = ""` → `(address membershipAuthority)`.
      * @param t Variant selector.
      * @param d ABI-encoded variant payload (see above).
      * @return ABI-encoded result whose shape depends on `t`.
@@ -1591,10 +1442,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
             return abi.encode(l.executor);
         } else if (t == 5) {
             // CreatorHats
-            return abi.encode(HatManager.getHatArray(l.creatorHatIds));
+            return abi.encode(l.creatorHatIds);
         } else if (t == 6) {
             // PermissionHats
-            return abi.encode(HatManager.getHatArray(l.permissionHatIds));
+            return abi.encode(l.permissionHatIds);
         } else if (t == 7) {
             // TaskApplicants
             uint256 id = abi.decode(d, (uint256));
@@ -1615,7 +1466,10 @@ contract TaskManager is Initializable, ContextUpgradeable {
             return abi.encode(l.foldersRoot);
         } else if (t == 11) {
             // OrganizerHats
-            return abi.encode(HatManager.getHatArray(l.organizerHatIds));
+            return abi.encode(l.organizerHatIds);
+        } else if (t == 12) {
+            // MembershipAuthority (zero means inactive)
+            return abi.encode(l.membershipAuthority);
         }
         revert NotFound();
     }

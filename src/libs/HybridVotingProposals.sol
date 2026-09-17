@@ -28,6 +28,9 @@ library HybridVotingProposals {
         uint64 created,
         uint256[] hatIds
     );
+    // V2 (RoleManager Phase 2): additive config event carrying per-proposal knobs absent from the
+    // legacy NewProposal/NewHatProposal ABIs. Emitted alongside them, never replacing them.
+    event ProposalConfigV2(uint256 indexed id, uint32 quorumOverride, bool equalWeight);
 
     function _layout() private pure returns (HybridVoting.Layout storage s) {
         bytes32 slot = _STORAGE_SLOT;
@@ -44,7 +47,7 @@ library HybridVotingProposals {
         IExecutor.Call[][] calldata batches,
         uint256[] calldata hatIds
     ) external {
-        uint256 id = _initProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds);
+        uint256 id = _initProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds, false);
 
         uint64 endTs = _layout()._proposals[id].endTimestamp;
 
@@ -55,13 +58,48 @@ library HybridVotingProposals {
         }
     }
 
+    /// @notice V2 proposal creation with per-proposal quorum override and/or equalWeight tally.
+    /// @dev Auth (onlyCreator) + pause are enforced by the facade. Rules (PLAN §1.5, H-2):
+    ///      overrides/equalWeight are restricted-only; executable proposals raise-only; equalWeight
+    ///      snapshots a single synthetic DIRECT class instead of the org classes.
+    function createProposalV2(
+        bytes calldata title,
+        bytes32 descriptionHash,
+        uint32 minutesDuration,
+        uint8 numOptions,
+        IExecutor.Call[][] calldata batches,
+        uint256[] calldata hatIds,
+        uint32 quorumOverride,
+        bool equalWeight
+    ) external {
+        if (hatIds.length == 0 && (quorumOverride != 0 || equalWeight)) {
+            revert VotingErrors.InvalidQuorum();
+        }
+
+        uint256 id = _initProposal(title, descriptionHash, minutesDuration, numOptions, batches, hatIds, equalWeight);
+
+        HybridVoting.Layout storage l = _layout();
+        if (quorumOverride != 0) {
+            l.proposalQuorumOverride[id] = quorumOverride;
+        }
+
+        uint64 endTs = l._proposals[id].endTimestamp;
+        if (hatIds.length > 0) {
+            emit NewHatProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp), hatIds);
+        } else {
+            emit NewProposal(id, title, descriptionHash, numOptions, endTs, uint64(block.timestamp));
+        }
+        emit ProposalConfigV2(id, quorumOverride, equalWeight);
+    }
+
     function _initProposal(
         bytes calldata title,
         bytes32 descriptionHash,
         uint32 minutesDuration,
         uint8 numOptions,
         IExecutor.Call[][] calldata batches,
-        uint256[] calldata hatIds
+        uint256[] calldata hatIds,
+        bool equalWeight
     ) internal returns (uint256) {
         ValidationLib.requireValidTitle(title);
         if (numOptions == 0) revert VotingErrors.LengthMismatch();
@@ -69,7 +107,9 @@ library HybridVotingProposals {
         _validateDuration(minutesDuration);
 
         HybridVoting.Layout storage l = _layout();
-        if (l.classes.length == 0) revert VotingErrors.InvalidClassCount();
+        // equalWeight builds a self-contained synthetic class, so org classes are not required for
+        // it; the legacy path still requires at least one configured class.
+        if (!equalWeight && l.classes.length == 0) revert VotingErrors.InvalidClassCount();
 
         bool isExecuting = false;
         if (batches.length > 0) {
@@ -90,11 +130,39 @@ library HybridVotingProposals {
         p.endTimestamp = endTs;
         p.restricted = hatIds.length > 0;
 
-        _snapshotClasses(p, l);
-        uint256 classCount = l.classes.length;
+        uint256 classCount;
+        if (equalWeight) {
+            // Snapshot ONE synthetic DIRECT class {slicePct:100, hatIds: pollHatIds} instead of the
+            // org classes. _calculateClassPower then yields 100 for any voter wearing a poll hat and
+            // 0 otherwise → one-person-one-vote regardless of token balances. vote()/announceWinner()
+            // are untouched. equalWeight is restricted-only (guarded in createProposalV2), so
+            // pollHatIds is guaranteed non-empty here.
+            _snapshotEqualWeightClass(p, hatIds);
+            classCount = 1;
+        } else {
+            _snapshotClasses(p, l);
+            classCount = l.classes.length;
+        }
         _initOptions(p, numOptions, classCount);
 
         uint256 id = l._proposals.length - 1;
+
+        // Access v2 (§4): anchor the activation gate to creation time and take the IMMUTABLE per-
+        // proposal subject snapshot mirroring p.classesSnapshot's positional indices. The snapshot
+        // freezes each class's subject binding at creation, so a later setClassSubject can never move
+        // an in-flight proposal's electorate (side-mapping precedent — the Proposal struct is never
+        // widened). equalWeight is skipped: its synthetic DIRECT class has no configured org subject
+        // and gates on pollHatIds (resolved via the hatIds-as-subject-ids fallback in the tally).
+        // Behaviour-neutral for the legacy path, which never reads either mapping.
+        l.proposalCreatedAt[id] = uint64(block.timestamp);
+        if (!equalWeight) {
+            for (uint256 c; c < classCount;) {
+                l.proposalClassSubjects[id][c] = l.classSubject[l.classIdOfIdx[c]];
+                unchecked {
+                    ++c;
+                }
+            }
+        }
 
         if (isExecuting) {
             for (uint256 i; i < numOptions;) {
@@ -153,6 +221,23 @@ library HybridVotingProposals {
             }
         }
         p.classTotalsRaw = new uint256[](classCount);
+    }
+
+    /// @dev equalWeight snapshot: a single DIRECT class holding 100% of the slice, gated on the
+    ///      poll's own hat set. Every eligible voter contributes exactly 100 raw points.
+    function _snapshotEqualWeightClass(HybridVoting.Proposal storage p, uint256[] calldata pollHatIds) internal {
+        HybridVoting.ClassConfig storage sc = p.classesSnapshot.push();
+        sc.strategy = HybridVoting.ClassStrategy.DIRECT;
+        sc.slicePct = 100;
+        // quadratic=false, minBalance=0, asset=address(0) are the zero defaults for a fresh push.
+        uint256 len = pollHatIds.length;
+        for (uint256 i; i < len;) {
+            sc.hatIds.push(pollHatIds[i]);
+            unchecked {
+                ++i;
+            }
+        }
+        p.classTotalsRaw = new uint256[](1);
     }
 
     function _initOptions(HybridVoting.Proposal storage p, uint8 numOptions, uint256 classCount) internal {

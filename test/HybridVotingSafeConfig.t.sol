@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 import "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
@@ -78,11 +80,14 @@ contract HybridVotingSafeConfigTest is Test {
         uint256[] memory approverHats = new uint256[](1);
         approverHats[0] = APPROVER_HAT;
         UpgradeableBeacon ptBeacon = new UpgradeableBeacon(address(new ParticipationToken()), owner);
-        bytes memory ptInit = abi.encodeCall(
-            ParticipationToken.initialize,
-            (address(exec), "Participation", "PT", address(hats), memberHats, approverHats)
-        );
-        return ParticipationToken(address(new BeaconProxy(address(ptBeacon), ptInit)));
+        bytes memory ptInit = abi.encodeCall(ParticipationToken.initialize, (address(exec), "Participation", "PT"));
+        ParticipationToken result = ParticipationToken(address(new BeaconProxy(address(ptBeacon), ptInit)));
+        MockModuleAuthority a = new MockModuleAuthority(address(hats), address(exec));
+        a.setSubjects(AccessV2PermKeys.PT_MEMBER, memberHats);
+        a.setSubjects(AccessV2PermKeys.PT_APPROVE, approverHats);
+        vm.prank(address(exec));
+        result.setMembershipAuthority(address(a));
+        return result;
     }
 
     /// @dev Split out of setUp() to keep each function's stack frame small (production via-IR profile).
@@ -102,11 +107,14 @@ contract HybridVotingSafeConfigTest is Test {
             asset: asset,
             hatIds: votingHats
         });
-        bytes memory initData = abi.encodeCall(
-            HybridVoting.initialize, (address(hats), address(exec), creatorHats, targets, uint8(50), uint32(0), classes)
-        );
+        bytes memory initData = abi.encodeCall(HybridVoting.initialize, (address(exec), uint8(50), uint32(0), classes));
         UpgradeableBeacon hvBeacon = new UpgradeableBeacon(address(new HybridVoting()), owner);
-        return HybridVoting(payable(address(new BeaconProxy(address(hvBeacon), initData))));
+        HybridVoting result = HybridVoting(payable(address(new BeaconProxy(address(hvBeacon), initData))));
+        MockModuleAuthority a = new MockModuleAuthority(address(hats), address(exec));
+        a.setSubjects(AccessV2PermKeys.HV_CREATE, creatorHats);
+        vm.prank(address(exec));
+        result.setMembershipAuthority(address(a));
+        return result;
     }
 
     function _createPoll() internal returns (uint256 id) {

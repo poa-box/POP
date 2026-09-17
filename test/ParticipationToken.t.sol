@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
+import {MockModuleAuthority} from "./mocks/MockModuleAuthority.sol";
+import {AccessV2PermKeys} from "../src/libs/AccessV2PermKeys.sol";
 
 import "forge-std/Test.sol";
 import "../src/ParticipationToken.sol";
@@ -34,19 +36,21 @@ contract ParticipationTokenTest is Test {
         uint256[] memory initialApproverHats = new uint256[](1);
         initialApproverHats[0] = APPROVER_HAT_ID;
 
-        bytes memory data = abi.encodeCall(
-            ParticipationToken.initialize,
-            (executor, "PToken", "PTK", address(hats), initialMemberHats, initialApproverHats)
-        );
+        bytes memory data = abi.encodeCall(ParticipationToken.initialize, (executor, "PToken", "PTK"));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
         token = ParticipationToken(address(proxy));
+        MockModuleAuthority moduleAuthority = new MockModuleAuthority(address(hats), executor);
+        moduleAuthority.setSubjects(AccessV2PermKeys.PT_MEMBER, initialMemberHats);
+        moduleAuthority.setSubjects(AccessV2PermKeys.PT_APPROVE, initialApproverHats);
+        vm.prank(executor);
+        token.setMembershipAuthority(address(moduleAuthority));
     }
 
     function testInitializeStores() public {
         assertEq(token.executor(), executor);
-        assertEq(address(token.hats()), address(hats));
-        assertEq(token.memberHatIds()[0], MEMBER_HAT_ID);
-        assertEq(token.approverHatIds()[0], APPROVER_HAT_ID);
+        assertEq(address(token.hats()), address(0));
+        assertEq(token.memberHatIds().length, 0);
+        assertEq(token.approverHatIds().length, 0);
     }
 
     // C-01 fix: setTaskManager is executor-only, even for the very first set
@@ -170,64 +174,6 @@ contract ParticipationTokenTest is Test {
         vm.prank(nonApprover);
         vm.expectRevert(ParticipationToken.NotApprover.selector);
         token.approveRequest(1);
-    }
-
-    function testSetMemberHatAllowed() public {
-        uint256 newHatId = 123;
-        address newMember = address(0xbeef);
-
-        // Create and assign new hat
-        hats.createHat(newHatId, "New Member Hat", 1, address(0), address(0), true, "");
-        hats.mintHat(newHatId, newMember);
-
-        // Should fail without hat permission
-        vm.prank(newMember);
-        vm.expectRevert(ParticipationToken.NotMember.selector);
-        token.requestTokens(1 ether, "ipfs://req");
-
-        // Enable new hat as member hat
-        vm.prank(executor);
-        token.setMemberHatAllowed(newHatId, true);
-
-        // Should now succeed
-        vm.prank(newMember);
-        token.requestTokens(1 ether, "ipfs://req");
-
-        // Disable new hat
-        vm.prank(executor);
-        token.setMemberHatAllowed(newHatId, false);
-
-        // Should now fail again
-        vm.prank(newMember);
-        vm.expectRevert(ParticipationToken.NotMember.selector);
-        token.requestTokens(1 ether, "ipfs://req2");
-    }
-
-    function testSetApproverHatAllowed() public {
-        uint256 newHatId = 456;
-        address newApprover = address(0xcafe);
-
-        // Create and assign new hat
-        hats.createHat(newHatId, "New Approver Hat", 1, address(0), address(0), true, "");
-        hats.mintHat(newHatId, newApprover);
-
-        // Create a request first
-        vm.prank(member);
-        token.requestTokens(1 ether, "ipfs://req");
-
-        // Should fail without hat permission
-        vm.prank(newApprover);
-        vm.expectRevert(ParticipationToken.NotApprover.selector);
-        token.approveRequest(1);
-
-        // Enable new hat as approver hat
-        vm.prank(executor);
-        token.setApproverHatAllowed(newHatId, true);
-
-        // Should now succeed
-        vm.prank(newApprover);
-        token.approveRequest(1);
-        assertEq(token.balanceOf(member), 1 ether);
     }
 
     function testExecutorBypassesHatChecks() public {
