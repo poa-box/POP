@@ -210,6 +210,81 @@ contract DeployerTest is Test {
         assertEq(deployer.VERSION(), "2.0.0");
     }
 
+    function testDeploy_registersFounderUsernameBySignature() public {
+        uint256 founderKey = 0xA11CE;
+        address founder = vm.addr(founderKey);
+        UniversalAccountRegistry registry = UniversalAccountRegistry(accountRegProxy);
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        params.deployerAddress = founder;
+        params.deployerUsername = "newfounder";
+        params.regDeadline = block.timestamp + 1 hours;
+        params.regSignature = _signDeployerRegistration(founderKey, params);
+
+        // A different account submits the deployment; the founder's signature authorizes registration.
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+
+        assertEq(registry.getUsername(founder), "newfounder", "factory forwards founder registration");
+        assertEq(registry.getAddressOfUsername("newfounder"), founder, "username belongs to the signer");
+        assertEq(registry.nonces(founder), 1, "registration consumes exactly one nonce");
+        assertEq(registry.getUsername(orgOwner), "", "sponsor does not receive the founder's username");
+        assertEq(orgRegistry.getOrgContract(ORG_ID, ModuleTypes.EXECUTOR_ID), result.executor);
+        assertTrue(IMembershipAuthority(result.membershipAuthority).isMember(_roleSubject(ROLE_DEFAULT), founder));
+        assertFalse(IMembershipAuthority(result.membershipAuthority).paused(), "full deployment completes");
+    }
+
+    function testDeploy_keepsExistingFounderUsernameWithoutRevalidatingSignature() public {
+        UniversalAccountRegistry registry = UniversalAccountRegistry(accountRegProxy);
+        vm.prank(orgOwner);
+        registry.registerAccount("existingfounder");
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        params.deployerUsername = "replacement";
+        params.regDeadline = block.timestamp + 1 hours;
+        // Nonempty input enters the optional-registration branch. This invalid signature would
+        // revert if the factory failed to skip registration after finding the existing username.
+        params.regSignature = hex"01";
+
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+
+        assertEq(registry.getUsername(orgOwner), "existingfounder", "existing registration is preserved");
+        assertEq(registry.getAddressOfUsername("replacement"), address(0), "replacement is not reserved");
+        assertEq(registry.nonces(orgOwner), 0, "skipped registration does not consume a nonce");
+        assertEq(orgRegistry.getOrgContract(ORG_ID, ModuleTypes.EXECUTOR_ID), result.executor);
+        assertFalse(IMembershipAuthority(result.membershipAuthority).paused(), "full deployment completes");
+    }
+
+    function testDeploy_invalidFounderSignatureRollsBackAndCanRetry() public {
+        uint256 founderKey = 0xA11CE;
+        address founder = vm.addr(founderKey);
+        UniversalAccountRegistry registry = UniversalAccountRegistry(accountRegProxy);
+        OrgDeployer.DeploymentParams memory params = _defaultParams(ORG_ID);
+        params.deployerAddress = founder;
+        params.deployerUsername = "newfounder";
+        params.regDeadline = block.timestamp + 1 hours;
+        params.regSignature = _signDeployerRegistration(0xB0B, params);
+
+        vm.prank(orgOwner);
+        vm.expectRevert(UniversalAccountRegistry.InvalidSigner.selector);
+        deployer.deployFullOrg(params);
+
+        assertEq(registry.getUsername(founder), "", "failed registration leaves the founder unregistered");
+        assertEq(registry.getAddressOfUsername("newfounder"), address(0), "failed registration reserves no name");
+        assertEq(registry.nonces(founder), 0, "failed registration consumes no nonce");
+        assertEq(orgRegistry.orgCount(), 0, "org bootstrap rolls back with registration failure");
+        assertEq(orgRegistry.proxyOf(ORG_ID, ModuleTypes.EXECUTOR_ID), address(0));
+
+        // Retrying the same org and nonce proves neither bootstrap state nor the deployer guard is stuck.
+        params.regSignature = _signDeployerRegistration(founderKey, params);
+        vm.prank(orgOwner);
+        OrgDeployer.DeploymentResult memory result = deployer.deployFullOrg(params);
+
+        assertEq(registry.getUsername(founder), "newfounder");
+        assertEq(registry.nonces(founder), 1);
+        assertEq(orgRegistry.orgCount(), 1);
+        assertEq(orgRegistry.getOrgContract(ORG_ID, ModuleTypes.EXECUTOR_ID), result.executor);
+    }
+
     function testFullOrgDeployment_registersEveryModule() public {
         OrgDeployer.DeploymentResult memory r = _deployDefaultOrg(ORG_ID);
 
@@ -731,6 +806,27 @@ contract DeployerTest is Test {
     function _deployDefaultOrg(bytes32 orgId) internal returns (OrgDeployer.DeploymentResult memory) {
         vm.prank(orgOwner);
         return deployer.deployFullOrg(_defaultParams(orgId));
+    }
+
+    function _signDeployerRegistration(uint256 signerKey, OrgDeployer.DeploymentParams memory params)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256("RegisterAccount(address user,string username,uint256 nonce,uint256 deadline)"),
+                params.deployerAddress,
+                keccak256(bytes(params.deployerUsername)),
+                params.regNonce,
+                params.regDeadline
+            )
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", UniversalAccountRegistry(accountRegProxy).DOMAIN_SEPARATOR(), structHash)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
+        return abi.encodePacked(r, s, v);
     }
 
     /// @dev The default fixture is the shape a legacy deploy produced, on v2 rails: an open Member

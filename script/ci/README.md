@@ -27,3 +27,13 @@ summary; an empty report or failed compilation cannot pass the job.
 
 Foundry's viaIR source-mapping warning still applies: coverage is useful for
 finding untested paths, but individual line and branch attribution can be imprecise.
+
+## Static analysis limitation
+
+Slither 0.11.6 completes the configured high-severity gate but cannot fully convert
+`GovernanceFactory.deployInfrastructure` to its analysis IR at `registry.getUsername`.
+The function exists in the Solidity interface and deployed registry; Solidity
+compilation succeeds. Do not interpret the passing gate as complete analysis of
+this function. `DeployerTest` covers signed founder registration, skipping an
+existing registration, and an invalid-signature rollback followed by a valid retry
+through the real factory and registry.
