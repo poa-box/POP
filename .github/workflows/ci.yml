@@ -39,6 +39,7 @@ jobs:
         test/**
         lib/**
         foundry.toml
+        foundry.lock
         remappings.txt
         .github/workflows/**
         .github/actions/**
@@ -48,9 +49,9 @@ jobs:
       run-slither: true
       slither-fail-on: 'high'
 
-      # ── Coverage (threshold 0 = report-only, never fails the job) ──
-      run-coverage: true
-      coverage-source-filter: ' src/'
+      # Coverage runs below with unoptimized viaIR and pipefail. The upstream job
+      # disables viaIR and masks compiler failures behind tee, producing an empty report.
+      run-coverage: false
 
       # NOTE: deploy-on-pr is intentionally OFF (default). Testnet deploys run on merge
       # to main via the deploy-testnet job below — deploying every PR was noisy, burned
@@ -63,6 +64,95 @@ jobs:
     secrets:
       PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
       RPC_URL: ${{ secrets.HOODI_RPC_URL }}
+
+  coverage:
+    name: Coverage Report
+    needs: [cicd]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          submodules: recursive
+
+      # Match the reusable workflow's contract-paths above, including CI changes.
+      - name: Check for contract changes
+        id: changes
+        uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        with:
+          filters: |
+            contracts:
+              - src/**
+              - script/**
+              - test/**
+              - lib/**
+              - foundry.toml
+              - foundry.lock
+              - remappings.txt
+              - .github/workflows/**
+              - .github/actions/**
+              - slither.config.json
+
+      - name: Checkout etherform coverage tools
+        if: steps.changes.outputs.contracts == 'true'
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: BreadchainCoop/etherform
+          ref: '5e1256312be0d7964584651609acaf2c8de53d25'
+          path: .etherform
+          sparse-checkout: |
+            scripts/coverage
+            .github/actions
+
+      - name: Setup toolchain
+        if: steps.changes.outputs.contracts == 'true'
+        uses: ./.etherform/.github/actions/setup
+        with:
+          foundry-version: 'nightly-dd0a687aa36ec731b6ea2cda2aa4f32e192814fa'
+
+      - name: Run coverage
+        if: steps.changes.outputs.contracts == 'true'
+        env:
+          FOUNDRY_PROFILE: default
+          RPC_URL: ${{ secrets.HOODI_RPC_URL }}
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s script/ci -p 'test_*.py' -v
+          # Let Forge install and verify the pinned compiler without rebuilding this repo.
+          # SVM prefers this directory when it exists (otherwise its path is platform-specific).
+          mkdir -p "$HOME/.svm"
+          coverage_bootstrap=$(mktemp -d)
+          mkdir -p "$coverage_bootstrap/src"
+          printf 'pragma solidity 0.8.33; contract CompilerProbe {}\n' > "$coverage_bootstrap/src/CompilerProbe.sol"
+          forge build --root "$coverage_bootstrap" --use 0.8.33
+          export POA_COVERAGE_SOLC="$HOME/.svm/0.8.33/solc-0.8.33"
+          # Forge's minimum-IR preset also fails on AccessFactory. The adapter restores
+          # the passing default-profile optimizer settings without altering any sources.
+          forge coverage --ir-minimum --use ./script/ci/coverage_solc.py --report summary --report lcov --report-file lcov.info 2>&1 | tee coverage-raw.txt
+          test -s lcov.info
+          grep -Eq '^SF:(.*/)?src/' lcov.info
+          grep -Eq '^DA:[0-9]+,[0-9]+' lcov.info
+          grep -q '^end_of_record$' lcov.info
+
+      - name: Extract coverage summary
+        if: steps.changes.outputs.contracts == 'true'
+        env:
+          COVERAGE_SOURCE_FILTER: ' src/'
+        run: |
+          bash .etherform/scripts/coverage/extract-summary.sh
+          # Reject parser drift instead of reporting 100% coverage of zero files.
+          test -s src-rows.txt
+          cat coverage-comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post coverage comment
+        if: steps.changes.outputs.contracts == 'true' && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2.9.4
+        with:
+          header: coverage
+          path: coverage-comment.md
 
   # Testnet deploy on MERGE TO MAIN only. The pinned etherform wrapper only supports
   # PR-triggered deploys (deploy-on-pr), so this calls its reusable leaf workflow
@@ -77,7 +167,7 @@ jobs:
   # Production-profile bytecode (optimizer on / cancun) fits and matches mainnet.
   deploy-testnet:
     name: Deploy Testnet (main)
-    needs: [cicd]
+    needs: [cicd, coverage]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: BreadchainCoop/etherform/.github/workflows/_deploy-testnet.yml@180aa91926a02ce2045f9a7e3ed08be9395ecfab
     with:

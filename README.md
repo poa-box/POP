@@ -590,11 +590,11 @@ Submodules pulled in by `forge install` / `git submodule`:
 |-----------|---------|
 | `lib/forge-std` | Foundry standard library (testing helpers). |
 | `lib/openzeppelin-contracts` | OpenZeppelin v5 standard contracts. |
-| `lib/openzeppelin-contracts-upgradeable` | OpenZeppelin v5.3 upgradeable contracts (`Initializable`, `OwnableUpgradeable`, `PausableUpgradeable`, `ReentrancyGuardUpgradeable`). |
+| `lib/openzeppelin-contracts-upgradeable` | OpenZeppelin v5.0.2 upgradeable contracts (`Initializable`, `OwnableUpgradeable`, `PausableUpgradeable`, `ReentrancyGuardUpgradeable`). |
 | `lib/hats-protocol` | Historical Hats interfaces used for ID compatibility and migration tests. |
 | `lib/solady` | Gas-optimized utility library (used selectively). |
 
-**Do not run `foundryup`** in CI environments; Foundry is pre-installed.
+Keep the installed local Foundry toolchain unchanged. CI installs the exact revision pinned in [ci.yml](.github/workflows/ci.yml).
 
 ---
 
@@ -607,7 +607,6 @@ forge test
 forge test -vvv                                  # CI verbosity
 forge test --match-contract HybridVoting         # single suite
 forge fmt                                        # MUST run before every commit/PR
-forge coverage                                   # coverage filtered to src/ in CI
 
 # Production profile (optimizer 200 runs, EVM = cancun, ~37% smaller bytecode)
 FOUNDRY_PROFILE=production forge build
@@ -615,6 +614,8 @@ FOUNDRY_PROFILE=production forge build
 # Contract size check — PaymasterHub runs close to the EIP-170 limit
 FOUNDRY_PROFILE=production forge build --sizes
 ```
+
+Coverage uses the compiler adapter documented in [script/ci/README.md](script/ci/README.md). It retains unoptimized viaIR compilation and produces a source-only summary in CI.
 
 **Why is the optimizer OFF by default?** From [`foundry.toml`](foundry.toml):
 

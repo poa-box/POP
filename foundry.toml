@@ -2,6 +2,8 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+# Keep clean builds on the compiler used for the verified mainnet deployments.
+solc = "0.8.33"
 via_ir = true
 # Optimizer OFF: Solidity IR bug with vm.roll() in tests (issues #4934, #1373, #8102)
 # For production: FOUNDRY_PROFILE=production to enable optimizer (37% smaller contracts)
