@@ -8,7 +8,7 @@
 [![Foundry](https://img.shields.io/badge/Built%20with-Foundry-yellow)](https://getfoundry.sh)
 [![Slither](https://img.shields.io/badge/Slither-high--severity%20enforced-success)](slither.config.json)
 
-POP is the contract layer for **Poa**, a no-code DAO builder for community- and worker-owned organizations. Members earn governance through contribution, not capital: every approved task mints non-transferable participation tokens to the worker who did the work. Decisions happen on-chain across multiple weighted voting classes, role assignments use [Hats Protocol](https://hatsprotocol.xyz), members join by peer vouch or by a zero-knowledge proof of email, and gas is sponsored via a multi-tenant ERC-4337 paymaster with a built-in solidarity fund.
+POP is the contract layer for **Poa**, a no-code DAO builder for community- and worker-owned organizations. Members earn governance through contribution, not capital: every approved task mints non-transferable participation tokens to the worker who did the work. Decisions happen on-chain across multiple weighted voting classes, roles, groups and permissions use per-org `MembershipAuthority` contracts, members join by peer vouch or by a zero-knowledge proof of email, and gas is sponsored via a multi-tenant ERC-4337 paymaster with a built-in solidarity fund.
 
 This repository is the Solidity protocol: ~21K LOC across `src/`, 50+ test suites, mainnet on Arbitrum One and Gnosis (plus the cash-out relay on Base). If you're new here, start with [`docs/POP_OVERVIEW.md`](docs/POP_OVERVIEW.md) for the protocol philosophy, then come back here for the technical map.
 
@@ -25,7 +25,7 @@ This repository is the Solidity protocol: ~21K LOC across `src/`, 50+ test suite
 7. [Role Invitations via ZK Email](#role-invitations-via-zk-email)
 8. [Upgradeability (SwitchableBeacon)](#upgradeability-switchablebeacon)
 9. [Storage Model (ERC-7201)](#storage-model-erc-7201)
-10. [Access Control (Hats Protocol)](#access-control-hats-protocol)
+10. [Access Control](#access-control)
 11. [Account Abstraction (ERC-4337)](#account-abstraction-erc-4337)
 12. [Cash-Out (ZKP2P Off-Ramp)](#cash-out-zkp2p-off-ramp)
 13. [Cross-Chain (Hyperlane)](#cross-chain-hyperlane)
@@ -80,7 +80,7 @@ The canonical, current set of protocol-layer addresses for each chain lives in [
 
 Always treat `script/config/infrastructure.json` as the source of truth. This table can drift between releases.
 
-**Per-module implementation versions** (which `ImplementationRegistry` version string each beacon currently points at, on both mainnets) are tracked in [`docs/audit/AUDIT_STATUS.md`](docs/audit/AUDIT_STATUS.md). Read that file before assuming a deployment is stale — and always diff against a `FOUNDRY_PROFILE=production` build, since the default profile has the optimizer off and produces roughly twice the bytecode.
+**Wave G implementation versions** and verification are recorded in [`script/accessv2/WAVE-G.md`](script/accessv2/WAVE-G.md). [`docs/audit/AUDIT_STATUS.md`](docs/audit/AUDIT_STATUS.md) records the earlier July audit and its finding dispositions; its deployment table is historical. Always compare live bytecode against a `FOUNDRY_PROFILE=production` build, since the default profile has the optimizer off and produces different bytecode.
 
 ---
 
@@ -90,7 +90,7 @@ Always treat `script/config/infrastructure.json` as the source of truth. This ta
 - **One member, one voice (when it matters).** `DirectDemocracyVoting` enforces 100 voting points per eligible member. Wealth cannot tilt the outcome.
 - **Multiple stakeholders, proportional voice.** `HybridVoting` composes weighted classes (e.g., 50% direct democracy, 50% token-weighted with optional quadratic) so organizations can balance constituencies.
 - **Collective infrastructure, individual autonomy.** Orgs share an upgrade beacon, an account registry, and a paymaster with a solidarity fund, while each org governs itself and can pin to a specific implementation at any time.
-- **Joining should not require crypto.** A member joins by peer vouch or by a zero-knowledge proof of email — register a passkey, get vouched for or prove an allowlisted email, receive your role hats, and start working, without ever holding ETH or a seed phrase.
+- **Joining should not require crypto.** A member joins by peer vouch or by a zero-knowledge proof of email — register a passkey, get vouched for or prove an allowlisted email, receive your role memberships, and start working, without ever holding ETH or a seed phrase.
 - **Transparency by default.** Proposals, votes, tasks, payments and role assignments are all on-chain. The subgraph turns those events into a queryable history.
 
 Read [`docs/POP_OVERVIEW.md`](docs/POP_OVERVIEW.md) for the long version.
@@ -124,7 +124,7 @@ flowchart TD
             DirectDemocracyVoting
             HybridVoting
             Executor
-            HatsTree["Hats Tree"]
+            MembershipAuthority
         end
         subgraph Access
             QuickJoin
@@ -160,7 +160,7 @@ flowchart TD
 
 | Contract | Path | Purpose |
 |----------|------|---------|
-| `OrgDeployer` | [`src/OrgDeployer.sol`](src/OrgDeployer.sol) | Atomic full-org deployment in one transaction (~22.5M gas). Also seeds the org's paymaster rules and budgets and bootstraps deploy-time TaskManager permissions. |
+| `OrgDeployer` | [`src/OrgDeployer.sol`](src/OrgDeployer.sol) | Atomic full-org deployment in one transaction (~22.5M gas). Also configures paymaster target types and budgets and seeds deploy-time authority permissions. |
 | `GovernanceFactory` | [`src/factories/GovernanceFactory.sol`](src/factories/GovernanceFactory.sol) | Deploys `Executor`, `HybridVoting` and `DirectDemocracyVoting`. |
 | `AccessFactory` | [`src/factories/AccessFactory.sol`](src/factories/AccessFactory.sol) | Deploys the org's `MembershipAuthority` (born initialized from the deploy params), `QuickJoin` and `ParticipationToken`. |
 | `ModulesFactory` | [`src/factories/ModulesFactory.sol`](src/factories/ModulesFactory.sol) | Deploys `TaskManager`, `PaymentManager`, and optionally `EducationHub` and `ZkEmailInvites`. |
@@ -175,12 +175,12 @@ flowchart TD
 | `ParticipationToken` | [`src/ParticipationToken.sol`](src/ParticipationToken.sol) | Non-transferable ERC20Votes minted by `TaskManager`/`EducationHub`. |
 | `TaskManager` | [`src/TaskManager.sol`](src/TaskManager.sol) | Project/task/application lifecycle with stablecoin bounties, folders, deadlines and an 8-flag permission bitmask. See [Task Management](#task-management). |
 | `EducationHub` | [`src/EducationHub.sol`](src/EducationHub.sol) | On-chain learning modules that mint participation tokens on completion. |
-| `QuickJoin` | [`src/QuickJoin.sol`](src/QuickJoin.sol) | Username registration + member-hat minting in a single call; also the self-service `claimHats` path. |
-| `ZkEmailInvites` | [`src/ZkEmailInvites.sol`](src/ZkEmailInvites.sol) | Claim role hats by proving control of an allowlisted email address or domain in zero knowledge. See [Role Invitations](#role-invitations-via-zk-email). |
+| `QuickJoin` | [`src/QuickJoin.sol`](src/QuickJoin.sol) | Username registration and enrollment in authority-configured `QJ_AUTOJOIN` subjects; caller-selected legacy claim functions are removed. |
+| `ZkEmailInvites` | [`src/ZkEmailInvites.sol`](src/ZkEmailInvites.sol) | Claim role memberships by proving control of an allowlisted email address or domain in zero knowledge. See [Role Invitations](#role-invitations-via-zk-email). |
 | `PaymentManager` | [`src/PaymentManager.sol`](src/PaymentManager.sol) | Merkle-distribution treasury claims proportional to participation. |
 | `MembershipAuthority` | [`src/MembershipAuthority.sol`](src/MembershipAuthority.sol) | **Access v2** — the org's single source of truth for membership, eligibility and permissions. Subjects (ADMIN / roles / groups) replace the Hats tree; deployed for every new org. |
-| `EligibilityModule` | [`src/EligibilityModule.sol`](src/EligibilityModule.sol) | *Legacy orgs only* — Hats eligibility module: hierarchy rules, peer vouching, and email-verified eligibility. All writes are `superAdmin`-only (the org `Executor`). New orgs do not deploy it. |
-| `ToggleModule` | [`src/ToggleModule.sol`](src/ToggleModule.sol) | *Legacy orgs only* — Hats toggle module; lets governance enable or disable a hat without revoking it. New orgs do not deploy it. |
+| `EligibilityModule` | [`src/EligibilityModule.sol`](src/EligibilityModule.sol) | *Historical compatibility only* — legacy eligibility state and migration support. Active modules authorize through MembershipAuthority; new orgs do not deploy it. |
+| `ToggleModule` | [`src/ToggleModule.sol`](src/ToggleModule.sol) | *Historical compatibility only* — legacy Hats toggle state. New orgs do not deploy it. |
 
 ---
 
@@ -190,8 +190,8 @@ Beyond the headline contracts, the source tree contains:
 
 - **[`src/libs/`](src/libs)** holds shared libraries.
   - `HybridVotingCore.sol` / `HybridVotingConfig.sol` / `HybridVotingProposals.sol`: these three libraries **share a single ERC-7201 namespace** (`keccak256("poa.hybridvoting.v2.storage")`). When you change one, you must keep all three in sync.
-  - `HatManager.sol`: batch operations over Hats (`hasAnyHat`, `setHatInArray`).
-  - `RoleResolver.sol`: resolves an org-config role index to a minted hat ID; reverts `UnregisteredRole` rather than silently resolving to hat 0.
+  - `AccessV2Ids.sol` / `AccessV2PermKeys.sol` / `AccessV2Types.sol`: subject identity, semantic permission keys and authority types. The retired Hats helper lives only in `test/mocks/LegacyHatManager.sol`.
+  - `RoleResolver.sol`: resolves org-config role bitmaps against authority subject IDs; reverts `UnregisteredRole` for an invalid index.
   - `TaskPerm.sol`: the 8-flag `uint8` task-permission bitmask (see [Task Management](#task-management)).
   - `ValidationLib.sol`: `requireNonZeroAddress`, `requireValidCap`, `MAX_PAYOUT` and friends; use these at boundaries.
   - `VotingMath.sol` / `BudgetLib.sol`: quadratic/weighted vote math and project budget accounting, factored out of the voting contracts and `TaskManager`.
@@ -220,7 +220,7 @@ Two additional root-level contracts are worth knowing about:
 
 ### Permission model
 
-Access is a `uint8` bitmask attached to a hat, defined in [`src/libs/TaskPerm.sol`](src/libs/TaskPerm.sol). All eight bits are now allocated — the mask is **saturated**, and a ninth flag would be a `Layout`-breaking change plus a subgraph migration.
+Task permissions use the eight flags in [`src/libs/TaskPerm.sol`](src/libs/TaskPerm.sol), stored on authority subjects under `AccessV2PermKeys.TM_PERMS`. TaskManager consumes a `uint8` mask, so all eight bits are allocated.
 
 | Bit | Flag | Grants |
 |-----|------|--------|
@@ -233,13 +233,14 @@ Access is a `uint8` bitmask attached to a hat, defined in [`src/libs/TaskPerm.so
 | `1 << 6` | `EDIT_META` | Edit a task's title/metadata *after* it has been claimed or submitted |
 | `1 << 7` | `EDIT_FULL` | Edit a task's payout and bounty (and metadata) post-claim; strict superset of `EDIT_META` |
 
-Resolution rules that bite in practice:
+Resolution rules:
 
-- `_permMask(user, projectId)` ORs, for every permission hat a user wears, the **per-project** mask if it is non-zero, otherwise the hat's **global** mask. A per-project override **replaces** the global mask for that hat on that project — it does not merge. A global-only grant is therefore silently inert on any project that sets its own mask for the same hat.
-- The org's `Executor` and a project's managers pass every `_checkPerm` gate — **except** `BUDGET`, which has no project-manager bypass. Budget editors must hold the hat explicitly.
-- **Organizer hats** are a separate array from the permission mask entirely: only the executor or an organizer-hat wearer may publish the folder tree. Creator hats are widely distributed, so silent reparenting of the whole tree was deliberately kept out of `CREATE`.
+- TaskManager queries `MembershipAuthority.hasPerm(user, TM_PERMS, projectId + 1)`. Context zero is global; project zero uses context one.
+- An explicit project row replaces that subject's global row, including an explicit zero mask. `INHERIT_GLOBAL_BIT` opts into combining both. Effective masks are ORed across the user's active subjects.
+- The org's `Executor` and project managers pass `_checkPerm` gates. Budget changes allow the Executor or an authority `BUDGET` grant, without a project-manager bypass.
+- Folder changes require the Executor or active membership in a configured organizer subject; the `CREATE` bit alone does not grant that ability.
 
-Global masks can be granted at deploy time — `OrgDeployer.DeploymentParams.taskManagerPerms` maps role indices to masks and calls the deployer-only `bootstrapGlobalPerms(hatIds, masks)` inside the atomic deploy, emitting the same `RolePermSet` event a governance-time `setConfig(ROLE_PERM, …)` would.
+`OrgDeployer.DeploymentParams.taskManagerPerms` and bootstrap project config seed these authority rows during atomic deployment. Later changes use authority permissions. Legacy TaskManager permission setters are removed, and runtime project creation requires empty retired permission arrays.
 
 ### Lifecycle
 
@@ -272,14 +273,14 @@ Because `cancelTask` only accepts `UNCLAIMED` tasks, the documented lever for an
 
 ### Folders and batch creation
 
-- `createTasksBatch(projectId, CreateTaskInput[])` creates N tasks in one transaction, checking `CREATE` once for the whole batch (one Hats `balanceOfBatch` instead of N). All-or-nothing; empty input reverts `EmptyBatch`.
+- `createTasksBatch(projectId, CreateTaskInput[])` creates N tasks in one transaction, checking `CREATE` once for the whole batch through the authority. All-or-nothing; empty input reverts `EmptyBatch`.
 - Project **folders** live off-chain as IPFS JSON; only `bytes32 foldersRoot` is on-chain. `setFolders(expectedCurrentRoot, newRoot)` is compare-and-swap guarded and reverts `FoldersRootStale` if another organizer published first. `bytes32(0)` means "no tree" and must not be resolved against IPFS. The normative off-chain schema, CIDv0↔`bytes32` encoding, pinning expectations and CAS-retry semantics are specified in [`docs/TASK_MANAGER_FOLDERS.md`](docs/TASK_MANAGER_FOLDERS.md).
 
 ### Upgrade coordination
 
 TaskManager has shipped `v2` through `v7` since the last README refresh (`v3` was skipped — its CREATE2 slot was already occupied on Gnosis). Two consequences worth internalizing before touching this contract:
 
-- Appending deadline parameters **changed four external selectors** (`createTask`, `createTasksBatch`, `createAndAssignTask`, `updateTask`). Paymaster rules are keyed by `(target, selector)`, so every sponsored selector change needs a matching `setRulesBatch` for orgs that already exist — `OrgDeployer`'s default rule set only applies to *newly deployed* orgs. See `script/fixes/` for the retroactive governance batches.
+- Changing a sponsored function signature also changes its selector. Update [`DefaultGlobalRules.sol`](script/helpers/DefaultGlobalRules.sol) and the protocol global rulebook; Mirror-mode orgs follow it, while Static-mode orgs adopt the change through governance.
 - Adding a permission bit to a live mask system is a silent-grant hazard: any hat previously granted a mask with that bit set gains the new power on upgrade. `script/audit/AuditTaskPermBit5.s.sol` is the read-only precedent for auditing that across live orgs before broadcasting.
 
 ---
@@ -294,8 +295,8 @@ sequenceDiagram
     participant B as Browser prover
     participant Z as ZkEmailInvites
     participant D as PoaDKIMRegistry
-    participant E as Executor / EligibilityModule
-    U->>B: Send/forward an email; paste the raw .eml
+    participant E as Executor / MembershipAuthority
+    U->>B: Send/forward an email, paste the raw .eml
     B->>B: Generate Groth16 proof (domain or specific-address circuit)
     B->>Z: claimRoleByDomain / claimRoleByEmail (proof, hatIds, merkleProof)
     Z->>Z: Verify Groth16 proof
@@ -316,11 +317,11 @@ sequenceDiagram
 | The email was really signed by the claimed domain | Groth16 verifier + `PoaDKIMRegistry.isKeyHashValid` | Forged sender |
 | The domain/address is allowlisted for those hats | Merkle proof against the active root | Unauthorized role escalation |
 | The claim is fresh | Single-use nullifier | Proof replay |
-| The requested hats are not default-open | `_rejectOpenClaimHats` (shared with `QuickJoin`) | Claiming a privileged hat that anyone is eligible for |
+| The requested hats are not default-open | `ZkEmailInvites._rejectOpenClaimHats` through the authority compatibility interface | Claiming a privileged hat that anyone is eligible for |
 
 `PoaDKIMRegistry` is the trusted root of "which DKIM key is valid for which domain". It is owner-gated, non-upgradeable by design (replace and repoint via governance), and every `(domainHash, keyHash)` entry carries an expiry so a key rotated out of DNS can be given a hard cut-off rather than staying valid forever. Note that entries must be keyed by the circuit's **Poseidon** domain commitment — the legacy `setKeyForDomain`/`domainHashOf` helpers compute keccak256 and will never match a real claim.
 
-**Eligibility.** A successful claim calls `EligibilityModule.setEmailVerified`, which is the *third* eligibility path alongside hierarchy rules and peer vouching. It forces eligibility only when the wearer has no explicit per-wearer rule, so an explicit governance kick always beats email verification. `ZkEmailInvites` is permitted to call it because the org's `Executor` lists it as an authorized hat minter — no extra per-org configuration.
+**Eligibility.** The Executor points its retained Hats-compatible interface at `MembershipAuthority`. ZkEmailInvites resolves subjects through that interface, records email verification on the authority and requests membership through the Executor. Explicit rules and bans still govern eligibility. The email module must be registered and authorized; the org deployer performs that wiring.
 
 **Onboarding in one transaction.** `registerAndClaimByDomainWithPasskey` / `registerAndClaimByEmailWithPasskey` combine passkey account creation, username registration in `UniversalAccountRegistry`, and the role claim into a single sponsored UserOp. `PaymasterHub` covers it under subject type `0x05` (`SUBJECT_TYPE_CLAIM`), which deliberately performs *no* validation-time eligibility pre-check — the claim contract itself is the gate — and is bounded instead by a per-module budget that `OrgDeployer` seeds at deploy.
 
@@ -404,7 +405,7 @@ CI enforces upgrade safety. The repository tracks three storage-layout snapshots
 - [`upgrades/current/`](upgrades/current): generated from the working tree.
 - [`upgrades/previous/`](upgrades/previous): historical reference.
 
-The CI workflow runs [`script/upgrades/ValidateUpgrade.s.sol`](script/upgrades/ValidateUpgrade.s.sol) against `upgrades/baseline/` and fails the build if a storage-breaking change is detected. `test/UpgradeSafety.t.sol` complements it with end-to-end tests that seed state, perform a real beacon upgrade, and assert the state survived. **Do not edit `upgrades/` by hand**; it is auto-generated. If your change requires a baseline update, surface it in the PR description so reviewers can verify the storage diff is intentional.
+`test/UpgradeSafety.t.sol` seeds state, performs a beacon upgrade and asserts the state survived. The reusable CI workflow's automated storage-layout gate is **not enabled**: `.github/upgrades.json` is absent. Wave G therefore uses the recorded layout comparison and fork state-survival checks. **Do not edit `upgrades/` by hand**; it is generated. Enabling the CI gate and refreshing its baselines is a separate follow-up.
 
 > **Known stale entry.** All three snapshot directories still contain `HatsTreeSetup.sol`, whose
 > source was deleted with the v1 access rails. It is inert today — the upgrade-safety job only
@@ -418,42 +419,29 @@ The CI workflow runs [`script/upgrades/ValidateUpgrade.s.sol`](script/upgrades/V
 
 ## Access Control
 
-POP does not use OpenZeppelin's `AccessControl`.
+Every active org has one [`MembershipAuthority`](src/MembershipAuthority.sol) for
+roles, groups, eligibility and semantic permissions. Membership requires acceptance
+and eligibility; explicit rules take precedence over attestation and defaults, and
+bans are supreme. Governance controls the authority, with scoped delegation and
+review delays for configured managers. POP does not use OpenZeppelin's `AccessControl`.
 
-**New orgs (Access v2)** own a [`MembershipAuthority`](src/MembershipAuthority.sol): membership,
-eligibility and permissions live in one per-org contract as *subjects* — an `ADMIN` subject held by
-the `Executor`, one subject per role, one per group — with no Hats tree at all. Subject ids are
-derived from the authority's address (`uint160(authority) << 64 | seq`), so they are always below
-the Hats id floor of 2^224. Chain-wide readers (`PaymasterHub`, `OrgRegistry`) resolve any id
-through the protocol-owned [`AuthorityRouter`](src/AuthorityRouter.sol), which self-routes v2 ids to
-their authority and passes legacy Hats ids straight through. See
-[`docs/ORG_DEPLOYER.md`](docs/ORG_DEPLOYER.md).
+New orgs deploy authority-native. Subject IDs encode the authority address
+(`uint160(authority) << 64 | seq`) and are below the legacy Hats ID floor of 2^224.
+The chain-wide [`AuthorityRouter`](src/AuthorityRouter.sol) self-routes native IDs
+and routes adopted legacy IDs through their org binding. Unbound legacy IDs remain
+readable through Hats for continuity; that fallback does not authorize active modules.
 
-**Legacy orgs** still run on [Hats Protocol](https://docs.hatsprotocol.xyz) until they migrate
-([`script/accessv2/MIGRATION-RUNBOOK.md`](script/accessv2/MIGRATION-RUNBOOK.md)). The rest of this section describes that path. Each such
-org owns its own hat tree:
+Kansas Blockchain/KUBI, Decentral Park, Poa and Test6 retain their adopted subject
+IDs and pre-upgrade history. Wave G retired the six unmigrated orgs, whose module
+operations no longer have a legacy authorization path. Historical Hats storage,
+read getters and subgraph sources remain intact. See
+[`WAVE-G.md`](script/accessv2/WAVE-G.md) for the completed release and
+[`MIGRATION-RUNBOOK.md`](script/accessv2/MIGRATION-RUNBOOK.md) for the historical cutover.
 
-```mermaid
-flowchart TD
-    TopHat["Top Hat (organization root, held by Executor)"]
-    TopHat --> Member
-    TopHat --> Worker
-    TopHat --> Reviewer
-```
-
-Permission checks should go through [`src/libs/HatManager.sol`](src/libs/HatManager.sol) helpers like `hasAnyHat()` rather than calling `IHats.isWearerOfHat()` directly; `HatManager` handles batched, eligibility-aware lookups. Role assignments (which hats unlock which abilities, e.g. `taskCreatorRoles`, `ddVotingRoles`, `tokenApproverRoles`) are configured per-org in the deployment JSON; see [`script/config/org-config-example.json`](script/config/org-config-example.json).
-
-**Who may wear a hat** is decided by the org's [`EligibilityModule`](src/EligibilityModule.sol), which combines three independent paths:
-
-1. **Hierarchy rules** — explicit per-wearer and per-hat default eligibility, written by governance.
-2. **Peer vouching** — members vouch for a candidate, subject to per-hat thresholds, daily vouch caps, and an optional `combineWithHierarchy` flag.
-3. **Email verification** — set by `ZkEmailInvites` after a successful ZK Email claim; only takes effect when no explicit per-wearer rule exists, so a governance kick always wins.
-
-Every state-mutating function on `EligibilityModule` is `onlySuperAdmin`, and the superAdmin is the org's `Executor`. The older `onlyHatAdmin` path, which let any Hats-hierarchical parent mutate eligibility directly, has been removed: a parent-hat holder could otherwise bypass the vouch gate or force-revoke a wearer. The one exception is `setEmailVerified`, callable by any contract the `Executor` has authorized as a hat minter. Self-service member functions (`vouchFor`, `revokeVouch`, `claimVouchedHat`, `applyForRole`, `withdrawApplication`) remain open to any caller.
-
-**Default-open hats cannot be self-claimed.** Both `QuickJoin.claimHatsWithUser` and `ZkEmailInvites` probe each requested hat and revert `HatOpenlyClaimable(hatId)` if anyone would be eligible for it. Privileged roles ship vouch-gated (`defaults.eligible = false`) in every config template.
-
-On Sepolia, POP integrates with the Hats Protocol deployment at `0x3bc1A0Ad72417f2d411118085256fC53CBdDd137`. For other networks, consult the official Hats Protocol deployments list.
+QuickJoin enrolls only authority-configured `QJ_AUTOJOIN` subjects. Authority
+self-service membership, vouching and the registered ZkEmailInvites module provide
+the other onboarding paths. Never restore caller-selected legacy QuickJoin claims
+or use Hats membership as a fallback for module permissions.
 
 ---
 
@@ -470,7 +458,7 @@ POP ships a full passkey-first account abstraction stack so non-crypto-native us
 
 **Recovery.** Account recovery is M-of-N: `recoveryThreshold` distinct registered guardians must approve a staged key change, after a time delay, with cancel retained. It is **disabled by default** — a fresh account has no guardians and a threshold of zero until the owner configures a set, and a single guardian can never stage a recovery alone. The legacy single-`guardian` storage field is inert and retained only for layout compatibility. Because init calldata no longer embeds guardian or delay parameters, `getAddress` is pure in `(credentialId, x, y, salt)` — **frontends must never cache `getAddress` results across releases.**
 
-**Sponsorship rules.** `PaymasterHub` authorizes a UserOp against a `(target, selector)` rule plus a per-subject spending budget, where a subject is an account, a hat, a Poa-onboarding flow, an org deploy, or a claim contract. `OrgDeployer` seeds a new org with **44 base rules** — 17 of them `TaskManager` selectors, plus 4 if `EducationHub` is enabled and 4 more if `ZkEmailInvites` is deployed — along with a per-role budget for each minted role hat. These defaults are **forward-only**: already-deployed orgs keep the rules they were bootstrapped with, so a selector-changing upgrade requires a per-org `setRulesBatch` governance batch (see `script/fixes/`).
+**Sponsorship rules.** `PaymasterHub` resolves per-org local rules first, then the module-type global rulebook for Mirror-mode orgs. [`DefaultGlobalRules.sol`](script/helpers/DefaultGlobalRules.sol) defines the 56 current defaults; Wave G disables eleven retired QuickJoin/EligibilityModule selectors. `OrgDeployer` registers target types and per-subject budgets rather than copying a hardcoded selector list into each org. Protocol rule updates use `setGlobalRulesBatch`; Static-mode orgs adopt changes through governance.
 
 **Solidarity fund.** `PaymasterHub` collects a 1% fee (`feePercentageBps = 100`) on sponsored transactions from paying organizations and routes it into a shared solidarity balance. New orgs receive a 90-day grace allowance capped at `0.01 ETH` of spend (roughly 3,000 transactions on a cheap L2), with a `0.003 ETH` minimum deposit thereafter, and progressive matching tiers subsidize early growth (2× match at one minimum deposit, tapering to none at five). Solidarity draws are *reserved at validation time and reconciled in `postOp`*, so a bundle of same-org operations cannot collectively exceed the allowance. The mechanism lives across [`src/libs/PaymasterGraceLib.sol`](src/libs/PaymasterGraceLib.sol), [`src/libs/PaymasterFinanceLib.sol`](src/libs/PaymasterFinanceLib.sol) and the `SolidarityFund` storage in [`src/PaymasterHub.sol`](src/PaymasterHub.sol). See [`docs/PAYMASTER_HUB.md`](docs/PAYMASTER_HUB.md) for the full economics.
 
@@ -603,7 +591,7 @@ Submodules pulled in by `forge install` / `git submodule`:
 | `lib/forge-std` | Foundry standard library (testing helpers). |
 | `lib/openzeppelin-contracts` | OpenZeppelin v5 standard contracts. |
 | `lib/openzeppelin-contracts-upgradeable` | OpenZeppelin v5.3 upgradeable contracts (`Initializable`, `OwnableUpgradeable`, `PausableUpgradeable`, `ReentrancyGuardUpgradeable`). |
-| `lib/hats-protocol` | Hats Protocol interfaces; the foundation for POP role-based access. |
+| `lib/hats-protocol` | Historical Hats interfaces used for ID compatibility and migration tests. |
 | `lib/solady` | Gas-optimized utility library (used selectively). |
 
 **Do not run `foundryup`** in CI environments; Foundry is pre-installed.
@@ -683,13 +671,13 @@ For contract verification, set `ETHERSCAN_API_KEY` and pass `--verify --ethersca
 - **Reentrancy.** All value-transferring externals use `ReentrancyGuardUpgradeable` (or an inline `_lock` flag for legacy contracts). Both voting contracts additionally set the proposal's `executed` flag up-front as an in-flight lock — and reset it on failed execution, so a transient revert stays retryable.
 - **Initialization.** Every upgradeable implementation constructor calls `_disableInitializers()`. Initialization happens through the proxy via `initialize(...)`.
 - **Boundary validation.** Use [`src/libs/ValidationLib.sol`](src/libs/ValidationLib.sol) (`requireNonZeroAddress`, `requireValidCap`, …) at all external entrypoints.
-- **Permissions via Hats.** Always go through `HatManager.hasAnyHat()` rather than raw `IHats.isWearerOfHat()`. `Executor`'s `allowedCaller` is the only contract permitted to invoke `execute()`, and rotating it is two-step (`proposeCaller` → timelock → `acceptCaller`, with `cancelCallerChange` as the escape hatch).
-- **`Executor` may target itself, deliberately.** Governance proposals must be able to call `setConfig`/`setClasses`/quorum changes on the voting contract that submitted them — every org's genesis configuration proposal does exactly this. A `TargetSelf` guard was implemented during the audit and then **reverted** because it bricked governance self-amendment. Do not re-add it. Self-administration of the `Executor` itself still reverts `TargetSelf`.
+- **Permissions via MembershipAuthority.** Check active membership and semantic permissions through the org authority. Never add a legacy Hats fallback. `Executor.allowedCaller` is the only contract permitted to invoke `execute()`; ownership is renounced after setup.
+- **`Executor` may target itself, deliberately.** Governance proposals must be able to call `setConfig`/`setClasses`/quorum changes on the voting contract that submitted them — every org's genesis configuration proposal does exactly this. A `TargetSelf` guard was implemented during the audit and then **reverted** because it bricked governance self-amendment. Do not re-add it. Executor self-targeting permits only `setHatMinterAuthorization` and `setMembershipAuthority`; other self-admin selectors revert `TargetSelf`.
 - **Renounced `Executor` ownership.** After deployment, the `Executor`'s `OwnableUpgradeable` ownership is renounced; only the configured voting contract can call it. This is intentional. Never re-introduce a privileged owner path. As a consequence, `Executor.pause`/`sweep` are reachable only during the deploy window.
-- **Self-claim guards.** `QuickJoin` and `ZkEmailInvites` both refuse to mint a hat that anyone is already eligible for (`HatOpenlyClaimable`), so a default-open configuration cannot be used to grab a privileged role.
+- **Onboarding guards.** QuickJoin only enrolls configured `QJ_AUTOJOIN` subjects. ZkEmailInvites rejects default-open claim subjects and requires a valid proof and active allowlist; authority eligibility and bans remain authoritative.
 - **Bounded loops.** `MAX_POLL_HATS` (100) caps per-proposal hat arrays in both voting contracts; `Executor` caps batches at `MAX_CALLS_PER_BATCH` (20) and mints at `MAX_HATS_PER_MINT` (20).
 - **Slither in CI.** The pipeline runs Slither and fails on `high` severity. The `arbitrary-send-eth` detector is excluded (see [`slither.config.json`](slither.config.json)) because POP intentionally forwards ETH from `Executor`/`PaymentManager` calls authorized by governance. `filter_paths` additionally excludes `lib/`, `test/`, `script/`, `upgrades/`, the vendored ZK circuits in `src/zkemail/vendor/`, and `src/cashout/CashOutRelay.sol`.
-- **Upgrade safety in CI.** Storage-breaking changes against [`upgrades/baseline/`](upgrades/baseline) fail the build via [`script/upgrades/ValidateUpgrade.s.sol`](script/upgrades/ValidateUpgrade.s.sol).
+- **Upgrade safety.** Run storage-layout comparisons and state-survival tests. The automated CI layout gate is not yet enabled; see [Storage Model](#storage-model-erc-7201).
 
 ### The 2026-07 audit
 
@@ -720,7 +708,7 @@ Contributions are very welcome. **Read [`CONTRIBUTING.md`](CONTRIBUTING.md) befo
 - Custom errors, never `require` strings.
 - ERC-7201 namespaced storage; **no `__gap`** arrays.
 - `_disableInitializers()` in every upgradeable implementation constructor.
-- No OpenZeppelin `AccessControl`; all roles are Hats.
+- No OpenZeppelin `AccessControl`; roles and permissions live in MembershipAuthority.
 - Do not edit anything under [`upgrades/`](upgrades); it is auto-generated.
 - Match existing pragma when modifying a file. Pragmas across `src/` span `^0.8.17`–`^0.8.30`; do not bump without testing every dependent.
 - **Emit an event for every state change the subgraph might index** — including inside `initialize()` and every setter, not just the loud mutations.

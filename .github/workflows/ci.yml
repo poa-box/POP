@@ -19,14 +19,30 @@ concurrency:
 
 jobs:
   cicd:
-    # Latest etherform (main @ 2026-07-24), SHA-pinned. The prior pin targeted a
-    # since-removed input interface (run-upgrade-safety/baseline-path/deploy-on-main/
-    # flatten-contracts) and failed to load at 0s repo-wide; this is the current interface.
+    # Keep the published workflow interface and checks pinned independently of setup.
     uses: BreadchainCoop/etherform/.github/workflows/_foundry-cicd.yml@180aa91926a02ce2045f9a7e3ed08be9395ecfab
     with:
+      # Upstream PR #58 fixes native foundryup execution in setup (toolchain v1.9.1).
+      # Only the setup/scripts checkout changes; workflow action pins stay unchanged.
+      # https://github.com/BreadchainCoop/etherform/pull/58
+      etherform-ref: '5e1256312be0d7964584651609acaf2c8de53d25'
+      # Match the toolchain used for local tests and the verified Wave G deployments.
+      foundry-version: 'nightly-dd0a687aa36ec731b6ea2cda2aa4f32e192814fa'
+
       # ── CI ──
       check-formatting: true
       test-verbosity: 'vvv'
+      # Preserve etherform's source defaults and also check changes to CI itself.
+      contract-paths: |
+        src/**
+        script/**
+        test/**
+        lib/**
+        foundry.toml
+        remappings.txt
+        .github/workflows/**
+        .github/actions/**
+        slither.config.json
 
       # ── Slither (fails on high; arbitrary-send-eth excluded via slither.config.json) ──
       run-slither: true
@@ -65,6 +81,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: BreadchainCoop/etherform/.github/workflows/_deploy-testnet.yml@180aa91926a02ce2045f9a7e3ed08be9395ecfab
     with:
+      # Use the same reviewed setup fix and exact Foundry build as CI above.
+      etherform-ref: '5e1256312be0d7964584651609acaf2c8de53d25'
+      foundry-version: 'nightly-dd0a687aa36ec731b6ea2cda2aa4f32e192814fa'
       deploy-script: 'script/deploy/DeployInfrastructure.s.sol:DeployInfrastructure'
       network-config-path: '.github/deploy-networks.json'
       indexing-wait: 90

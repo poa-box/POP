@@ -1,12 +1,19 @@
 # Access v2 Migration Runbook (Wave D)
 
+**Historical migration procedure; superseded for the live fleet.** Kansas Blockchain/KUBI,
+Decentral Park, Poa and Test6 completed cutover, and the authority-only Wave G deployment
+was verified on both chains on 2026-09-17. Do not repeat these migration broadcasts or
+the legacy rollback procedure against current production implementations. The six
+unmigrated Gnosis orgs are retired, not awaiting migration. See [Wave G deployment status
+and verification](WAVE-G.md) for current versions and the completed release record.
+
 Broadcast order for the Hats → MembershipAuthority cutover. Normative design: `ACCESS-V2-SPEC.md`
 §6 (in `.context/rolemanager/` during development). Every step below was **fork-rehearsed under
-`FOUNDRY_PROFILE=production`** on live Gnosis/Arbitrum state before this document was written; the
-per-proposal gas figures are measured, not estimated. Re-run the sims immediately before each
-broadcast — they assert against live state and fail loudly if anything drifted.
+`FOUNDRY_PROFILE=production`** on the pre-cutover Gnosis/Arbitrum state before this document was
+written; the per-proposal gas figures are measured, not estimated. The commands below preserve
+that historical procedure and its rehearsal requirements, not instructions to rerun it today.
 
-**Nothing in this runbook has been broadcast.** The superseded v1 RoleManager runbook and its
+The superseded v1 RoleManager runbook and its
 scripts (`script/rolemanager/`, never broadcast) were deleted in the 2026-08 script cleanup.
 
 ---
@@ -229,15 +236,18 @@ parity (Test6 56/56, DP 17/17, KUBI 73/73, Poa 25/25 at rehearsal), vouch parity
 probes (DD create+vote, TM perm, QuickJoin join chain, PT gate, hub sponsorship through router),
 and rollback byte-identity.
 
-## Rollback (§6 — restores legacy hats state; does not reproduce authority-era changes)
+## Historical rollback (§6 — unavailable after Wave G)
 
-Pause the authority, then ONE governance batch: module `setMembershipAuthority(0)` repoint-back ×8
-→ legacy hat toggle-ON (reverse of cutover) → router unbind (Executor-gated, same OrgRegistry
-path). The dual-path modules make repoint-back byte-identical to pre-migration — rehearsed in every
-sim (`ROLLBACK: DD legacy path byte-identical`). The authority-only cleanup wave (removing legacy
-code paths) ships only after the LAST org migrates and soaks.
+The former dual-path modules supported a governance batch that paused the authority,
+repointed modules with `setMembershipAuthority(0)`, restored the legacy hat toggle and
+unbound the router. Its pre-migration read parity was rehearsed in the original migration
+sims (`ROLLBACK: DD legacy path byte-identical`); it did not reproduce authority-era changes.
 
-## After all four orgs
+**Current authority-only implementations reject this zero-authority rollback.** Wave G
+removed legacy authorization after the four surviving orgs completed cutover. Any recovery
+now requires a separately reviewed procedure; this historical batch is not a recovery path.
+
+## Historical release sequence after all four orgs
 
 - Wave E: subgraph v2 + frontend v2 releases (subgraph BEFORE first cutover, frontend
   feature-detects per module).
@@ -254,7 +264,8 @@ code paths) ships only after the LAST org migrates and soaks.
   Preserve every org's indexed history, including survivors' pre-cutover events; frontend/CLI
   support requires a nonzero authority, router binding and completed cutover, without a
   history timestamp cutoff or name allowlist. poa-cli removes legacy functionality in this wave.
-  See [Wave G release procedure](WAVE-G.md).
+  Protocol cutover and Wave G broadcasts are complete on both chains; the separate CLI
+  release remained pending at verification. See [Wave G deployment status](WAVE-G.md).
 
 ## Access-v2 contract-surface notes (Wave D FIX-B)
 

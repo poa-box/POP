@@ -1256,4 +1256,3 @@ contract RehearsePoa is OrgCatalog {
         _rehearse(_poaSpec());
     }
 }
-
